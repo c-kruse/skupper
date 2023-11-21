@@ -20,7 +20,7 @@
 
 # Generated code
 /swagger
-/client/generated/libpod/
+# /client/generated/libpod/
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
