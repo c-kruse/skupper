@@ -9,7 +9,6 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -210,7 +209,7 @@ func installGateway(tarball string) error {
 	tarReader := tar.NewReader(tarStream)
 
 	// uncompress all files under temp directory
-	dir, err := ioutil.TempDir("", "gateway")
+	dir, err := os.MkdirTemp("", "gateway")
 	if err != nil {
 		return err
 	}
