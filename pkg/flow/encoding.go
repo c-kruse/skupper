@@ -66,7 +66,7 @@ func asHeartbeatMessage(msg *amqp.Message) HeartbeatRecord {
 	return result
 }
 
-func encodeHeartbeat(heartbeat *HeartbeatRecord) (*amqp.Message, error) {
+func EncodeHeartbeat(heartbeat *HeartbeatRecord) (*amqp.Message, error) {
 	var request amqp.Message
 	var properties amqp.MessageProperties
 	properties.To = RecordPrefix + heartbeat.Identity
@@ -85,7 +85,7 @@ func asFlushMessage(msg *amqp.Message) FlushRecord {
 	return result
 }
 
-func encodeFlush(fr *FlushRecord) (*amqp.Message, error) {
+func EncodeFlush(fr *FlushRecord) (*amqp.Message, error) {
 	var request amqp.Message
 	var properties amqp.MessageProperties
 	properties.To = fr.Address
@@ -95,7 +95,7 @@ func encodeFlush(fr *FlushRecord) (*amqp.Message, error) {
 	return &request, nil
 }
 
-func encodeSite(site *SiteRecord) (*amqp.Message, error) {
+func EncodeSite(site *SiteRecord) (*amqp.Message, error) {
 	var record []interface{}
 	var request amqp.Message
 	var properties amqp.MessageProperties
@@ -129,7 +129,7 @@ func encodeSite(site *SiteRecord) (*amqp.Message, error) {
 	return &request, nil
 }
 
-func encodeProcess(process *ProcessRecord) (*amqp.Message, error) {
+func EncodeProcess(process *ProcessRecord) (*amqp.Message, error) {
 	var record []interface{}
 	var request amqp.Message
 	var properties amqp.MessageProperties
@@ -171,7 +171,7 @@ func encodeProcess(process *ProcessRecord) (*amqp.Message, error) {
 	return &request, nil
 }
 
-func encodeHost(host *HostRecord) (*amqp.Message, error) {
+func EncodeHost(host *HostRecord) (*amqp.Message, error) {
 	var record []interface{}
 	var request amqp.Message
 	var properties amqp.MessageProperties
@@ -201,7 +201,7 @@ func encodeHost(host *HostRecord) (*amqp.Message, error) {
 	return &request, nil
 }
 
-func decode(msg *amqp.Message) []interface{} {
+func Decode(msg *amqp.Message) []interface{} {
 	var result []interface{}
 
 	source := strings.TrimPrefix(msg.Properties.To, RecordPrefix)

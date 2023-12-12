@@ -141,7 +141,7 @@ func TestRecordDecoding(t *testing.T) {
 		record = append(record, m)
 		msg.Value = record
 
-		records := decode(&msg)
+		records := Decode(&msg)
 		assert.Equal(t, len(records), 1)
 		for _, record := range records {
 			assert.Equal(t, reflect.TypeOf(record), s.stype)
@@ -322,7 +322,7 @@ func TestRecordEncoding(t *testing.T) {
 			assert.Equal(t, msg.ApplicationProperties["v"], uint32(version))
 			assert.Equal(t, msg.ApplicationProperties["address"], s.properties["Address"])
 
-			records := decode(msg)
+			records := Decode(msg)
 			assert.Equal(t, len(records), 1)
 			for _, record := range records {
 				beacon, ok := record.(BeaconRecord)
@@ -339,7 +339,7 @@ func TestRecordEncoding(t *testing.T) {
 			scenarioHeartbeat.Now = uint64(now)
 			scenarioHeartbeat.Identity = (s.properties["Identity"])
 
-			msg, err := encodeHeartbeat(scenarioHeartbeat)
+			msg, err := EncodeHeartbeat(scenarioHeartbeat)
 			assert.Assert(t, err)
 			assert.Equal(t, msg.Properties.Subject, s.subject)
 			assert.Equal(t, msg.Properties.To, s.to)
@@ -347,7 +347,7 @@ func TestRecordEncoding(t *testing.T) {
 			assert.Equal(t, msg.ApplicationProperties["now"], uint64(now))
 			assert.Equal(t, msg.ApplicationProperties["id"], s.properties["Identity"])
 
-			records := decode(msg)
+			records := Decode(msg)
 			assert.Equal(t, len(records), 1)
 			for _, record := range records {
 				heartbeat, ok := record.(HeartbeatRecord)
@@ -361,12 +361,12 @@ func TestRecordEncoding(t *testing.T) {
 			scenarioFlush.Address = s.to
 			scenarioFlush.Source = s.properties["ReplyTo"]
 
-			msg, err := encodeFlush(scenarioFlush)
+			msg, err := EncodeFlush(scenarioFlush)
 			assert.Assert(t, err)
 			assert.Equal(t, msg.Properties.Subject, s.subject)
 			assert.Equal(t, msg.Properties.To, s.to)
 
-			records := decode(msg)
+			records := Decode(msg)
 			assert.Equal(t, len(records), 1)
 		case reflect.TypeOf(SiteRecord{}):
 			scenarioSite := &SiteRecord{
@@ -383,7 +383,7 @@ func TestRecordEncoding(t *testing.T) {
 				scenarioSite.NameSpace = &v
 			}
 
-			msg, err := encodeSite(scenarioSite)
+			msg, err := EncodeSite(scenarioSite)
 			assert.Assert(t, err)
 			assert.Equal(t, msg.Properties.Subject, "RECORD")
 			sites, ok := msg.Value.([]interface{})
@@ -418,7 +418,7 @@ func TestRecordEncoding(t *testing.T) {
 				scenarioHost.Provider = &v
 			}
 
-			msg, err := encodeHost(scenarioHost)
+			msg, err := EncodeHost(scenarioHost)
 			assert.Assert(t, err)
 			assert.Equal(t, msg.Properties.Subject, "RECORD")
 			hosts, ok := msg.Value.([]interface{})
@@ -463,7 +463,7 @@ func TestRecordEncoding(t *testing.T) {
 				scenarioProcess.HostName = &v
 			}
 
-			msg, err := encodeProcess(scenarioProcess)
+			msg, err := EncodeProcess(scenarioProcess)
 			assert.Assert(t, err)
 			assert.Equal(t, msg.Properties.Subject, "RECORD")
 			processes, ok := msg.Value.([]interface{})

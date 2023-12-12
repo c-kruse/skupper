@@ -94,7 +94,7 @@ func (c *sender) _send() error {
 				}
 			}
 			if heartbeat, ok := update.(*HeartbeatRecord); ok {
-				msg, err := encodeHeartbeat(heartbeat)
+				msg, err := EncodeHeartbeat(heartbeat)
 				if err != nil {
 					event.Recordf(FlowControllerEvent, "Failed to encode message for flow controller: %s", err.Error())
 				} else {
@@ -102,7 +102,7 @@ func (c *sender) _send() error {
 				}
 			}
 			if fr, ok := update.(*FlushRecord); ok {
-				msg, err := encodeFlush(fr)
+				msg, err := EncodeFlush(fr)
 				if err != nil {
 					event.Recordf(FlowControllerEvent, "Failed to encode message for flow controller: %s", err.Error())
 				} else {
@@ -110,7 +110,7 @@ func (c *sender) _send() error {
 				}
 			}
 			if site, ok := update.(*SiteRecord); ok {
-				msg, err := encodeSite(site)
+				msg, err := EncodeSite(site)
 				if err != nil {
 					event.Recordf(FlowControllerEvent, "Failed to encode message for flow controller: %s", err.Error())
 				} else {
@@ -118,7 +118,7 @@ func (c *sender) _send() error {
 				}
 			}
 			if process, ok := update.(*ProcessRecord); ok {
-				msg, err := encodeProcess(process)
+				msg, err := EncodeProcess(process)
 				if err != nil {
 					event.Recordf(FlowControllerEvent, "Failed to encode message for flow controller: %s", err.Error())
 				} else {
@@ -126,7 +126,7 @@ func (c *sender) _send() error {
 				}
 			}
 			if host, ok := update.(*HostRecord); ok {
-				msg, err := encodeHost(host)
+				msg, err := EncodeHost(host)
 				if err != nil {
 					event.Recordf(FlowControllerEvent, "Failed to encode message for flow controller: %s", err.Error())
 				} else {
@@ -197,7 +197,7 @@ func (r *receiver) _receive() error {
 			return err
 		}
 		receiver.Accept(msg)
-		results := decode(msg)
+		results := Decode(msg)
 		r.incoming <- results
 	}
 	return nil
