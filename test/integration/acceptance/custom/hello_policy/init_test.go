@@ -4,8 +4,8 @@
 package hello_policy
 
 import (
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 )
 
 // Returns a test scenario that initializes skupper on the given context as interior,

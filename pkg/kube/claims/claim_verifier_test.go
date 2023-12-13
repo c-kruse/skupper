@@ -12,8 +12,8 @@ import (
 	"time"
 
 	routev1client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/event"
 	"gotest.tools/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

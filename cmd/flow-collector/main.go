@@ -22,16 +22,16 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/utils"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/config"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/utils"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/version"
 )
 
 // should this be in utils?

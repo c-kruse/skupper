@@ -7,13 +7,13 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/pkg/domain"
-	podman "github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/domain/podman/update"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/pkg/domain"
+	podman "github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/domain/podman/update"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"github.com/spf13/cobra"
 )
 

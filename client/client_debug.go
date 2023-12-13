@@ -17,8 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/client-go/kubernetes/scheme"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
 )
 
 func runCommand(name string, args ...string) ([]byte, error) {

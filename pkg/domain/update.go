@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 type UpdatePriority int

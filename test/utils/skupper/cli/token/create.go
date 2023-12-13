@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 	v1 "k8s.io/api/core/v1"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"

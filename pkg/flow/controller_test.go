@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"gotest.tools/assert"
 )
 

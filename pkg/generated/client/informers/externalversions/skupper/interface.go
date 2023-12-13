@@ -19,8 +19,8 @@ limitations under the License.
 package skupper
 
 import (
-	internalinterfaces "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions/internalinterfaces"
-	v1alpha1 "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions/skupper/v1alpha1"
+	internalinterfaces "github.com/c-kruse/skupper/pkg/generated/client/informers/externalversions/internalinterfaces"
+	v1alpha1 "github.com/c-kruse/skupper/pkg/generated/client/informers/externalversions/skupper/v1alpha1"
 )
 
 // Interface provides access to each of this group's versions.

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/utils/configs"
+	"github.com/c-kruse/skupper/pkg/utils/configs"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/skupperproject/skupper/pkg/images"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/pkg/images"
+	"github.com/c-kruse/skupper/pkg/version"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -27,11 +27,11 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/site"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/site"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 func (cli *VanClient) RouterUpdateVersion(ctx context.Context, hup bool) (bool, error) {

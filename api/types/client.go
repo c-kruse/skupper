@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/network"
+	"github.com/c-kruse/skupper/pkg/network"
 
 	corev1 "k8s.io/api/core/v1"
 )

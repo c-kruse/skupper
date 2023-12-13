@@ -8,11 +8,11 @@ import (
 	"log"
 	"regexp"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	clientv1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	clientv1 "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/test/utils/base"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

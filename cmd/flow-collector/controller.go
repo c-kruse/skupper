@@ -7,9 +7,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/flow"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 type Controller struct {

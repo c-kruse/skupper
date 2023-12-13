@@ -1,4 +1,4 @@
-module github.com/skupperproject/skupper
+module github.com/c-kruse/skupper
 
 go 1.20
 

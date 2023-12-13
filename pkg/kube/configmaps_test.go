@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"gotest.tools/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

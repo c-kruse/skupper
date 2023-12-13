@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	hipstershop "github.com/skupperproject/skupper/test/integration/examples/custom/hipstershop/client"
+	hipstershop "github.com/c-kruse/skupper/test/integration/examples/custom/hipstershop/client"
 	"google.golang.org/grpc"
 )
 

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/version"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 

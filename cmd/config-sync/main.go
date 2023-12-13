@@ -9,17 +9,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1informer "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/informers/internalinterfaces"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/kube/claims"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/kube/claims"
 )
 
 var onlyOneSignalHandler = make(chan struct{})

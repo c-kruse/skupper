@@ -11,7 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 type RouterConfig struct {

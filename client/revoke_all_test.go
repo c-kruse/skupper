@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"gotest.tools/assert"
 
 	"k8s.io/apimachinery/pkg/api/errors"

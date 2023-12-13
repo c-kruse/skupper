@@ -6,10 +6,10 @@ package podman
 import (
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"gotest.tools/assert"
 )
 

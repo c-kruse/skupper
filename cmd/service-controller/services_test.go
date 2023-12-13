@@ -20,8 +20,8 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/event"
 )
 
 func encodeServiceOptions(options *ServiceOptions) *bytes.Buffer {

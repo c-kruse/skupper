@@ -10,9 +10,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/utils/configs"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/utils/configs"
 )
 
 func NewCertAuthority(ca types.CertAuthority, owner *metav1.OwnerReference, namespace string, cli kubernetes.Interface) (*corev1.Secret, error) {

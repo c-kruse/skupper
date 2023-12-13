@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
-	"github.com/skupperproject/skupper/test/utils/k8s"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/k8s"
 	"gotest.tools/assert"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -659,7 +659,7 @@ var h1HeyBaseJob = &batchv1.Job{
 // It returns nothing and ignores any errors that occur, leaving any inconsistencies to be
 // detected later on by other code
 func waitSecret(cctx *base.ClusterContext, secretName string) {
-	// The check below is required while https://github.com/skupperproject/skupper/issues/1208
+	// The check below is required while https://github.com/c-kruse/skupper/issues/1208
 	// is not fixed; both the ServiceInterfaceCreate above and ServiceInterfaceBind below may
 	// create the secret, and sometimes they race on it, making the test flaky.
 	err := utils.Retry(

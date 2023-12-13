@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/test/utils"
-	"github.com/skupperproject/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/test/utils"
+	"github.com/c-kruse/skupper/test/utils/base"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"

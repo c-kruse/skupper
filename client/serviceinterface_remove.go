@@ -5,12 +5,12 @@ import (
 	jsonencoding "encoding/json"
 	"fmt"
 
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/kube"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 func (cli *VanClient) ServiceInterfaceRemove(ctx context.Context, address string) error {

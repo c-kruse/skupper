@@ -14,9 +14,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/flow"
 )
 
 type ProcessUpdateHandler func(deleted bool, name string, process *flow.ProcessRecord) error

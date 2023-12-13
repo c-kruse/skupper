@@ -6,7 +6,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/gorilla/mux"
-	"github.com/skupperproject/skupper/client"
+	"github.com/c-kruse/skupper/client"
 )
 
 type PolicyManager struct {

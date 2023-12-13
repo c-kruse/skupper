@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/skupperproject/skupper/api/types"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/api/types"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/examples/tls_t"
+	"github.com/c-kruse/skupper/test/integration/examples/tls_t"
 )
 
 func TestTlsJob(t *testing.T) {

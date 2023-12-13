@@ -8,14 +8,14 @@ import (
 	"strconv"
 
 	"github.com/rogpeppe/go-internal/lockedfile"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/images"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/images"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 type serviceAction int

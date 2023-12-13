@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	vanClient "github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
-	"github.com/skupperproject/skupper/test/utils/k8s"
+	"github.com/c-kruse/skupper/api/types"
+	vanClient "github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/k8s"
 	"gotest.tools/assert"
 )
 

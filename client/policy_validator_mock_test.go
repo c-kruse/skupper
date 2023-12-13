@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1/fake"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1/fake"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"gotest.tools/assert"
 	v12 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

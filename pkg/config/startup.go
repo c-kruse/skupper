@@ -6,7 +6,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 var (

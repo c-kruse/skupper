@@ -10,7 +10,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/skupperproject/skupper/client"
+	"github.com/c-kruse/skupper/client"
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

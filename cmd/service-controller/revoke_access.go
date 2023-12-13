@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/skupperproject/skupper/client"
+	"github.com/c-kruse/skupper/client"
 )
 
 type AccessRevoker struct {

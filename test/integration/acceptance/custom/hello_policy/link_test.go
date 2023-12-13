@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/link"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/link"
 )
 
 // Uses the named token to create a link on ctx

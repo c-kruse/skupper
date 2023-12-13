@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/data"
-	"github.com/skupperproject/skupper/pkg/flow"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/test/utils/constants"
-	"github.com/skupperproject/skupper/test/utils/tools"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/data"
+	"github.com/c-kruse/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/tools"
 	corev1 "k8s.io/api/core/v1"
 )
 

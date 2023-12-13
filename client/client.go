@@ -6,8 +6,8 @@ import (
 	openshiftapps "github.com/openshift/client-go/apps/clientset/versioned"
 
 	routev1client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/domain"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -19,7 +19,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/kube"
 )
 
 var defaultRetry = wait.Backoff{

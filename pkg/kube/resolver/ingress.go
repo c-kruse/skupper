@@ -16,8 +16,8 @@ package resolver
 
 import (
 	"fmt"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
 )
 
 type IngressResolver struct {

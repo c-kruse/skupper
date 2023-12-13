@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/examples/bookinfo"
+	"github.com/c-kruse/skupper/test/integration/examples/bookinfo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 

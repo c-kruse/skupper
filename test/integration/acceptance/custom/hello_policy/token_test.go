@@ -6,9 +6,9 @@ package hello_policy
 import (
 	"path/filepath"
 
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/token"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/token"
 )
 
 // Returns a cli.TestScenario for creating a token with/on the given:

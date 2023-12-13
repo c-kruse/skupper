@@ -6,11 +6,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 type ClaimHandler struct {

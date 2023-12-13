@@ -3,10 +3,10 @@ package podman
 import (
 	"fmt"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/volumes"
-	"github.com/skupperproject/skupper/client/generated/libpod/models"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/volumes"
+	"github.com/c-kruse/skupper/client/generated/libpod/models"
 )
 
 func (p *PodmanRestClient) VolumeCreate(volume *container.Volume) (*container.Volume, error) {

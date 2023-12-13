@@ -3,9 +3,9 @@ package podman
 import (
 	"fmt"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/domain"
 )
 
 type TokenCertHandler struct{}

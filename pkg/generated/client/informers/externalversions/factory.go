@@ -23,9 +23,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned"
-	internalinterfaces "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions/internalinterfaces"
-	skupper "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions/skupper"
+	versioned "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned"
+	internalinterfaces "github.com/c-kruse/skupper/pkg/generated/client/informers/externalversions/internalinterfaces"
+	skupper "github.com/c-kruse/skupper/pkg/generated/client/informers/externalversions/skupper"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

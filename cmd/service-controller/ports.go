@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 type PortRange struct {

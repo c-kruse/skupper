@@ -25,7 +25,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/event"
 )
 
 const (

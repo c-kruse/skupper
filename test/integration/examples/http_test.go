@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/examples/http"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/integration/examples/http"
+	"github.com/c-kruse/skupper/test/utils/constants"
 )
 
 func TestHttp(t *testing.T) {

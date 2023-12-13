@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/base"
 	"gotest.tools/assert"
 )
 

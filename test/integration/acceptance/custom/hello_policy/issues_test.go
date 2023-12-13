@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,7 +39,7 @@ func seekServiceControllerAndDelete(ctx *base.ClusterContext) {
 	)
 }
 
-// Test for https://github.com/skupperproject/skupper/issues/753
+// Test for https://github.com/c-kruse/skupper/issues/753
 //
 // This uses seekServiceControllerAndDelete to repeatedly remove the service
 // controller and check what kind of error is received
@@ -146,7 +146,7 @@ func testLinkIssue753(t *testing.T, pub, prv *base.ClusterContext) {
 
 // Testing for #789
 //
-// https://github.com/skupperproject/skupper/issues/789
+// https://github.com/c-kruse/skupper/issues/789
 //
 // It's basically the same previously-created-token test case from
 // testLinkPolicy, but on a loop.
@@ -271,7 +271,7 @@ func testLinkIssue789(t *testing.T, pub, prv *base.ClusterContext) {
 // This test expects the service to be removed.  See removeReallowKeep for the alternative.  Only
 // one of them should be part of the test set, but which is unclear.
 //
-// This is testing for https://github.com/skupperproject/skupper/issues/727
+// This is testing for https://github.com/c-kruse/skupper/issues/727
 func removeReallowRemove(pub, prv *base.ClusterContext, runs int) (allTestSteps []policyTestStep) {
 
 	baseTestSteps := []policyTestStep{
@@ -343,7 +343,7 @@ func removeReallowRemove(pub, prv *base.ClusterContext, runs int) (allTestSteps 
 // This test expects the service to be kept.  See removeReallowRemove for the alternative.  Only
 // one of them should be part of the test set, but which is unclear.
 //
-// This is testing for https://github.com/skupperproject/skupper/issues/727
+// This is testing for https://github.com/c-kruse/skupper/issues/727
 func removeReallowKeep(pub, prv *base.ClusterContext, runs int) (allTestSteps []policyTestStep) {
 
 	allTestSteps = append(allTestSteps, policyTestStep{
@@ -409,7 +409,7 @@ func removeReallowKeep(pub, prv *base.ClusterContext, runs int) (allTestSteps []
 // Can a service be created immediately after a policy allowing it?  If not,
 // do we get a proper error message for that?
 //
-// This is testing for https://github.com/skupperproject/skupper/issues/728
+// This is testing for https://github.com/c-kruse/skupper/issues/728
 //
 // This test is valid for manual runs, where the results will be inspected for
 // which type of errors it produces (see the issue logs for details), but it's
@@ -496,7 +496,7 @@ func allowAndCreate(pub, prv *base.ClusterContext, runs int) (allTestSteps []pol
 // service needs to be removed by the system
 //
 // No issue was opened for this test, but it is basically the same as
-// https://github.com/skupperproject/skupper/issues/718
+// https://github.com/c-kruse/skupper/issues/718
 // with the exception that it is services, not links, and the expectation is
 // for removal, not simply disabling.
 func removePolicyRemoveServices(pub, prv *base.ClusterContext, runs int) (allTestSteps []policyTestStep) {
@@ -517,7 +517,7 @@ func removePolicyRemoveServices(pub, prv *base.ClusterContext, runs int) (allTes
 					AllowedServices: []string{"*"},
 				},
 			},
-			// Avoid https://github.com/skupperproject/skupper/issues/728
+			// Avoid https://github.com/c-kruse/skupper/issues/728
 			getChecks: []policyGetCheck{
 				{
 					cluster:         pub,
@@ -601,17 +601,17 @@ func testServicePolicyIssues(t *testing.T, pub, prv *base.ClusterContext) {
 				},
 			},
 		}, {
-			// This is testing for https://github.com/skupperproject/skupper/issues/728
+			// This is testing for https://github.com/c-kruse/skupper/issues/728
 			name:  "allow-policy--and--immediatelly-create-service",
 			steps: allowAndCreate(pub, prv, 100),
 			skip:  func() string { return "Manual test.  Hardcoded skip" },
 		}, {
-			// This is testing for https://github.com/skupperproject/skupper/issues/727
+			// This is testing for https://github.com/c-kruse/skupper/issues/727
 			name:  "remove-policy-reallow--check-service-kept",
 			steps: removeReallowKeep(pub, prv, 500),
 			skip:  func() string { return "#727 needs resolved before this test becomes valid.  Skipping" },
 		}, {
-			// This is testing for https://github.com/skupperproject/skupper/issues/727
+			// This is testing for https://github.com/c-kruse/skupper/issues/727
 			name:  "remove-policy-reallow--check-service-removed",
 			steps: removeReallowRemove(pub, prv, 500),
 			skip:  func() string { return "#727 needs resolved before this test becomes valid.  Skipping" },

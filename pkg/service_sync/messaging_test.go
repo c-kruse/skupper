@@ -8,9 +8,9 @@ import (
 	amqp "github.com/interconnectedcloud/go-amqp"
 	"gotest.tools/assert"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/messaging"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/messaging"
 )
 
 type multicast struct {

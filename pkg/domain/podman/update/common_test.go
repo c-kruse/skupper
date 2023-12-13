@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/podman"
-	domainpodman "github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/images"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/podman"
+	domainpodman "github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/images"
 	"gotest.tools/assert"
 )
 

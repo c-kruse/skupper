@@ -5,11 +5,11 @@ import (
 	"os"
 	"path"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/volumes"
-	"github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/volumes"
+	"github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 type RouterConfigHandler struct {

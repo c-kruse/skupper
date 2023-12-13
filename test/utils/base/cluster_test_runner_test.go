@@ -3,7 +3,7 @@ package base
 import (
 	"testing"
 
-	"github.com/skupperproject/skupper/client"
+	"github.com/c-kruse/skupper/client"
 	"gotest.tools/assert"
 	"k8s.io/client-go/kubernetes/fake"
 )

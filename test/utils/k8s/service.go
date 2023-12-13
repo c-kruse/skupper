@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/constants"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"

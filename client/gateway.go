@@ -20,8 +20,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/images"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/pkg/images"
+	"github.com/c-kruse/skupper/pkg/version"
 	"gopkg.in/yaml.v3"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -30,10 +30,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 const (

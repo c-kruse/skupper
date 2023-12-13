@@ -22,10 +22,10 @@ import (
 	"github.com/spf13/cobra"
 	"gotest.tools/assert"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 var testClient *SkupperTestClient

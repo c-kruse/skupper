@@ -3,12 +3,12 @@ package constants
 import (
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
-	// until this issue: https://github.com/skupperproject/skupper/issues/163
+	// until this issue: https://github.com/c-kruse/skupper/issues/163
 	// is fixed, this is the best we can do
 	SkupperServiceReadyPeriod              time.Duration = 10 * time.Minute
 	DefaultTick                                          = 5 * time.Second

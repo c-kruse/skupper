@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 // Syncs the live router config with the configmap (bridge configuration,

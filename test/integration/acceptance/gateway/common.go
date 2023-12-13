@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"github.com/skupperproject/skupper-example-tcp-echo/pkg/server"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/test/integration/examples/tcp_echo"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/test/integration/examples/tcp_echo"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

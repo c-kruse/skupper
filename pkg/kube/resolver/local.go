@@ -16,7 +16,7 @@ package resolver
 
 import (
 	"fmt"
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"k8s.io/client-go/kubernetes"
 )
 

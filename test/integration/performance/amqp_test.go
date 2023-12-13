@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/test/integration/performance/common"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/k8s"
+	"github.com/c-kruse/skupper/test/integration/performance/common"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/k8s"
 	"gotest.tools/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"

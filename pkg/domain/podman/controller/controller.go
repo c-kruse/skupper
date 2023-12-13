@@ -5,14 +5,14 @@ import (
 	"log"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/flow"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/api/types"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/version"
 )
 
 // ControllerPodman defines the podman site implementation of the controller.

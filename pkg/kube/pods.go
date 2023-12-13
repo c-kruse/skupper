@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 func GetPullPolicy(policy string) corev1.PullPolicy {

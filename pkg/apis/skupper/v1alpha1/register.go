@@ -1,7 +1,7 @@
 package v1alpha1
 
 import (
-	"github.com/skupperproject/skupper/pkg/apis/skupper"
+	"github.com/c-kruse/skupper/pkg/apis/skupper"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"

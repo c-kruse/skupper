@@ -3,7 +3,7 @@ package qdr
 import (
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 func TestParseRouterLogConfig(t *testing.T) {

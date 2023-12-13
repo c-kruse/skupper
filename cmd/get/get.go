@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"github.com/spf13/cobra"
 )
 

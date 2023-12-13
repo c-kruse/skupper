@@ -7,16 +7,16 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/event"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/gorilla/mux"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
 )
 
 const (

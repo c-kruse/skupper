@@ -21,7 +21,7 @@ package versioned
 import (
 	"fmt"
 
-	skupperv1alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
+	skupperv1alpha1 "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"

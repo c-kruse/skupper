@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/messaging"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/messaging"
+	"github.com/c-kruse/skupper/pkg/version"
 )
 
 type senderDirect struct {

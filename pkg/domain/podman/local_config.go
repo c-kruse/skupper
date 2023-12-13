@@ -3,7 +3,7 @@ package podman
 import (
 	"path"
 
-	"github.com/skupperproject/skupper/pkg/config"
+	"github.com/c-kruse/skupper/pkg/config"
 )
 
 var (
