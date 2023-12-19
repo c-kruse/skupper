@@ -19,7 +19,7 @@ limitations under the License.
 package scheme
 
 import (
-	skupperv1alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
+	skupperv1alpha1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

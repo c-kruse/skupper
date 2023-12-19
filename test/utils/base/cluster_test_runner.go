@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/skupperproject/skupper/api/types"
-	vanClient "github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/api/types"
+	vanClient "github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/test/utils/constants"
 )
 
 // ClusterNeeds enable customization of expected number of

@@ -9,14 +9,14 @@ import (
 	"path"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/flow"
-	"github.com/skupperproject/skupper/pkg/fs"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/fs"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 //

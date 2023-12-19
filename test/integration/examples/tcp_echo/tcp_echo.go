@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/kube"
 
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
-	"github.com/skupperproject/skupper/test/utils/k8s"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/k8s"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"gotest.tools/assert"
 
 	appsv1 "k8s.io/api/apps/v1"

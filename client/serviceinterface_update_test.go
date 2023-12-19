@@ -8,11 +8,11 @@ import (
 
 	rbacv1 "k8s.io/api/rbac/v1"
 
-	"github.com/skupperproject/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/certs"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
 	"gotest.tools/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"

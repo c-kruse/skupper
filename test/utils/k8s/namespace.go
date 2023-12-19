@@ -2,8 +2,8 @@ package k8s
 
 import (
 	"fmt"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/test/utils/constants"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"

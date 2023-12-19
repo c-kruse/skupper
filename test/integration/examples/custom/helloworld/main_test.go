@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/base"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

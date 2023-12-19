@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 
-	"github.com/skupperproject/skupper/pkg/images"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/pkg/images"
+	"github.com/c-kruse/skupper/pkg/version"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,16 +27,16 @@ import (
 
 	amqp "github.com/interconnectedcloud/go-amqp"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/flow"
-	"github.com/skupperproject/skupper/pkg/kube"
-	kubeqdr "github.com/skupperproject/skupper/pkg/kube/qdr"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/service"
-	"github.com/skupperproject/skupper/pkg/service_sync"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/certs"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/kube"
+	kubeqdr "github.com/c-kruse/skupper/pkg/kube/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/service"
+	"github.com/c-kruse/skupper/pkg/service_sync"
 )
 
 type Controller struct {

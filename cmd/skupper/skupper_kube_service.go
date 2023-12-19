@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/skupperproject/skupper/pkg/network"
+	"github.com/c-kruse/skupper/pkg/network"
 	"strconv"
 	"strings"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/utils/formatter"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/utils/formatter"
 	"github.com/spf13/cobra"
 )
 

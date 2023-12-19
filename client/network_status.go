@@ -3,9 +3,9 @@ package client
 import (
 	"context"
 	"fmt"
-	"github.com/skupperproject/skupper/api/types"
-	k8s "github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/network"
+	"github.com/c-kruse/skupper/api/types"
+	k8s "github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/network"
 )
 
 func (cli *VanClient) NetworkStatus(ctx context.Context) (*network.NetworkStatusInfo, error) {

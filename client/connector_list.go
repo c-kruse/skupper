@@ -7,10 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/kube"
-	kubeqdr "github.com/skupperproject/skupper/pkg/kube/qdr"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/kube"
+	kubeqdr "github.com/c-kruse/skupper/pkg/kube/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 func (cli *VanClient) getRouterConfig(ctx context.Context, namespace string) (*qdr.RouterConfig, error) {

@@ -6,7 +6,7 @@ package examples
 import (
 	"testing"
 
-	"github.com/skupperproject/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/base"
 )
 
 var (

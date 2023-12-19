@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/skupperproject/skupper/pkg/data"
-	"github.com/skupperproject/skupper/test/integration/acceptance/console"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
-	"github.com/skupperproject/skupper/test/utils/tools"
+	"github.com/c-kruse/skupper/pkg/data"
+	"github.com/c-kruse/skupper/test/integration/acceptance/console"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/test/utils/tools"
 	"gotest.tools/assert"
 )
 

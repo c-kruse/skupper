@@ -7,8 +7,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/qdr"
 	"gotest.tools/assert"
 )
 

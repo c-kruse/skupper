@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/utils/formatter"
+	"github.com/c-kruse/skupper/pkg/utils/formatter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
@@ -16,7 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 func NewCmdLink() *cobra.Command {

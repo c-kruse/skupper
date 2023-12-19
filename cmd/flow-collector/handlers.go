@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/skupperproject/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/pkg/flow"
 )
 
 func (c *Controller) eventsourceHandler(w http.ResponseWriter, r *http.Request) {

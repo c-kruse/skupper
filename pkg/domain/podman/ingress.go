@@ -1,7 +1,7 @@
 package podman
 
 import (
-	"github.com/skupperproject/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/domain"
 )
 
 type SiteIngressHost struct {

@@ -10,10 +10,10 @@ import (
 	"time"
 
 	routev1 "github.com/openshift/api/route/v1"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/qdr"
-	"github.com/skupperproject/skupper/pkg/utils/formatter"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/utils/formatter"
+	"github.com/c-kruse/skupper/pkg/version"
 	"github.com/spf13/cobra/doc"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -22,10 +22,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/config"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 type SkupperClientManager interface {

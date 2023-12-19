@@ -22,8 +22,8 @@ import (
 	"context"
 	"time"
 
-	v1alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
+	v1alpha1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	scheme "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"

@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/version"
 )
 
 func describe(i interface{}) {

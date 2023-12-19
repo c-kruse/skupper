@@ -1,7 +1,7 @@
 package service_sync
 
 import (
-	vanClient "github.com/skupperproject/skupper/client"
+	vanClient "github.com/c-kruse/skupper/client"
 	"k8s.io/client-go/kubernetes/fake"
 	"reflect"
 	"strings"
@@ -10,8 +10,8 @@ import (
 
 	"gotest.tools/assert"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/event"
 )
 
 type updateRecord struct {

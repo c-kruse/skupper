@@ -17,12 +17,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/link"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/service"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/token"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/link"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/service"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/token"
 )
 
 // TestHelloPolicy is a test that runs the hello-world-example

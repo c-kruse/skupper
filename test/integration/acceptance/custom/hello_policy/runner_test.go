@@ -17,11 +17,11 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/skupperproject/skupper/client"
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/client"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 )
 
 // TODO:

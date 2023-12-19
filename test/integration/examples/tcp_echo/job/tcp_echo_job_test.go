@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/examples/tcp_echo"
-	"github.com/skupperproject/skupper/test/utils"
+	"github.com/c-kruse/skupper/test/integration/examples/tcp_echo"
+	"github.com/c-kruse/skupper/test/utils"
 	"gotest.tools/assert"
 )
 

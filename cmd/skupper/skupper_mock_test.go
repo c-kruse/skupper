@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/network"
+	"github.com/c-kruse/skupper/pkg/network"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"github.com/spf13/cobra"
 	"gotest.tools/assert"
 	corev1 "k8s.io/api/core/v1"

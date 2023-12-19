@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/go-openapi/runtime"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/images"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/images"
 )
 
 func (p *PodmanRestClient) ImageList() ([]*container.Image, error) {

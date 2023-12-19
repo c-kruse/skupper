@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"github.com/go-openapi/strfmt"
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/networks"
-	"github.com/skupperproject/skupper/client/generated/libpod/models"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/networks"
+	"github.com/c-kruse/skupper/client/generated/libpod/models"
+	"github.com/c-kruse/skupper/pkg/utils"
 )
 
 func (p *PodmanRestClient) NetworkList() ([]*container.Network, error) {

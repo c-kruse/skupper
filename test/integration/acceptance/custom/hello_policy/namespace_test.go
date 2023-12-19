@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"testing"
 
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
 )
 
 // This test checks how the policy engine reacts to policies that are changing,
@@ -108,7 +108,7 @@ func testNamespaceLinkTransitions(t *testing.T, pub, prv *base.ClusterContext) {
 		}, {
 			// This whole test was created because of this specific test case.
 			// More specifically the bug described on
-			// https://github.com/skupperproject/skupper/issues/718
+			// https://github.com/c-kruse/skupper/issues/718
 			name: "keep-policy--remove-namespace--disconnects",
 			steps: []policyTestStep{
 				{

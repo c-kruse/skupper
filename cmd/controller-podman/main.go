@@ -8,10 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/certs"
-	podmancontroller "github.com/skupperproject/skupper/pkg/domain/podman/controller"
-	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/certs"
+	podmancontroller "github.com/c-kruse/skupper/pkg/domain/podman/controller"
+	"github.com/c-kruse/skupper/pkg/version"
 )
 
 var onlyOneSignalHandler = make(chan struct{})

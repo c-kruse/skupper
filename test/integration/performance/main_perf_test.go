@@ -6,7 +6,7 @@ package performance
 import (
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/performance/common"
+	"github.com/c-kruse/skupper/test/integration/performance/common"
 )
 
 func TestMain(m *testing.M) {

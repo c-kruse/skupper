@@ -4,7 +4,7 @@ import (
 	"context"
 	jsonencoding "encoding/json"
 	"fmt"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 )
 
 func GetConfigMapOwnerReference(config *corev1.ConfigMap) metav1.OwnerReference {

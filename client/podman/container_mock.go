@@ -11,11 +11,11 @@ import (
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
-	"github.com/skupperproject/skupper/client/container"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/containers"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/networks"
-	"github.com/skupperproject/skupper/client/generated/libpod/client/volumes"
-	"github.com/skupperproject/skupper/client/generated/libpod/models"
+	"github.com/c-kruse/skupper/client/container"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/containers"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/networks"
+	"github.com/c-kruse/skupper/client/generated/libpod/client/volumes"
+	"github.com/c-kruse/skupper/client/generated/libpod/models"
 )
 
 func NewPodmanClientMock(containers []*container.Container) *PodmanRestClient {

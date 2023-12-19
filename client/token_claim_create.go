@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/client-go/kubernetes/scheme"
 
-	"github.com/skupperproject/skupper/pkg/kube/claims"
-	"github.com/skupperproject/skupper/pkg/kube/site"
+	"github.com/c-kruse/skupper/pkg/kube/claims"
+	"github.com/c-kruse/skupper/pkg/kube/site"
 )
 
 func getSiteId(service *corev1.Service) string {

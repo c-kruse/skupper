@@ -17,7 +17,7 @@ package resolver
 import (
 	"fmt"
 
-	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/pkg/kube"
 )
 
 type HostPort struct {

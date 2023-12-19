@@ -19,9 +19,9 @@ limitations under the License.
 package fake
 
 import (
-	clientset "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned"
-	skupperv1alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
-	fakeskupperv1alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1/fake"
+	clientset "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned"
+	skupperv1alpha1 "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1"
+	fakeskupperv1alpha1 "github.com/c-kruse/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"

@@ -1,9 +1,9 @@
 package domain
 
 import (
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/images"
-	"github.com/skupperproject/skupper/test/utils"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/images"
+	"github.com/c-kruse/skupper/test/utils"
 )
 
 type SkupperComponent interface {

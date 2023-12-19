@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
 
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/constants"
 )
 
 // StatusTester runs `skupper status` and validates outcome defined

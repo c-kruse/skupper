@@ -6,8 +6,8 @@ import (
 
 	amqp "github.com/interconnectedcloud/go-amqp"
 
-	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/messaging"
+	"github.com/c-kruse/skupper/pkg/event"
+	"github.com/c-kruse/skupper/pkg/messaging"
 )
 
 const (

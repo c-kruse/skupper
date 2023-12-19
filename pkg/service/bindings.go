@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/qdr"
 )
 
 func getBridgeName(address string, host string, port ...int) string {

@@ -5,10 +5,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/skupperproject/skupper/api/types"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/api/types"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"github.com/spf13/cobra"
 )
 

@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/skupperproject/skupper/test/integration/examples/mongodb"
+	"github.com/c-kruse/skupper/test/integration/examples/mongodb"
 )
 
 func TestMongo(t *testing.T) {

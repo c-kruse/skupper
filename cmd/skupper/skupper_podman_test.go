@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/domain"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
+	clientpodman "github.com/c-kruse/skupper/client/podman"
+	"github.com/c-kruse/skupper/pkg/domain"
+	"github.com/c-kruse/skupper/pkg/domain/podman"
 	"github.com/spf13/cobra"
 	"gotest.tools/assert"
 )

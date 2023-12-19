@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/messaging"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/pkg/config"
+	"github.com/c-kruse/skupper/pkg/messaging"
 )
 
 const (

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	skupperv1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/service"
+	skupperv1 "github.com/c-kruse/skupper/pkg/apis/skupper/v1alpha1"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/service"
 )
 
 // Return a SkupperClusterPolicySpec that allows resources to be exposed

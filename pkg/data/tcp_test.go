@@ -1,7 +1,7 @@
 package data
 
 import (
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
 	"reflect"
 	"testing"
 )

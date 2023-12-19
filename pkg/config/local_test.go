@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/skupperproject/skupper/api/types"
+	"github.com/c-kruse/skupper/api/types"
 	"gopkg.in/yaml.v3"
 	"gotest.tools/assert"
 )

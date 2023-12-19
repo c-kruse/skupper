@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/test/utils/base"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/link"
-	"github.com/skupperproject/skupper/test/utils/skupper/cli/token"
+	"github.com/c-kruse/skupper/test/utils/base"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/link"
+	"github.com/c-kruse/skupper/test/utils/skupper/cli/token"
 	"gotest.tools/assert"
 )
 

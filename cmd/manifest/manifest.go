@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/skupperproject/skupper/pkg/images"
+	"github.com/c-kruse/skupper/pkg/images"
 	"github.com/spf13/cobra"
 )
 

@@ -3,11 +3,11 @@ package client
 import (
 	"context"
 
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/c-kruse/skupper/pkg/qdr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/skupperproject/skupper/api/types"
-	kubeqdr "github.com/skupperproject/skupper/pkg/kube/qdr"
+	"github.com/c-kruse/skupper/api/types"
+	kubeqdr "github.com/c-kruse/skupper/pkg/kube/qdr"
 )
 
 // ConnectorInspect VAN connector instance

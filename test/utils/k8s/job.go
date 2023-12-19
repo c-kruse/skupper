@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/test/utils/constants"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/test/utils/constants"
 	"gotest.tools/assert"
 	batchv1 "k8s.io/api/batch/v1"
 	apiv1 "k8s.io/api/core/v1"

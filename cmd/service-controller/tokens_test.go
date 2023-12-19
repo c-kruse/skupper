@@ -19,9 +19,9 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/event"
+	"github.com/c-kruse/skupper/api/types"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/event"
 )
 
 func TestGetTokens(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	vanClient "github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/test/utils/k8s"
+	vanClient "github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/kube"
+	"github.com/c-kruse/skupper/test/utils/k8s"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

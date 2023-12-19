@@ -16,8 +16,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/skupperproject/skupper/client"
-	"github.com/skupperproject/skupper/pkg/flow"
+	"github.com/c-kruse/skupper/client"
+	"github.com/c-kruse/skupper/pkg/flow"
 )
 
 type NodeUpdateHandler func(deleted bool, name string, host *flow.HostRecord) error

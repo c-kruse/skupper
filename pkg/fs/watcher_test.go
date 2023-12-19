@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/c-kruse/skupper/pkg/utils"
 	"gotest.tools/assert"
 )
 
