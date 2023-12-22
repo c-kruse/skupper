@@ -1,0 +1,184 @@
+spec:
+  connector:
+    code: 5
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 15
+        string: destHost
+      - code: 18
+        string: destPort
+      - code: 16
+        string: protocol
+      - code: 19
+        string: address
+      - code: 40
+        uint: flowCountL4
+      - code: 42
+        uint: flowRateL4
+      - code: 41
+        uint: flowCountL7
+      - code: 43
+        uint: flowRateL7
+  process:
+    code: 7
+    attributes:
+      - code: 30
+        string: name
+      - code: 20
+        string: imageName
+      - code: 21
+        string: imageVersion
+      - code: 22
+        string: hostname
+      - code: 14
+        string: sourceHost
+      - code: 46
+        string: group
+      - code: 13
+        string: mode
+  image:
+    code: 8
+    attributes: []
+  ingress:
+    code: 9
+    attributes: []
+  egress:
+    code: 10
+    attributes: []
+  collector:
+    code: 11
+    attributes: []
+  processGroup:
+    code: 12
+    attributes: []
+  host:
+    code: 13
+    attributes:
+      - code: 30
+        string: name
+      - code: 10
+        string: provider
+  log:
+    code: 14
+    attributes:
+      - code: 48
+        uint: logSeverity
+      - code: 49
+        string: logText
+      - code: 50
+        string: sourceFile
+      - code: 51
+        uint: sourceLine
+  controller:
+    code: 3
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 20
+        string: imageName
+      - code: 21
+        string: imageVersion
+      - code: 22
+        string: hostname
+      - code: 30
+        string: name
+      - code: 32
+        string: buildVersion
+  flow:
+    code: 6
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 14
+        string: sourceHost
+      - code: 17
+        string: sourcePort
+      - code: 5
+        identity: counterflow
+      - code: 31
+        string: trace
+      - code: 24
+        uint: latency
+      - code: 23
+        uint: octets
+      - code: 35
+        uint: octetRate
+      - code: 36
+        uint: octetsOut
+      - code: 37
+        uint: octetsUnacked
+      - code: 38
+        uint: windowClosures
+      - code: 39
+        uint: windowSize
+      - code: 29
+        string: reason
+  link:
+    code: 2
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 13
+        string: mode
+      - code: 30
+        string: name
+      - code: 33
+        uint: linkCost
+      - code: 34
+        string: direction
+  listener:
+    code: 4
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 15
+        string: destHost
+      - code: 18
+        string: destPort
+      - code: 16
+        string: protocol
+      - code: 19
+        string: address
+      - code: 40
+        uint: flowCountL4
+      - code: 42
+        uint: flowRateL4
+      - code: 41
+        uint: flowCountL7
+      - code: 43
+        uint: flowRateL7
+  router:
+    code: 1
+    attributes:
+      - code: 2
+        identity: parent
+      - code: 12
+        string: namespace
+      - code: 13
+        string: mode
+      - code: 20
+        string: imageName
+      - code: 21
+        string: imageVersion
+      - code: 22
+        string: hostname
+      - code: 30
+        string: name
+      - code: 32
+        string: buildVersion
+  site:
+    code: 0
+    attributes:
+      - code: 9
+        string: location
+      - code: 10
+        string: provider
+      - code: 11
+        string: platform
+      - code: 12
+        string: namespace
+      - code: 52
+        string: version
+      - code: 53
+        string: policy
