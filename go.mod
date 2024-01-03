@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	github.com/briandowns/spinner v1.23.0
+	github.com/cenkalti/backoff/v4 v4.2.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/go-openapi/errors v0.20.3
