@@ -55,7 +55,7 @@ type SiteRecord struct {
 
 func (r SiteRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(site)
+	attributeSet[typeOfRecord] = uint32(site)
 	setOpt(attributeSet, 9, r.Location)
 	setOpt(attributeSet, 10, r.Provider)
 	setOpt(attributeSet, 11, r.Platform)
@@ -65,7 +65,7 @@ func (r SiteRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeSite(attributeSet map[any]any) (Record, error) {
+func decodeSite(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var site SiteRecord
 	if site.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -106,7 +106,7 @@ type RouterRecord struct {
 
 func (r RouterRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(router)
+	attributeSet[typeOfRecord] = uint32(router)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 12, r.Namespace)
 	setOpt(attributeSet, 13, r.Mode)
@@ -118,7 +118,7 @@ func (r RouterRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeRouter(attributeSet map[any]any) (Record, error) {
+func decodeRouter(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var router RouterRecord
 	if router.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -162,7 +162,7 @@ type LinkRecord struct {
 
 func (r LinkRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(link)
+	attributeSet[typeOfRecord] = uint32(link)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 13, r.Mode)
 	setOpt(attributeSet, 30, r.Name)
@@ -171,7 +171,7 @@ func (r LinkRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeLink(attributeSet map[any]any) (Record, error) {
+func decodeLink(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var link LinkRecord
 	if link.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -207,7 +207,7 @@ type ControllerRecord struct {
 
 func (r ControllerRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(controller)
+	attributeSet[typeOfRecord] = uint32(controller)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 20, r.ImageName)
 	setOpt(attributeSet, 21, r.ImageVersion)
@@ -217,7 +217,7 @@ func (r ControllerRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeController(attributeSet map[any]any) (Record, error) {
+func decodeController(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var controller ControllerRecord
 	if controller.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -259,7 +259,7 @@ type ListenerRecord struct {
 
 func (r ListenerRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(listener)
+	attributeSet[typeOfRecord] = uint32(listener)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 15, r.DestHost)
 	setOpt(attributeSet, 16, r.Protocol)
@@ -272,7 +272,7 @@ func (r ListenerRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeListener(attributeSet map[any]any) (Record, error) {
+func decodeListener(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var listener ListenerRecord
 	if listener.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -323,7 +323,7 @@ type ConnectorRecord struct {
 
 func (r ConnectorRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(connector)
+	attributeSet[typeOfRecord] = uint32(connector)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 15, r.DestHost)
 	setOpt(attributeSet, 16, r.Protocol)
@@ -336,7 +336,7 @@ func (r ConnectorRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeConnector(attributeSet map[any]any) (Record, error) {
+func decodeConnector(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var connector ConnectorRecord
 	if connector.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -391,7 +391,7 @@ type FlowRecord struct {
 
 func (r FlowRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(flow)
+	attributeSet[typeOfRecord] = uint32(flow)
 	setOpt(attributeSet, 2, r.Parent)
 	setOpt(attributeSet, 5, r.Counterflow)
 	setOpt(attributeSet, 14, r.SourceHost)
@@ -408,7 +408,7 @@ func (r FlowRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeFlow(attributeSet map[any]any) (Record, error) {
+func decodeFlow(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var flow FlowRecord
 	if flow.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -469,7 +469,7 @@ type ProcessRecord struct {
 
 func (r ProcessRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(process)
+	attributeSet[typeOfRecord] = uint32(process)
 	setOpt(attributeSet, 13, r.Mode)
 	setOpt(attributeSet, 14, r.SourceHost)
 	setOpt(attributeSet, 20, r.ImageName)
@@ -480,7 +480,7 @@ func (r ProcessRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeProcess(attributeSet map[any]any) (Record, error) {
+func decodeProcess(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var process ProcessRecord
 	if process.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -516,11 +516,11 @@ type ImageRecord struct {
 
 func (r ImageRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(image)
+	attributeSet[typeOfRecord] = uint32(image)
 	return attributeSet
 }
 
-func decodeImage(attributeSet map[any]any) (Record, error) {
+func decodeImage(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var image ImageRecord
 	if image.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -535,11 +535,11 @@ type IngressRecord struct {
 
 func (r IngressRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(ingress)
+	attributeSet[typeOfRecord] = uint32(ingress)
 	return attributeSet
 }
 
-func decodeIngress(attributeSet map[any]any) (Record, error) {
+func decodeIngress(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var ingress IngressRecord
 	if ingress.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -554,11 +554,11 @@ type EgressRecord struct {
 
 func (r EgressRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(egress)
+	attributeSet[typeOfRecord] = uint32(egress)
 	return attributeSet
 }
 
-func decodeEgress(attributeSet map[any]any) (Record, error) {
+func decodeEgress(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var egress EgressRecord
 	if egress.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -573,11 +573,11 @@ type CollectorRecord struct {
 
 func (r CollectorRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(collector)
+	attributeSet[typeOfRecord] = uint32(collector)
 	return attributeSet
 }
 
-func decodeCollector(attributeSet map[any]any) (Record, error) {
+func decodeCollector(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var collector CollectorRecord
 	if collector.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -592,11 +592,11 @@ type ProcessGroupRecord struct {
 
 func (r ProcessGroupRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(processGroup)
+	attributeSet[typeOfRecord] = uint32(processGroup)
 	return attributeSet
 }
 
-func decodeProcessGroup(attributeSet map[any]any) (Record, error) {
+func decodeProcessGroup(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var processGroup ProcessGroupRecord
 	if processGroup.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -613,13 +613,13 @@ type HostRecord struct {
 
 func (r HostRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(host)
+	attributeSet[typeOfRecord] = uint32(host)
 	setOpt(attributeSet, 10, r.Provider)
 	setOpt(attributeSet, 30, r.Name)
 	return attributeSet
 }
 
-func decodeHost(attributeSet map[any]any) (Record, error) {
+func decodeHost(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var host HostRecord
 	if host.BaseRecord, err = decodeBase(attributeSet); err != nil {
@@ -644,7 +644,7 @@ type LogRecord struct {
 
 func (r LogRecord) Encode() map[uint32]any {
 	attributeSet := r.BaseRecord.Encode()
-	attributeSet[typeOfRecord] = uint64(log)
+	attributeSet[typeOfRecord] = uint32(log)
 	setOpt(attributeSet, 48, r.LogSeverity)
 	setOpt(attributeSet, 49, r.LogText)
 	setOpt(attributeSet, 50, r.SourceFile)
@@ -652,7 +652,7 @@ func (r LogRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeLog(attributeSet map[any]any) (Record, error) {
+func decodeLog(attributeSet map[uint32]any) (Record, error) {
 	var err error
 	var log LogRecord
 	if log.BaseRecord, err = decodeBase(attributeSet); err != nil {
