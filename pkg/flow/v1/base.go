@@ -20,7 +20,7 @@ type Record interface {
 	Encode() map[uint32]any
 }
 
-type recordDecoder func(map[interface{}]interface{}) (Record, error)
+type recordDecoder func(map[uint32]interface{}) (Record, error)
 
 // decodeRecords decodes an AMQP Message into a set of Records. Uses the
 // recordDecoders map to find the correct decoder for each record type.
@@ -31,7 +31,18 @@ func decodeRecords(msg *amqp.Message) ([]Record, error) {
 		return records, fmt.Errorf("unexpected type for message Value: %T", msg.Value)
 	}
 	for _, value := range values {
-		valueMap, ok := value.(map[interface{}]interface{})
+		if imap, ok := value.(map[interface{}]interface{}); ok {
+			valueMap := make(map[uint32]interface{}, len(imap))
+			for k, v := range imap {
+				uK, ok := k.(uint32)
+				if !ok {
+					return records, fmt.Errorf("record attribute set contains unexpected key type: %T", k)
+				}
+				valueMap[uK] = v
+			}
+			value = valueMap
+		}
+		valueMap, ok := value.(map[uint32]interface{})
 		if !ok {
 			return records, fmt.Errorf("unexpected type for record attribute set: %T", value)
 		}
@@ -64,9 +75,9 @@ func setOpt[T any](attributeSet map[uint32]any, codePoint uint32, opt *T) {
 // getFromAttributeSet gets a value from the attributeSet map with they key
 // codePoint. When there is no value or it is not of the expected type it will
 // return an error.
-func getFromAttributeSet[T any](attributeSet map[any]any, codePoint uint32) (T, error) {
+func getFromAttributeSet[T any](attributeSet map[uint32]any, codePoint uint32) (T, error) {
 	var attribute T
-	raw, ok := attributeSet[uint32(codePoint)]
+	raw, ok := attributeSet[codePoint]
 	if !ok {
 		return attribute, fmt.Errorf("attribute set did not contain codepoint %d", codePoint)
 	}
@@ -81,7 +92,7 @@ func getFromAttributeSet[T any](attributeSet map[any]any, codePoint uint32) (T, 
 // getFromAttributeSetOpt optionally gets a value from the attributeSet map
 // with the key codePoint. When there is no value it will return nil, and when
 // it is of the incorrect type it will return an error.
-func getFromAttributeSetOpt[T any](attributeSet map[any]any, codePoint uint32) (*T, error) {
+func getFromAttributeSetOpt[T any](attributeSet map[uint32]any, codePoint uint32) (*T, error) {
 	raw, ok := attributeSet[codePoint]
 	if !ok {
 		return nil, nil
@@ -109,7 +120,7 @@ func (r BaseRecord) Encode() map[uint32]any {
 	return attributeSet
 }
 
-func decodeBase(attributeSet map[any]any) (BaseRecord, error) {
+func decodeBase(attributeSet map[uint32]any) (BaseRecord, error) {
 	var base BaseRecord
 	id, err := getFromAttributeSet[string](attributeSet, identityAttr)
 	if err != nil {

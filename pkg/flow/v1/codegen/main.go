@@ -157,7 +157,7 @@ func GenerateRecordsCode(recordDefs []RecordTypeInfo, w io.Writer) {
 		P()
 		P(`func (r`, RecordName+`)`, `Encode() map[uint32]any {`)
 		P(`	attributeSet := r.BaseRecord.Encode()`)
-		P(`	attributeSet[typeOfRecord] =`, "uint64("+r.Name+")")
+		P(`	attributeSet[typeOfRecord] =`, "uint32("+r.Name+")")
 		for _, attr := range r.Attributes {
 			AttrName := toTitleCaser.String(attr.Name)
 			P(`	setOpt(attributeSet,`, fmt.Sprint(attr.Code)+`,`, `r.`+AttrName+`)`)
@@ -165,7 +165,7 @@ func GenerateRecordsCode(recordDefs []RecordTypeInfo, w io.Writer) {
 		P(`	return attributeSet`)
 		P("}")
 		P()
-		P(`func`, fnDecodeName+`(attributeSet map[any]any) (Record, error) {`)
+		P(`func`, fnDecodeName+`(attributeSet map[uint32]any) (Record, error) {`)
 		P(`	var err error`)
 		P(`	var`, recordName, RecordName)
 		P(`	if`, recordName+`.BaseRecord, err = decodeBase(attributeSet); err != nil {`)
@@ -203,7 +203,7 @@ func TestRecordDecoders(t *testing.T) {
 	testCases := []struct {
 		Name       string
 		RecordCode recordType
-		Map        map[any]any
+		Map        map[uint32]any
 	}{`)
 	for _, r := range recordDefs {
 		recordName := r.Name
@@ -211,14 +211,14 @@ func TestRecordDecoders(t *testing.T) {
 		P(`	{`)
 		P(`		Name:	"` + RecordName + `",`)
 		P(`		RecordCode:	` + recordName + `,`)
-		P(`		Map:	map[any]any{`)
-		P(`			typeOfRecord:	uint64(` + recordName + `), identityAttr: "id", startTimeAttr: uint64(2), endTimeAttr: uint64(3),`)
+		P(`		Map:	map[uint32]any{`)
+		P(`			typeOfRecord:	uint32(` + recordName + `), identityAttr: "id", startTimeAttr: uint64(2), endTimeAttr: uint64(3),`)
 		for _, attr := range r.Attributes {
 			attrValue := fmt.Sprintf(`"%s-val"`, attr.Name)
 			if attr.Type == "uint64" {
 				attrValue = fmt.Sprintf(`uint64(%d)`, 100+attr.Code)
 			}
-			P(`uint32(`+fmt.Sprint(attr.Code)+`):`, attrValue+`,`)
+			P(fmt.Sprint(attr.Code)+`:`, attrValue+`,`)
 		}
 		P(`		},`)
 		P(`	},`)
@@ -229,7 +229,7 @@ func TestRecordDecoders(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			r, err := recordDecoders[tc.RecordCode](tc.Map)
 			assert.Assert(t, err)
-			attrSet := make(map[any]any)
+			attrSet := make(map[uint32]any)
 			for k, v := range r.Encode() {
 				attrSet[k] = v
 			}
