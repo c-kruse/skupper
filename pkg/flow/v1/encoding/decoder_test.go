@@ -1,4 +1,4 @@
-package v2_test
+package encoding_test
 
 import (
 	"fmt"
@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	v2 "github.com/skupperproject/skupper/pkg/flow/v2"
+	v1 "github.com/skupperproject/skupper/pkg/flow/v1"
+	encoding "github.com/skupperproject/skupper/pkg/flow/v1/encoding"
 )
 
 type tDecodeRecord struct{}
 
-func (r tDecodeRecord) DecodeRecord(attrs v2.RecordAttributeSet) error {
+func (r tDecodeRecord) DecodeRecord(attrs encoding.RecordAttributeSet) error {
 	return fmt.Errorf("input: %s", attrs[1])
 }
 
@@ -24,7 +25,7 @@ type tDecodeRecordP struct {
 	B string `vflow:"2"`
 }
 
-func (r *tDecodeRecordP) DecodeRecord(attrs v2.RecordAttributeSet) error {
+func (r *tDecodeRecordP) DecodeRecord(attrs encoding.RecordAttributeSet) error {
 	if a, ok := attrs[1]; ok {
 		r.A = a.(string)
 	}
@@ -56,9 +57,9 @@ const (
 )
 
 func init() {
-	v2.MustRegisterRecord(recordTypeDecodeRecord, tDecodeRecord{})
-	v2.MustRegisterRecord(recordTypeDecodeRecordP, tDecodeRecordP{})
-	v2.MustRegisterRecord(recordTypeNestedEmbedded, tNestedEmbedded{})
+	encoding.MustRegisterRecord(recordTypeDecodeRecord, tDecodeRecord{})
+	encoding.MustRegisterRecord(recordTypeDecodeRecordP, tDecodeRecordP{})
+	encoding.MustRegisterRecord(recordTypeNestedEmbedded, tNestedEmbedded{})
 }
 
 var decoderTests = []struct {
@@ -74,8 +75,8 @@ var decoderTests = []struct {
 			0: uint32(1), 1: "routerid", 2: "parentid", 3: uint64(100), 4: uint64(1000),
 			12: "default", 30: "routername",
 		},
-		Out: &v2.RouterRecord{
-			BaseRecord: v2.BaseRecord{
+		Out: &v1.RouterRecord{
+			BaseRecord: v1.BaseRecord{
 				Identity: "routerid", StartTime: ptrTo(time.UnixMicro(100)), EndTime: ptrTo(time.UnixMicro(1000)),
 			},
 			Parent:    ptrTo("parentid"),
@@ -151,13 +152,24 @@ var decoderTests = []struct {
 			0: recordTypeNestedEmbedded, 1: uint32(1), 10: "ten", 100: "100",
 		},
 		Out: &tNestedEmbedded{Root: 1, A: A{B: B{B: "100"}, X: X{X: "ten"}}},
+	}, {
+		CaseName: Name(""),
+		In: map[uint32]interface{}{
+			0: uint32(1), 1: "routerid", 3: uint64(100),
+		},
+		Out: &v1.RouterRecord{
+			BaseRecord: v1.BaseRecord{
+				Identity: "routerid", StartTime: ptrTo(time.UnixMicro(100)), EndTime: nil,
+			},
+		},
+		Golden: true,
 	},
 }
 
 func TestDecode(t *testing.T) {
 	for _, tc := range decoderTests {
 		t.Run(tc.Name, func(t *testing.T) {
-			out, err := v2.Decode(tc.In)
+			out, err := encoding.Decode(tc.In)
 			if !equalError(err, tc.ErrorMsg) {
 				t.Fatalf("%s: unexpected error. wanted: %q but got: %q", tc.Where, tc.ErrorMsg, err)
 			}
@@ -173,7 +185,7 @@ func TestDecode(t *testing.T) {
 				return
 			}
 
-			remarshaled, err := v2.Encode(out)
+			remarshaled, err := encoding.Encode(out)
 			if err != nil {
 				t.Fatalf("%s: unexpected encode error: %q", tc.Where, err)
 			}

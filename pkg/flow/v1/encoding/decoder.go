@@ -1,4 +1,4 @@
-package v2
+package encoding
 
 import (
 	"errors"
@@ -13,13 +13,20 @@ var (
 	recordAttributeDecoderType = reflect.TypeOf((*RecordAttributeDecoder)(nil)).Elem()
 )
 
+// RecordDecoder is implemented by record types that know how to decode
+// themselves from a record attribute set.
 type RecordDecoder interface {
 	DecodeRecord(attrs RecordAttributeSet) error
 }
+
+// RecordAttributeDecoder is implemented by record attribute types that can
+// handle their own decoding.
 type RecordAttributeDecoder interface {
 	DecodeRecordAttribute(attr interface{}) error
 }
 
+// Decode a record from its record attribute set. Decode is only aware of
+// record types registered with MustRegisterRecord.
 func Decode(recordset RecordAttributeSet) (interface{}, error) {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -130,7 +137,7 @@ func (d timeDecoder) decode(attr interface{}, v reflect.Value) error {
 	if !ok {
 		return fmt.Errorf("unxpected value type for timestamp: %T", attr)
 	}
-	if uintAttr > math.MaxInt64 {
+	if uintAttr > math.MaxInt64 { // undefined past the year 294246
 		return fmt.Errorf("time too far in future for internal representation: %#x", uintAttr)
 	}
 	ts := time.UnixMicro(int64(uintAttr))
@@ -140,7 +147,7 @@ func (d timeDecoder) decode(attr interface{}, v reflect.Value) error {
 
 func decodeRecordDecoder(attrs RecordAttributeSet, v reflect.Value) error {
 	if v.Kind() == reflect.Pointer && v.IsNil() {
-		return fmt.Errorf("decoding error: cannot unmarshal into nil.")
+		return fmt.Errorf("decoding error: cannot unmarshal into nil")
 	}
 	m, ok := v.Interface().(RecordDecoder)
 	if !ok {

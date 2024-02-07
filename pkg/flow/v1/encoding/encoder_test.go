@@ -1,31 +1,32 @@
-package v2_test
+package encoding_test
 
 import (
 	"strings"
 	"testing"
 	"time"
 
-	v2 "github.com/skupperproject/skupper/pkg/flow/v2"
+	v1 "github.com/skupperproject/skupper/pkg/flow/v1"
+	encoding "github.com/skupperproject/skupper/pkg/flow/v1/encoding"
 	"gotest.tools/assert"
 )
 
 type tEncodeRecordStub func() (map[uint32]any, error)
 
-func (t tEncodeRecordStub) EncodeRecord() (v2.RecordAttributeSet, error) {
+func (t tEncodeRecordStub) EncodeRecord() (encoding.RecordAttributeSet, error) {
 	return t()
 }
 
-func (t tEncodeRecordStub) DecodeRecord(v2.RecordAttributeSet) error {
+func (t tEncodeRecordStub) DecodeRecord(encoding.RecordAttributeSet) error {
 	return nil
 }
 
 type tEncodeRecordStubP func() (map[uint32]any, error)
 
-func (t *tEncodeRecordStubP) EncodeRecord() (v2.RecordAttributeSet, error) {
+func (t *tEncodeRecordStubP) EncodeRecord() (encoding.RecordAttributeSet, error) {
 	return (*t)()
 }
 
-func (t *tEncodeRecordStubP) DecodeRecord(v2.RecordAttributeSet) error {
+func (t *tEncodeRecordStubP) DecodeRecord(encoding.RecordAttributeSet) error {
 	return nil
 }
 
@@ -58,9 +59,9 @@ const (
 )
 
 func init() {
-	v2.MustRegisterRecord(recordTypeEncodeRecordStub, tEncodeRecordStub(nil))
-	v2.MustRegisterRecord(recordTypeRecordAttributeEncodeDecode, tRecordAttributeEncodeDecode{})
-	v2.MustRegisterRecord(recordTypeEncodeRecordStubP, tEncodeRecordStubP(nil))
+	encoding.MustRegisterRecord(recordTypeEncodeRecordStub, tEncodeRecordStub(nil))
+	encoding.MustRegisterRecord(recordTypeRecordAttributeEncodeDecode, tRecordAttributeEncodeDecode{})
+	encoding.MustRegisterRecord(recordTypeEncodeRecordStubP, tEncodeRecordStubP(nil))
 }
 
 func TestMustRegister(t *testing.T) {
@@ -75,7 +76,7 @@ func TestMustRegister(t *testing.T) {
 	}
 	t.Run("existing codepoint", func(t *testing.T) {
 		defer expectPanic(t, "cannot register record type struct {} using codepoint 99901: already in use")()
-		v2.MustRegisterRecord(recordTypeEncodeRecordStub, struct{}{})
+		encoding.MustRegisterRecord(recordTypeEncodeRecordStub, struct{}{})
 	})
 	t.Run("repeated vflow attribute tags", func(t *testing.T) {
 		defer expectPanic(t, `struct field B repeats vflow tag "1" also used by A`)()
@@ -83,14 +84,14 @@ func TestMustRegister(t *testing.T) {
 			A int64 `vflow:"1"`
 			B int64 `vflow:"1"`
 		}
-		v2.MustRegisterRecord(recordTypeUnused, Repeat{})
+		encoding.MustRegisterRecord(recordTypeUnused, Repeat{})
 	})
 	t.Run("invalid tag", func(t *testing.T) {
 		defer expectPanic(t, `vflow struct tag parse error for field A:`)()
 		type Repeat struct {
 			A int64 `vflow:"identity"`
 		}
-		v2.MustRegisterRecord(recordTypeUnused, Repeat{})
+		encoding.MustRegisterRecord(recordTypeUnused, Repeat{})
 	})
 	t.Run("invalid type", func(t *testing.T) {
 		defer expectPanic(t, `invalid vflow field encoder for "D": unsupported attribute type "testing.B"`)()
@@ -100,7 +101,11 @@ func TestMustRegister(t *testing.T) {
 			c testing.B `vflow:"3"`
 			D testing.B `vflow:"4"`
 		}
-		v2.MustRegisterRecord(recordTypeUnused, Invalid{})
+		encoding.MustRegisterRecord(recordTypeUnused, Invalid{c: testing.B{}})
+	})
+	t.Run("register twice", func(t *testing.T) {
+		defer expectPanic(t, `cannot register same type more than once. type encoding_test.tEncodeRecordStub already registered with code`)()
+		encoding.MustRegisterRecord(recordTypeUnused, tEncodeRecordStub(nil))
 	})
 }
 func TestMarshal(t *testing.T) {
@@ -114,23 +119,23 @@ func TestMarshal(t *testing.T) {
 	}{
 		{
 			Name:      "missing identity error",
-			Input:     v2.SiteRecord{},
+			Input:     v1.SiteRecord{},
 			ExpectErr: true,
 		}, {
 			Name:      "nil",
 			ExpectErr: true,
 		}, {
 			Name:  "basic site",
-			Input: v2.SiteRecord{BaseRecord: v2.BaseRecord{Identity: "test"}},
+			Input: v1.SiteRecord{BaseRecord: v1.BaseRecord{Identity: "test"}},
 			ExpectedAttrs: map[uint32]any{
 				0: uint32(0),
 				1: "test",
 			},
 		}, {
 			Name: "full site",
-			Input: v2.SiteRecord{
+			Input: v1.SiteRecord{
 				Location: ptrTo("loc"),
-				BaseRecord: v2.BaseRecord{
+				BaseRecord: v1.BaseRecord{
 					Identity:  "test",
 					StartTime: ptrTo(timeA),
 					EndTime:   ptrTo(timeB),
@@ -199,11 +204,15 @@ func TestMarshal(t *testing.T) {
 			Name:      "unregistered type",
 			Input:     testing.B{},
 			ExpectErr: true,
+		}, {
+			Name:      "time before epoch",
+			Input:     v1.SiteRecord{BaseRecord: v1.BaseRecord{Identity: "test", StartTime: ptrTo(time.UnixMicro(-1))}},
+			ExpectErr: true,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
-			actual, err := v2.Encode(tc.Input)
+			actual, err := encoding.Encode(tc.Input)
 			if tc.ExpectErr {
 				assert.Check(t, err != nil)
 			} else {

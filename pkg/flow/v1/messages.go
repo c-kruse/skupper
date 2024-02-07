@@ -1,7 +1,10 @@
 package v1
 
 import (
+	"fmt"
+
 	"github.com/interconnectedcloud/go-amqp"
+	"github.com/skupperproject/skupper/pkg/flow/v1/encoding"
 )
 
 type BeaconMessage struct {
@@ -108,7 +111,7 @@ func (m FlushMessage) Encode() *amqp.Message {
 
 type RecordMessage struct {
 	Address string
-	Records []Record
+	Records []any
 }
 
 func DecodeRecord(msg *amqp.Message) (RecordMessage, error) {
@@ -120,10 +123,14 @@ func DecodeRecord(msg *amqp.Message) (RecordMessage, error) {
 	return record, err
 }
 
-func (m RecordMessage) Encode() *amqp.Message {
+func (m RecordMessage) Encode() (*amqp.Message, error) {
 	var records []interface{}
-	for _, record := range m.Records {
-		records = append(records, record.Encode())
+	for i, record := range m.Records {
+		recordAttrs, err := encoding.Encode(record)
+		if err != nil {
+			return nil, fmt.Errorf("error encoding record %d: %s", i, err)
+		}
+		records = append(records, recordAttrs)
 	}
 	return &amqp.Message{
 		Properties: &amqp.MessageProperties{
@@ -131,5 +138,48 @@ func (m RecordMessage) Encode() *amqp.Message {
 			Subject: "RECORD",
 		},
 		Value: records,
+	}, nil
+}
+
+// decodeRecords decodes an AMQP Message into a set of Records. Uses the
+// recordDecoders map to find the correct decoder for each record type.
+func decodeRecords(msg *amqp.Message) ([]interface{}, error) {
+	var records []interface{}
+	values, ok := msg.Value.([]interface{})
+	if !ok {
+		return records, fmt.Errorf("unexpected type for message Value: %T", msg.Value)
 	}
+	for _, value := range values {
+		// sometimes go-amqp unmarshals to a map[any]any.
+		// it is worthwhile to copy to map[uint32]any.
+		if imap, ok := value.(map[interface{}]interface{}); ok {
+			m, err := asMapUint32(imap)
+			if err != nil {
+				return records, err
+			}
+			value = m
+		}
+		valueMap, ok := value.(map[uint32]interface{})
+		if !ok {
+			return records, fmt.Errorf("unexpected type for record attribute set: %T", value)
+		}
+		record, err := encoding.Decode(valueMap)
+		if err != nil {
+			return records, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func asMapUint32(in map[interface{}]interface{}) (map[uint32]interface{}, error) {
+	out := make(map[uint32]interface{}, len(in))
+	for k, v := range in {
+		uK, ok := k.(uint32)
+		if !ok {
+			return out, fmt.Errorf("record attribute set contains unexpected key type: %T", k)
+		}
+		out[uK] = v
+	}
+	return out, nil
 }
