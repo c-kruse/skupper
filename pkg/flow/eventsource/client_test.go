@@ -46,11 +46,13 @@ func TestClient(t *testing.T) {
 		Address: "mc/sfe.test",
 	}
 	for i := 0; i < 10; i++ {
-		sender.Send(record.Encode())
+		msg, err := record.Encode()
+		assert.Check(t, err)
+		sender.Send(msg)
 		actual := <-records
 		assert.DeepEqual(t, actual, record)
 		name := fmt.Sprintf("router-%d", i)
-		record.Records = append(record.Records, v1.RouterRecord{Name: &name})
+		record.Records = append(record.Records, &v1.RouterRecord{BaseRecord: v1.BaseRecord{Identity: name}})
 	}
 
 	closed := make(chan struct{})
@@ -64,7 +66,9 @@ func TestClient(t *testing.T) {
 		t.Error("expected client.Close() to promptly return")
 	}
 
-	sender.Send(record.Encode())
+	msg, err := record.Encode()
+	assert.Check(t, err)
+	sender.Send(msg)
 	select {
 	case <-time.After(100 * time.Millisecond): //okay
 	case <-records:
