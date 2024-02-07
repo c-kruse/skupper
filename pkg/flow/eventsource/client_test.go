@@ -34,7 +34,10 @@ func TestClient(t *testing.T) {
 
 	heartbeat := v1.HeartbeatMessage{
 		Identity: "test", Version: 1, Now: 22,
-		Source: "mc/sfe.test",
+		MessageProps: v1.MessageProps{
+			To:      "mc/sfe.test",
+			Subject: "HEARTBEAT",
+		},
 	}
 	for i := 0; i < 10; i++ {
 		sender.Send(heartbeat.Encode())
@@ -43,7 +46,10 @@ func TestClient(t *testing.T) {
 		heartbeat.Now++
 	}
 	record := v1.RecordMessage{
-		Address: "mc/sfe.test",
+		MessageProps: v1.MessageProps{
+			To:      "mc/sfe.test",
+			Subject: "RECORD",
+		},
 	}
 	for i := 0; i < 10; i++ {
 		msg, err := record.Encode()

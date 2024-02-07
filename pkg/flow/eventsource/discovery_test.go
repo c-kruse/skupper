@@ -158,10 +158,10 @@ func TestDiscoveryWatch(t *testing.T) {
 	// continually send heartbeats for source a
 	go func() {
 		heartbeat := v1.HeartbeatMessage{
-			Version:  1,
-			Now:      1000,
-			Identity: "a",
-			Source:   "mc/sfe.a",
+			Version:      1,
+			Now:          1000,
+			Identity:     "a",
+			MessageProps: v1.MessageProps{To: "mc/sfe.a"},
 		}
 		for {
 			time.Sleep(time.Millisecond * 25)

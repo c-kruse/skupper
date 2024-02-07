@@ -82,24 +82,23 @@ func (c *Client) Listen(ctx context.Context, attributes ListenerAttributeFactory
 			select {
 			case <-ctx.Done():
 				return
-			case msg, ok := <-msgs:
+			case amqpMsg, ok := <-msgs:
 				if !ok {
 					return
 				}
-				switch msg.Properties.Subject {
-				case "RECORD":
-					recordMsg, err := v1.DecodeRecord(msg)
-					if err != nil {
-						slog.Error("could not decode record message. skipping", "error", err)
-						continue
-					}
+				decoded, err := v1.Decode(amqpMsg)
+				if err != nil {
+					slog.Error("could not decode message. skipping", "error", err)
+					continue
+				}
+				switch message := decoded.(type) {
+				case v1.RecordMessage:
 					for _, handler := range recordHandlers {
-						handler(recordMsg)
+						handler(message)
 					}
-				case "HEARTBEAT":
-					heartbeatMsg := v1.DecodeHeartbeat(msg)
+				case v1.HeartbeatMessage:
 					for _, handler := range heartbeatHandlers {
-						handler(heartbeatMsg)
+						handler(message)
 					}
 				}
 			}
@@ -120,7 +119,9 @@ func (c *Client) Close() {
 
 // SendFlush sends a FlushMessage to the Event Source
 func (c *Client) SendFlush(ctx context.Context) error {
-	msg := v1.FlushMessage{Address: c.eventSource.Direct}.Encode()
+	var flush v1.FlushMessage
+	flush.To = c.eventSource.Direct
+	msg := flush.Encode()
 	conn, err := c.factory.Connect()
 	if err != nil {
 		return fmt.Errorf("could not establish connection: %s", err)
