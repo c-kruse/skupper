@@ -1,32 +1,46 @@
-package v2
+package encoding
 
 import (
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
-	"time"
 )
 
 var (
-	recordDeocderType          = reflect.TypeOf((*RecordDecoder)(nil)).Elem()
 	recordAttributeDecoderType = reflect.TypeOf((*RecordAttributeDecoder)(nil)).Elem()
+	uint32Type                 = reflect.TypeOf(uint32(0))
+	typeOfRecordV              = reflect.ValueOf(typeOfRecord)
 )
 
-type RecordDecoder interface {
-	DecodeRecord(attrs RecordAttributeSet) error
-}
+// RecordAttributeDecoder is implemented by record attribute types that can
+// handle their own decoding.
 type RecordAttributeDecoder interface {
 	DecodeRecordAttribute(attr interface{}) error
 }
 
-func Decode(recordset RecordAttributeSet) (interface{}, error) {
-	mu.RLock()
-	defer mu.RUnlock()
-	recordTypeCode, ok := recordset[typeOfRecord]
-	if !ok {
+// Decode a record from its record attribute set. Decode is only aware of
+// record types registered with MustRegisterRecord. Input must be a map type
+// containing uint32 keys (map[uint32]X or map[any]X)
+func Decode(recordset interface{}) (interface{}, error) {
+	recordsetV := reflect.ValueOf(recordset)
+	if recordset == nil ||
+		(recordsetV.Kind() == reflect.Map && recordsetV.IsNil()) {
+		return nil, errors.New("decode error: cannot decode nil record attribute set")
+	}
+	if recordsetV.Kind() != reflect.Map {
+		return nil, fmt.Errorf("decode error: cannot decode non-map type %T", recordset)
+	}
+	if !uint32Type.AssignableTo(recordsetV.Type().Key()) {
+		return nil, fmt.Errorf("decode error: cannot decode map with key type %v", recordsetV.Type().Key())
+	}
+	recordTypeCodeV := recordsetV.MapIndex(typeOfRecordV)
+	if !recordTypeCodeV.IsValid() {
 		return nil, errors.New("decode error: record type attribute not present")
 	}
+	recordTypeCode := recordTypeCodeV.Interface()
+
+	mu.RLock()
+	defer mu.RUnlock()
 	codepoint, ok := recordTypeCode.(uint32)
 	if !ok {
 		return nil, fmt.Errorf("decode error: unexpected type for record type attribute \"%T\"", recordTypeCode)
@@ -36,7 +50,7 @@ func Decode(recordset RecordAttributeSet) (interface{}, error) {
 		return nil, fmt.Errorf("decode error: unknown record type for %d", recordTypeCode)
 	}
 	recordV := reflect.New(encoding.t)
-	if err := encoding.decode(recordset, recordV); err != nil {
+	if err := encoding.decode(recordsetV, recordV); err != nil {
 		return nil, fmt.Errorf("decode error: %w", err)
 	}
 	return recordV.Interface(), nil
@@ -60,9 +74,6 @@ func getFieldDecoder(t reflect.Type) (fieldDecoder, error) {
 	case reflect.String, reflect.Uint64, reflect.Int64, reflect.Uint32, reflect.Int32:
 		return rawFieldDecoder{}, nil
 	case reflect.Struct:
-		if t == timeType {
-			return timeDecoder{}, nil
-		}
 		fallthrough
 	default:
 		return nil, fmt.Errorf("unsupported attribute type %q", t)
@@ -118,33 +129,4 @@ func (d pointerDecoder) decode(attr interface{}, v reflect.Value) error {
 		return err
 	}
 	return nil
-}
-
-type timeDecoder struct{}
-
-func (d timeDecoder) decode(attr interface{}, v reflect.Value) error {
-	if !v.CanSet() {
-		return fmt.Errorf("field not addressable")
-	}
-	uintAttr, ok := attr.(uint64)
-	if !ok {
-		return fmt.Errorf("unxpected value type for timestamp: %T", attr)
-	}
-	if uintAttr > math.MaxInt64 {
-		return fmt.Errorf("time too far in future for internal representation: %#x", uintAttr)
-	}
-	ts := time.UnixMicro(int64(uintAttr))
-	v.Set(reflect.ValueOf(ts))
-	return nil
-}
-
-func decodeRecordDecoder(attrs RecordAttributeSet, v reflect.Value) error {
-	if v.Kind() == reflect.Pointer && v.IsNil() {
-		return fmt.Errorf("decoding error: cannot unmarshal into nil.")
-	}
-	m, ok := v.Interface().(RecordDecoder)
-	if !ok {
-		panic(fmt.Sprintf("decoder error: type %s does not implement RecordDecoder", v.Type()))
-	}
-	return m.DecodeRecord(attrs)
 }
