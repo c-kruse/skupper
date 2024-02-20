@@ -3,6 +3,7 @@ package qdr
 import (
 	"context"
 	"crypto/tls"
+	"time"
 
 	amqp "github.com/interconnectedcloud/go-amqp"
 
@@ -26,7 +27,7 @@ func (f *ConnectionFactory) Connect() (messaging.Connection, error) {
 		if err != nil {
 			return nil, err
 		}
-		return dial(f.url, amqp.ConnSASLExternal(), amqp.ConnMaxFrameSize(4294967295), amqp.ConnTLSConfig(tlsConfig))
+		return dial(f.url, amqp.ConnConnectTimeout(time.Second*5), amqp.ConnSASLExternal(), amqp.ConnMaxFrameSize(4294967295), amqp.ConnTLSConfig(tlsConfig))
 	}
 }
 
@@ -96,12 +97,20 @@ func (s *AmqpSender) Send(msg *amqp.Message) error {
 	return s.sender.Send(context.Background(), msg)
 }
 
+func (s *AmqpSender) SendContext(ctx context.Context, msg *amqp.Message) error {
+	return s.sender.Send(ctx, msg)
+}
+
 func (s *AmqpSender) Close() error {
 	return s.sender.Close(context.Background())
 }
 
 func (s *AmqpReceiver) Receive() (*amqp.Message, error) {
 	return s.receiver.Receive(context.Background())
+}
+
+func (s *AmqpReceiver) ReceiveContext(ctx context.Context) (*amqp.Message, error) {
+	return s.receiver.Receive(ctx)
 }
 
 func (s *AmqpReceiver) Accept(msg *amqp.Message) error {

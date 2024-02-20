@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -145,6 +146,10 @@ type mockSender struct {
 	done       chan struct{}
 }
 
+func (s *mockSender) SendContext(_ context.Context, msg *amqp.Message) error {
+	return s.Send(msg)
+}
+
 func (s *mockSender) Send(msg *amqp.Message) error {
 	select {
 	case <-s.done:
@@ -179,6 +184,9 @@ func (r *mockReceiver) Receive() (*amqp.Message, error) {
 	return r.connection.receive(r)
 }
 
+func (r *mockReceiver) ReceiveContext(context.Context) (*amqp.Message, error) {
+	return r.Receive()
+}
 func (r *mockReceiver) Accept(msg *amqp.Message) error {
 	return nil
 }

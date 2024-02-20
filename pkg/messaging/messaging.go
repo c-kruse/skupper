@@ -1,6 +1,8 @@
 package messaging
 
 import (
+	"context"
+
 	amqp "github.com/interconnectedcloud/go-amqp"
 )
 
@@ -17,11 +19,13 @@ type Connection interface {
 
 type Sender interface {
 	Send(msg *amqp.Message) error
+	SendContext(ctx context.Context, msg *amqp.Message) error
 	Close() error
 }
 
 type Receiver interface {
 	Receive() (*amqp.Message, error)
+	ReceiveContext(context.Context) (*amqp.Message, error)
 	Accept(*amqp.Message) error
 	Close() error
 }
