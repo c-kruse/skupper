@@ -65,6 +65,14 @@ docker-build: generate-client docker-build-test-image
 	${DOCKER} buildx build --platform ${PLATFORMS} -t ${FLOW_COLLECTOR_IMAGE} -f Dockerfile.flow-collector .
 	${DOCKER} buildx build --load  -t ${FLOW_COLLECTOR_IMAGE} -f Dockerfile.flow-collector .
 
+dev-images: dev-imagebuilder $(foreach suf,$(suffix $(wildcard Dockerfile.*)),image$(suf))
+
+dev-imagebuilder:
+	${DOCKER} build -f Dockerfile.site-controller --target builder .
+
+image.%: Dockerfile.%
+	${DOCKER} build -t quay.io/skupper/$* -f $< .
+
 docker-push-test-image:
 	${DOCKER} buildx build --push --platform ${PLATFORMS} -t ${TEST_IMAGE} -f Dockerfile.ci-test .
 
