@@ -2,17 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
+	"github.com/c-kruse/vanflow/session"
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/client"
 	"github.com/skupperproject/skupper/pkg/config"
 	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/skupperproject/skupper/pkg/network"
+	"github.com/skupperproject/skupper/pkg/status"
+	"github.com/skupperproject/skupper/pkg/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -33,7 +37,6 @@ func updateLockOwner(lockname, namespace string, owner *metav1.OwnerReference, c
 }
 
 func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
-	var fc *flow.FlowCollector
 	siteData := map[string]string{}
 	platform := config.GetPlatform()
 	if platform != types.PlatformKubernetes {
@@ -55,18 +58,47 @@ func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
 		log.Println("Update lock error", err.Error())
 	}
 
-	fc = flow.NewFlowCollector(flow.FlowCollectorSpec{
-		Mode:                flow.RecordStatus,
-		Namespace:           cli.Namespace,
-		PromReg:             nil,
-		ConnectionFactory:   qdr.NewConnectionFactory("amqp://localhost:5672", nil),
-		FlowRecordTtl:       time.Minute * 15,
-		NetworkStatusClient: cli.KubeClient,
+	cf := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{
+		ContainerID: "configsync-collector-" + utils.RandomId(16),
 	})
-
-	go primeBeacons(fc, cli)
-	log.Println("COLLECTOR: Starting flow collector")
-	fc.Start(stopCh)
+	tc := status.NewFlowStatusCollector(cf)
+	var (
+		netUpdateCt       int
+		firstStatusUpdate bool
+		startTime         time.Time = time.Now()
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer cancel()
+		<-stopCh
+		log.Printf("FlowStatusCollector shutting down")
+	}()
+	tc.Run(ctx, func(info network.NetworkStatusInfo) {
+		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+		defer cancel()
+		bs, err := json.Marshal(info)
+		if err != nil {
+			log.Printf("FlowStatusCollector error decoding network status info: %s", err)
+			return
+		}
+		networkStatus := string(bs)
+		current, err := cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace).Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("FlowStatusCollector error retrieveing configmap: %s", err)
+		}
+		current.Data = map[string]string{"NetworkStatus": networkStatus}
+		_, err = cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace).Update(ctx, current, metav1.UpdateOptions{})
+		if err != nil {
+			log.Printf("FlowStatusCollector error decoding network status info: %s", err)
+		} else {
+			netUpdateCt++
+		}
+		if !firstStatusUpdate && len(info.SiteStatus) > 0 && len(info.SiteStatus[0].RouterStatus) > 0 {
+			firstStatusUpdate = true
+			log.Printf("FlowStatusCollector: First functional network status update written after %s and %d updates\n", time.Since(startTime), netUpdateCt)
+		}
+		log.Printf("FlowStatusCollector Updated skupper-network-status: %s\n", networkStatus)
+	})
 }
 
 // primeBeacons attempts to guess the router and service-controller vanflow IDs
