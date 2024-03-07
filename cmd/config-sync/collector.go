@@ -63,7 +63,8 @@ func siteCollector(ctx context.Context, cli *client.VanClient) {
 	statusCollector := status.NewFlowStatusCollector(factory)
 	go fetchCollectorHints(statusCollector, cli)
 
-	kubeHandler := status.NewKubeHandler(cli.Namespace, cli.KubeClient)
+	kubeHandler := status.NewKubeHandler(cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace))
+
 	kubeHandler.Start(ctx)
 	statusCollector.Run(ctx, kubeHandler.Handle)
 	log.Printf("FlowStatusCollector shut down")

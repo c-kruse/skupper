@@ -10,21 +10,19 @@ import (
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/pkg/network"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/util/retry"
 )
 
-func NewKubeHandler(namespace string, client kubernetes.Interface) StatusUpdateHandler {
+func NewKubeHandler(client v1.ConfigMapInterface) StatusUpdateHandler {
 	return &kubeHandler{
-		client:    client,
-		namespace: namespace,
-		hasNext:   make(chan struct{}, 1),
+		client:  client,
+		hasNext: make(chan struct{}, 1),
 	}
 }
 
 type kubeHandler struct {
-	client    kubernetes.Interface
-	namespace string
+	client v1.ConfigMapInterface
 
 	mu      sync.Mutex
 	hasNext chan struct{}
@@ -54,12 +52,12 @@ func (h *kubeHandler) Start(ctx context.Context) {
 				networkStatus := string(bs)
 				data := map[string]string{"NetworkStatus": networkStatus}
 				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					current, err := h.client.CoreV1().ConfigMaps(h.namespace).Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
+					current, err := h.client.Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
 					if err != nil {
 						return err
 					}
 					current.Data = data
-					_, err = h.client.CoreV1().ConfigMaps(h.namespace).Update(ctx, current, metav1.UpdateOptions{})
+					_, err = h.client.Update(ctx, current, metav1.UpdateOptions{})
 					return err
 				})
 				if err != nil {

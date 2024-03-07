@@ -1,17 +1,19 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
+	"github.com/c-kruse/vanflow/session"
 	"github.com/skupperproject/skupper/api/types"
 	clientpodman "github.com/skupperproject/skupper/client/podman"
 	"github.com/skupperproject/skupper/pkg/certs"
 	"github.com/skupperproject/skupper/pkg/domain/podman"
 	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/qdr"
+	"github.com/skupperproject/skupper/pkg/status"
 	"github.com/skupperproject/skupper/pkg/utils"
 	"github.com/skupperproject/skupper/pkg/version"
 )
@@ -81,15 +83,17 @@ func (c *ControllerPodman) Run(stopCh <-chan struct{}) error {
 	flowController.Start(stopCh)
 	log.Println("Started flow-controller")
 
-	var collectorLite *flow.FlowCollector
-	collectorLite = flow.NewFlowCollector(flow.FlowCollectorSpec{
-		Mode:              flow.RecordStatus,
-		Origin:            os.Getenv("SKUPPER_SITE_ID"),
-		PromReg:           nil,
-		ConnectionFactory: qdr.NewConnectionFactory("amqps://"+types.LocalTransportServiceName+":5671", c.tlsConfig),
-		FlowRecordTtl:     time.Minute * 15})
-
-	collectorLite.Start(stopCh)
+	tls, _ := c.tlsConfig.GetTlsConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	factory := session.NewContainerFactory("amqps://"+types.LocalTransportServiceName+":5671", session.ContainerConfig{
+		ContainerID: "status-collector-" + utils.RandomId(16),
+		TLSConfig:   tls,
+		SASLType:    session.SASLTypeExternal,
+	})
+	statusCollector := status.NewFlowStatusCollector(factory)
+	statusHandler := status.NewPodmanHandler("")
+	statusHandler.Start(ctx)
+	go statusCollector.Run(ctx, statusHandler.Handle)
 	log.Println("Started flow-collector lite")
 
 	//
@@ -111,6 +115,7 @@ func (c *ControllerPodman) Run(stopCh <-chan struct{}) error {
 
 	log.Println("Started container informer")
 	<-stopCh
+	cancel()
 	log.Println("Shutting down controllers")
 
 	return nil
