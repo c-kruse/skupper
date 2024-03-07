@@ -88,6 +88,8 @@ github.com/briandowns/spinner v1.23.0 h1:alDF2guRWqa/FOZZYWjlMIx2L6H0wyewPxo/CH4
 github.com/briandowns/spinner v1.23.0/go.mod h1:rPG4gmXeN3wQV/TsAY4w8lPdIM6RX3yqeBQJSrbXjuE=
 github.com/c-kruse/vanflow v0.4.1-0.20240306233915-c8dc2c717b89 h1:poP3vq6sU5wfQbvHOF6hTZeah3Th7MAmZjFHu29l2yI=
 github.com/c-kruse/vanflow v0.4.1-0.20240306233915-c8dc2c717b89/go.mod h1:hTEO8q9/n1k5YHxL/S5uIIw+Ab0AUUxU1/83fG/hxjs=
+github.com/c-kruse/vanflow v0.4.1 h1:OLkymeiSbK7x75vpBfscEWLRqoQbBSmze1TUGsD9ve8=
+github.com/c-kruse/vanflow v0.4.1/go.mod h1:hTEO8q9/n1k5YHxL/S5uIIw+Ab0AUUxU1/83fG/hxjs=
 github.com/c2h5oh/datasize v0.0.0-20171227191756-4eba002a5eae/go.mod h1:S/7n9copUssQ56c7aAgHqftWO4LTf4xY6CGWt8Bc+3M=
 github.com/cenkalti/backoff/v4 v4.2.1 h1:y4OZtCnogmCPw98Zjyt5a6+QwPLGkiQsYW5oUqylYbM=
 github.com/cenkalti/backoff/v4 v4.2.1/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=

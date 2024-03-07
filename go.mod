@@ -4,6 +4,10 @@ go 1.21
 
 require (
 	github.com/briandowns/spinner v1.23.0
+<<<<<<< HEAD
+=======
+	github.com/c-kruse/vanflow v0.4.1
+>>>>>>> adc3f16 (mod tidy)
 	github.com/davecgh/go-spew v1.1.1
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/go-openapi/errors v0.20.3
