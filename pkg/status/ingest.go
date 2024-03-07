@@ -21,6 +21,7 @@ func newFlowIngress(factory session.ContainerFactory, stores flowStores) *flowIn
 		sources:          make(map[string]clientContext),
 		errors:           make(chan error, 1),
 		purgeSource:      make(chan store.SourceRef, 32),
+		hints:            make(chan eventsource.Info),
 	}
 }
 
@@ -31,9 +32,9 @@ type clientContext struct {
 
 type flowIngest struct {
 	factory          session.ContainerFactory
+	discovery        *eventsource.Discovery
 	stores           flowStores
 	dispatchRegistry *store.DispatchRegistry
-	discovery        *eventsource.Discovery
 	ctx              context.Context
 
 	mu      sync.Mutex
@@ -41,10 +42,14 @@ type flowIngest struct {
 
 	errors      chan error
 	purgeSource chan store.SourceRef
+	hints       chan eventsource.Info
 }
 
 func (f *flowIngest) run(ctx context.Context) error {
 	f.ctx = ctx
+	discoveryContainer := f.factory.Create()
+	discoveryContainer.Start(ctx)
+	f.discovery = eventsource.NewDiscovery(discoveryContainer, eventsource.DiscoveryOptions{})
 	go f.discoverSources(ctx)
 	for {
 		select {
@@ -60,6 +65,12 @@ func (f *flowIngest) run(ctx context.Context) error {
 			slog.Info("flow ingress purged records from forgotten source",
 				slog.String("source", purged.String()),
 				slog.Int("count", total),
+			)
+		case source := <-f.hints:
+			ok := f.discovery.Add(source)
+			slog.Info("flow ingress received event source hint",
+				slog.String("source", source.ID),
+				slog.Bool("isNew", ok),
 			)
 		case err := <-f.errors:
 			return fmt.Errorf("ingress error: %v", err)
@@ -101,11 +112,7 @@ func (f *flowIngest) removeSourceRecords(source store.SourceRef) (int, error) {
 }
 
 func (f *flowIngest) discoverSources(ctx context.Context) {
-	dc := f.factory.Create()
-	dc.Start(ctx)
-	discovery := eventsource.NewDiscovery(dc, eventsource.DiscoveryOptions{})
-	f.discovery = discovery
-	err := discovery.Run(ctx, eventsource.DiscoveryHandlers{
+	err := f.discovery.Run(ctx, eventsource.DiscoveryHandlers{
 		Discovered: f.onDiscoverSource,
 		Forgotten:  f.onForgetSource,
 	})

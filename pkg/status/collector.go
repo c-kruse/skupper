@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/c-kruse/vanflow"
+	"github.com/c-kruse/vanflow/eventsource"
 	"github.com/c-kruse/vanflow/session"
 	"github.com/c-kruse/vanflow/store"
 	"github.com/google/go-cmp/cmp"
@@ -78,13 +79,13 @@ func NewFlowStatusCollector(factory session.ContainerFactory) StatusCollector {
 		},
 		EventHandlers: c.ProcessQ.Handler(),
 	})
-	c.ingress = newFlowIngress(c.factory, c.flowStores)
+	c.ingest = newFlowIngress(c.factory, c.flowStores)
 	return c
 }
 
 type flowCollector struct {
 	factory session.ContainerFactory
-	ingress *flowIngest
+	ingest  *flowIngest
 
 	flowStores
 
@@ -96,10 +97,14 @@ type flowCollector struct {
 	hasNext chan struct{}
 }
 
+func (c *flowCollector) HintEventSource(source eventsource.Info) {
+	c.ingest.hints <- source
+}
+
 func (c *flowCollector) Run(ctx context.Context, changeHandler func(status network.NetworkStatusInfo)) {
 	done := make(chan error, 1)
 	go func() {
-		done <- c.ingress.run(ctx)
+		done <- c.ingest.run(ctx)
 	}()
 	go c.handleStoreEvents(ctx)
 	var prev network.NetworkStatusInfo

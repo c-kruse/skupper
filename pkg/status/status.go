@@ -9,13 +9,16 @@ package status
 import (
 	"context"
 
+	"github.com/c-kruse/vanflow/eventsource"
 	"github.com/skupperproject/skupper/pkg/network"
 )
 
 type StatusCollector interface {
 	Run(context.Context, func(status network.NetworkStatusInfo))
+	HintEventSource(source eventsource.Info)
 }
 
 type StatusUpdateHandler interface {
-	Update(ctx context.Context, status network.NetworkStatusInfo) error
+	Start(context.Context)
+	Handle(status network.NetworkStatusInfo)
 }

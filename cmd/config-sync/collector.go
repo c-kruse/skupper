@@ -2,19 +2,18 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
+	"github.com/c-kruse/vanflow/eventsource"
 	"github.com/c-kruse/vanflow/session"
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/client"
 	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/kube"
-	"github.com/skupperproject/skupper/pkg/network"
 	"github.com/skupperproject/skupper/pkg/status"
 	"github.com/skupperproject/skupper/pkg/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,7 +35,7 @@ func updateLockOwner(lockname, namespace string, owner *metav1.OwnerReference, c
 	return err
 }
 
-func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
+func siteCollector(ctx context.Context, cli *client.VanClient) {
 	siteData := map[string]string{}
 	platform := config.GetPlatform()
 	if platform != types.PlatformKubernetes {
@@ -58,52 +57,22 @@ func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
 		log.Println("Update lock error", err.Error())
 	}
 
-	cf := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{
+	factory := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{
 		ContainerID: "configsync-collector-" + utils.RandomId(16),
 	})
-	tc := status.NewFlowStatusCollector(cf)
-	var (
-		netUpdateCt       int
-		firstStatusUpdate bool
-		startTime         time.Time = time.Now()
-	)
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		defer cancel()
-		<-stopCh
-		log.Printf("FlowStatusCollector shutting down")
-	}()
-	tc.Run(ctx, func(info network.NetworkStatusInfo) {
-		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-		defer cancel()
-		bs, err := json.Marshal(info)
-		if err != nil {
-			log.Printf("FlowStatusCollector error decoding network status info: %s", err)
-			return
-		}
-		networkStatus := string(bs)
-		current, err := cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace).Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
-		if err != nil {
-			log.Printf("FlowStatusCollector error retrieveing configmap: %s", err)
-		}
-		current.Data = map[string]string{"NetworkStatus": networkStatus}
-		_, err = cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace).Update(ctx, current, metav1.UpdateOptions{})
-		if err != nil {
-			log.Printf("FlowStatusCollector error decoding network status info: %s", err)
-		} else {
-			netUpdateCt++
-		}
-		if !firstStatusUpdate && len(info.SiteStatus) > 0 && len(info.SiteStatus[0].RouterStatus) > 0 {
-			firstStatusUpdate = true
-			log.Printf("FlowStatusCollector: First functional network status update written after %s and %d updates\n", time.Since(startTime), netUpdateCt)
-		}
-		log.Printf("FlowStatusCollector Updated skupper-network-status: %s\n", networkStatus)
-	})
+	statusCollector := status.NewFlowStatusCollector(factory)
+	go fetchCollectorHints(statusCollector, cli)
+
+	kubeHandler := status.NewKubeHandler(cli.Namespace, cli.KubeClient)
+	kubeHandler.Start(ctx)
+	statusCollector.Run(ctx, kubeHandler.Handle)
+	log.Printf("FlowStatusCollector shut down")
 }
 
-// primeBeacons attempts to guess the router and service-controller vanflow IDs
-// to pass to the flow collector in order to accelerate startup time.
-func primeBeacons(fc *flow.FlowCollector, cli *client.VanClient) {
+// fetchCollectorHints attempts to guess the local controller and router event
+// source IDs and push them to the status collector in order to accelerate
+// startup time.
+func fetchCollectorHints(collector status.StatusCollector, cli *client.VanClient) {
 	podname, _ := os.Hostname()
 	var prospectRouterID string
 	if len(podname) >= 5 {
@@ -116,13 +85,36 @@ func primeBeacons(fc *flow.FlowCollector, cli *client.VanClient) {
 	} else if cm != nil {
 		siteID = string(cm.ObjectMeta.UID)
 	}
-	log.Printf("COLLECTOR: Priming site with expected beacons for '%s' and '%s'\n", prospectRouterID, siteID)
-	fc.PrimeSiteBeacons(siteID, prospectRouterID)
+	if siteID != "" {
+		source := eventsource.Info{
+			ID:      siteID,
+			Version: 1,
+			Type:    "CONTROLLER",
+			Address: "mc/sfe." + siteID,
+			Direct:  "sfe." + siteID,
+		}
+		collector.HintEventSource(source)
+		log.Printf("COLLECTOR: sent hint for event source %v", source)
+	}
+	if prospectRouterID != "" {
+		source := eventsource.Info{
+			ID:      prospectRouterID,
+			Version: 1,
+			Type:    "ROUTER",
+			Address: "mc/sfe." + prospectRouterID,
+			Direct:  "sfe." + prospectRouterID,
+		}
+		collector.HintEventSource(source)
+		log.Printf("COLLECTOR: sent hint for event source %v", source)
+	}
 }
 
 func runLeaderElection(lock *resourcelock.ConfigMapLock, ctx context.Context, id string, cli *client.VanClient) {
 	begin := time.Now()
-	var stopCh chan struct{}
+	var (
+		leaderCtx context.Context
+		cancel    context.CancelCauseFunc
+	)
 	podname, _ := os.Hostname()
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 		Lock:            lock,
@@ -133,12 +125,15 @@ func runLeaderElection(lock *resourcelock.ConfigMapLock, ctx context.Context, id
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(c context.Context) {
 				log.Printf("COLLECTOR: Leader %s starting site collection after %s\n", podname, time.Since(begin))
-				stopCh = make(chan struct{})
-				siteCollector(stopCh, cli)
+				leaderCtx, cancel = context.WithCancelCause(ctx)
+				siteCollector(leaderCtx, cli)
 			},
 			OnStoppedLeading: func() {
+				if cancel == nil { //shouldn't happen
+					return
+				}
 				// No longer the leader, transition to inactive
-				close(stopCh)
+				cancel(errors.New("lost leader election"))
 			},
 			OnNewLeader: func(current_id string) {
 				if current_id == id {
