@@ -7,7 +7,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/skupperproject/skupper/pkg/certs"
 	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/qdr"
 )
@@ -16,7 +15,7 @@ type Controller struct {
 	FlowCollector *flow.FlowCollector
 }
 
-func NewController(origin string, reg prometheus.Registerer, scheme string, host string, port string, tlsConfig *certs.TlsConfigRetriever, recordTtl time.Duration) (*Controller, error) {
+func NewController(origin string, reg prometheus.Registerer, scheme string, host string, port string, tlsConfig qdr.TlsConfigRetriever, recordTtl time.Duration) (*Controller, error) {
 
 	controller := &Controller{
 		FlowCollector: flow.NewFlowCollector(flow.FlowCollectorSpec{

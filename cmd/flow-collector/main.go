@@ -11,10 +11,10 @@ import (
 	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -22,31 +22,19 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/utils"
+	"github.com/skupperproject/skupper/pkg/qdr"
 
 	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
 	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/kube"
 	"github.com/skupperproject/skupper/pkg/version"
 )
 
-// should this be in utils?
-type tlsConfig struct {
-	Ca     string `json:"ca,omitempty"`
-	Cert   string `json:"cert,omitempty"`
-	Key    string `json:"key,omitempty"`
-	Verify bool   `json:"recType,omitempty"`
-}
+type authKeyType string
 
-type connectJson struct {
-	Scheme string    `json:"scheme,omitempty"`
-	Host   string    `json:"host,omitempty"`
-	Port   string    `json:"port,omitempty"`
-	Tls    tlsConfig `json:"tls,omitempty"`
+const authKey authKeyType = "authentication"
+
+type basicAuthID struct {
+	User string
 }
 
 type UserResponse struct {
@@ -57,20 +45,15 @@ type UserResponse struct {
 var onlyOneSignalHandler = make(chan struct{})
 var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 
-func getConnectInfo(file string) (connectJson, error) {
-	cj := connectJson{}
-
-	jsonFile, err := os.ReadFile(file)
+func getConnectInfo(file string) (ConnectionSpec, error) {
+	var spec ConnectionSpec
+	f, err := os.Open(file)
 	if err != nil {
-		return cj, err
+		return spec, err
 	}
-
-	err = json.Unmarshal(jsonFile, &cj)
-	if err != nil {
-		return cj, err
-	}
-
-	return cj, nil
+	defer f.Close()
+	err = json.NewDecoder(f).Decode(&spec)
+	return spec, err
 }
 
 func SetupSignalHandler() (stopCh <-chan struct{}) {
@@ -114,30 +97,21 @@ func authenticate(dir string, user string, password string) bool {
 	}
 	defer file.Close()
 
-	bytes, err := io.ReadAll(file)
+	canonical, err := io.ReadAll(file)
 	if err != nil {
 		log.Printf("COLLECTOR: Failed to authenticate %s: %s", user, err)
 		return false
 	}
-	return string(bytes) == password
+	return string(canonical) == password
 }
 
 func authenticated(h http.HandlerFunc) http.HandlerFunc {
-	dir := os.Getenv("FLOW_USERS")
-
-	if dir != "" {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, password, ok := r.BasicAuth()
-
-			if ok && authenticate(dir, user, password) {
-				h.ServeHTTP(w, r)
-			} else {
-				w.Header().Set("WWW-Authenticate", "Basic realm=skupper")
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			}
-		})
-	} else {
-		return h
+	return func(rw http.ResponseWriter, r *http.Request) {
+		if v := r.Context().Value(authKey); v == nil {
+			rw.Header().Set("WWW-Authenticate", "Basic realm=skupper-network-console")
+			http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+		}
+		h(rw, r)
 	}
 }
 
@@ -208,10 +182,28 @@ func internalLogout(w http.ResponseWriter, r *http.Request, validNonces map[stri
 }
 
 func main() {
+	var cfg Config
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	// if -version used, report and exit
 	isVersion := flags.Bool("version", false, "Report the version of the Skupper Flow Collector")
-	isProf := flags.Bool("profile", false, "Exposes the runtime profiling facilities from net/http/pprof on http://localhost:9970")
+
+	flags.StringVar(&cfg.FlowConnectionFile, "flow-connection-file", "/etc/messaging/connect.json", "Path to the file detailing connection info for the skupper router")
+
+	flags.StringVar(&cfg.APIListenAddress, "listen", ":8010", "The address that the API Server will listen on")
+	flags.BoolVar(&cfg.APIDisableCORS, "disable-cors", false, "Disables CORS for the API Server")
+	flags.BoolVar(&cfg.APIDisableAccessLogs, "disable-access-logs", false, "Disables access logging for the API Server")
+	flags.StringVar(&cfg.CertFile, "cert-file", "/etc/console/tls.crt", "Path to the API Server certificate file")
+	flags.StringVar(&cfg.KeyFile, "key-file", "/etc/console/tls.key", "Path to the API Server certificate key file")
+
+	flags.StringVar(&cfg.AuthMode, "authmode", "internal", "API and Console Authentication Mode. One of `internal`, `openshift`, `unsecured`")
+	flags.StringVar(&cfg.BasicAuthDir, "basic-auth-dir", "/etc/console-users", "Directory containing user credentials for basic auth mode")
+
+	flags.BoolVar(&cfg.EnableConsole, "enable-console", false, "Enables the web console")
+	flags.StringVar(&cfg.ConsoleLocation, "console-location", "/app/console", "Location where the console assets are installed")
+	flags.StringVar(&cfg.PrometheusAPI, "prometheus-api", "http://network-console-prometheus:9090", "Prometheus API HTTP endpoint for console")
+
+	flags.DurationVar(&cfg.FlowRecordTTL, "flow-record-ttl", 15*time.Minute, "How long to retain flow records in memory")
+	flags.BoolVar(&cfg.EnableProfile, "profile", false, "Exposes the runtime profiling facilities from net/http/pprof on http://localhost:9970")
 
 	flags.Parse(os.Args[1:])
 	if *isVersion {
@@ -222,93 +214,33 @@ func main() {
 	// Startup message
 	log.Printf("COLLECTOR: Starting Skupper Flow collector controller version %s \n", version.Version)
 
-	origin := os.Getenv("SKUPPER_SITE_ID")
-	namespace := os.Getenv("SKUPPER_NAMESPACE")
-
 	// set up signals so we handle the first shutdown signal gracefully
 	stopCh := SetupSignalHandler()
 
-	platform := config.GetPlatform()
-	var flowRecordTtl time.Duration
-	var enableConsole bool
-	var prometheusUrl string
-	var authMode string
 	//collecting valid nonces for internal auth mode
 	var validNonces = make(map[string]bool)
 
-	// waiting on skupper-router to be available
-	if platform == "" || platform == types.PlatformKubernetes {
-		cli, err := client.NewClient(namespace, "", "")
-		if err != nil {
-			log.Fatal("COLLECTOR: Error getting van client", err.Error())
-		}
-
-		log.Println("COLLECTOR: Waiting for Skupper router component to start")
-		_, err = kube.WaitDeploymentReady(types.TransportDeploymentName, namespace, cli.KubeClient, time.Second*180, time.Second*5)
-		if err != nil {
-			log.Fatal("COLLECTOR: Error waiting for transport deployment to be ready ", err.Error())
-		}
-
-		siteConfig, err := cli.SiteConfigInspect(context.Background(), nil)
-		if err != nil {
-			log.Fatal("COLLECTOR: Error getting site config", err.Error())
-		}
-
-		flowRecordTtl = siteConfig.Spec.FlowCollector.FlowRecordTtl
-		enableConsole = siteConfig.Spec.EnableConsole
-		authMode = siteConfig.Spec.AuthMode
-
-		svc, err := kube.GetService(types.PrometheusServiceName, cli.Namespace, cli.KubeClient)
-		if err == nil {
-			prometheusUrl = "http://" + svc.Spec.ClusterIP + ":" + fmt.Sprint(svc.Spec.Ports[0].Port) + "/api/v1/"
-		}
-	} else {
-		cfg, err := podman.NewPodmanConfigFileHandler().GetConfig()
-		if err != nil {
-			log.Fatal("Error reading podman site config", err)
-		}
-		podmanCli, err := clientpodman.NewPodmanClient(cfg.Endpoint, "")
-		if err != nil {
-			log.Fatal("Error creating podman client", err)
-		}
-		err = utils.Retry(time.Second, 120, func() (bool, error) {
-			router, err := podmanCli.ContainerInspect(types.TransportDeploymentName)
-			if err != nil {
-				return false, fmt.Errorf("error retrieving %s container state - %w", types.TransportDeploymentName, err)
-			}
-			if !router.Running {
-				return false, nil
-			}
-			return true, nil
-		})
-		if err != nil {
-			log.Fatalf("unable to determine if %s container is running - %s", types.TransportDeploymentName, err)
-		}
-		flowRecordTtl, _ = time.ParseDuration(os.Getenv("FLOW_RECORD_TTL"))
-		enableConsole, _ = strconv.ParseBool(os.Getenv("ENABLE_CONSOLE"))
-		prometheusUrl = "http://skupper-prometheus:9090/api/v1/"
-
-		flowUsers := os.Getenv("FLOW_USERS")
-		// Podman support only unsecured auth mode and internal auth mode
-		authMode = types.ConsoleAuthModeUnsecured
-		if flowUsers != "" {
-			authMode = types.ConsoleAuthModeInternal
-		}
+	conn, err := getConnectInfo(cfg.FlowConnectionFile)
+	if err != nil {
+		log.Fatal("Error reading flow connection file", err.Error())
 	}
 
-	tlsConfig := certs.GetTlsConfigRetriever(true, types.ControllerConfigPath+"tls.crt", types.ControllerConfigPath+"tls.key", types.ControllerConfigPath+"ca.crt")
-
-	conn, err := getConnectInfo(types.ControllerConfigPath + "connect.json")
-	if err != nil {
-		log.Fatal("Error getting connect.json", err.Error())
+	var tlsConfig qdr.TlsConfigRetriever
+	if conn.TLS.Key != "" || conn.TLS.CA != "" {
+		tlsConfig = certs.GetTlsConfigRetriever(true, conn.TLS.Cert, conn.TLS.Key, conn.TLS.CA)
 	}
 
 	reg := prometheus.NewRegistry()
-	c, err := NewController(origin, reg, conn.Scheme, conn.Host, conn.Port, tlsConfig, flowRecordTtl)
+	c, err := NewController("", reg, conn.Scheme, conn.Host, conn.Port, tlsConfig, cfg.FlowRecordTTL)
 	if err != nil {
 		log.Fatal("Error getting new flow collector ", err.Error())
 	}
-	c.FlowCollector.Collector.PrometheusUrl = prometheusUrl
+
+	promURL, err := url.JoinPath(cfg.PrometheusAPI, "/api/v1/")
+	if err != nil {
+		log.Fatalf("Error parsing prometheus api endpoint: %s", err)
+	}
+	c.FlowCollector.Collector.PrometheusUrl = promURL
 
 	// map the authentication mode with the function to get the user
 	userMap := make(map[string]func(*http.Request) UserResponse)
@@ -323,12 +255,32 @@ func main() {
 	}
 
 	var mux = mux.NewRouter().StrictSlash(true)
+	switch cfg.AuthMode {
+	case "internal":
+		mux.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, password, ok := r.BasicAuth()
+				if ok && authenticate(cfg.BasicAuthDir, user, password) {
+					ctx := context.WithValue(r.Context(), authKey, basicAuthID{User: user})
+					r = r.WithContext(ctx)
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+	default:
+		mux.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := context.WithValue(r.Context(), authKey, "unauthenticated")
+				next.ServeHTTP(w, r.WithContext(ctx))
+			})
+		})
+	}
 
 	var api = mux.PathPrefix("/api").Subrouter()
 	api.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	if os.Getenv("USE_CORS") != "" {
+	if !cfg.APIDisableCORS {
 		api.Use(cors)
 	}
 
@@ -336,13 +288,9 @@ func main() {
 	api1.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	var logUri = os.Getenv("LOG_REQ_URI")
-	if logUri == "true" {
+	if !cfg.APIDisableAccessLogs {
 		api1.Use(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				log.Printf("COLLECTOR: request uri %s \n", r.RequestURI)
-				next.ServeHTTP(w, r)
-			})
+			return handlers.LoggingHandler(os.Stdout, next)
 		})
 	}
 
@@ -386,7 +334,7 @@ func main() {
 	var userApi = api1.PathPrefix("/user").Subrouter()
 	userApi.StrictSlash(true)
 	userApi.HandleFunc("/", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, exists := userMap[authMode]
+		handler, exists := userMap[cfg.AuthMode]
 
 		if !exists {
 			w.WriteHeader(http.StatusNoContent)
@@ -408,7 +356,7 @@ func main() {
 	var userLogout = api1.PathPrefix("/logout").Subrouter()
 	userLogout.StrictSlash(true)
 	userLogout.HandleFunc("/", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, exists := logoutMap[authMode]
+		handler, exists := logoutMap[cfg.AuthMode]
 		if exists {
 			handler(w, r)
 		}
@@ -548,8 +496,8 @@ func main() {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	if enableConsole {
-		mux.PathPrefix("/").Handler(http.FileServer(http.Dir("/app/console/")))
+	if cfg.EnableConsole {
+		mux.PathPrefix("/").Handler(http.FileServer(http.Dir(cfg.ConsoleLocation)))
 	} else {
 		log.Println("COLLECTOR: Skupper console is disabled")
 	}
@@ -566,34 +514,26 @@ func main() {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	addr := ":8010"
-	if os.Getenv("FLOW_PORT") != "" {
-		addr = ":" + os.Getenv("FLOW_PORT")
-	}
-	if os.Getenv("FLOW_HOST") != "" {
-		addr = os.Getenv("FLOW_HOST") + addr
-	}
-	log.Printf("COLLECTOR: server listening on %s", addr)
+	log.Printf("COLLECTOR: server listening on %s", cfg.APIListenAddress)
 	s := &http.Server{
-		Addr:    addr,
+		Addr:    cfg.APIListenAddress,
 		Handler: handlers.CompressHandler(mux),
 	}
 
 	go func() {
-		_, err := os.Stat("/etc/service-controller/console/tls.crt")
-		if err == nil {
-			err := s.ListenAndServeTLS("/etc/service-controller/console/tls.crt", "/etc/service-controller/console/tls.key")
+		if cfg.CertFile != "" {
+			err := s.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile)
 			if err != nil {
-				fmt.Println(err)
+				log.Fatalf("http server error: %s", err)
 			}
 		} else {
 			err := s.ListenAndServe()
 			if err != nil {
-				fmt.Println(err)
+				log.Fatalf("http server error: %s", err)
 			}
 		}
 	}()
-	if *isProf {
+	if cfg.EnableProfile {
 		// serve only over localhost loopback
 		go func() {
 			if err := http.ListenAndServe("localhost:9970", nil); err != nil {

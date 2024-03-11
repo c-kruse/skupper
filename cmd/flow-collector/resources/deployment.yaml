@@ -1,0 +1,52 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: network-console
+  name: network-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: network-console
+  template:
+    metadata:
+      labels:
+        app: network-console
+    spec:
+      containers:
+      - image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
+        args:
+          - /app/flow-collector
+          - -enable-console
+        imagePullPolicy: Always
+        name: network-console
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /etc/console-users/
+          name: network-console-users
+        - mountPath: /etc/console/
+          name: network-console-certs
+        - mountPath: /etc/messaging/
+          name: skupper-local-client
+        ports:
+        - containerPort: 8010
+      volumes:
+      - name: network-console-users
+        secret:
+          defaultMode: 420
+          secretName: network-console-users
+      - name: network-console-certs
+        secret:
+          defaultMode: 420
+          secretName: network-console-certs
+      - name: skupper-local-client
+        secret:
+          defaultMode: 420
+          secretName: skupper-local-client

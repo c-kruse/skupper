@@ -39,7 +39,7 @@ build-site-controller:
 	GOOS=${GOOS} GOARCH=${GOARCH} go build -ldflags="${LDFLAGS}"  -o site-controller cmd/site-controller/main.go cmd/site-controller/controller.go
 
 build-flow-collector:
-	GOOS=${GOOS} GOARCH=${GOARCH} go build -ldflags="${LDFLAGS}"  -o flow-collector cmd/flow-collector/main.go cmd/flow-collector/controller.go cmd/flow-collector/handlers.go
+	GOOS=${GOOS} GOARCH=${GOARCH} go build -ldflags="${LDFLAGS}"  -o flow-collector ./cmd/flow-collector
 
 build-config-sync:
 	GOOS=${GOOS} GOARCH=${GOARCH} go build -ldflags="${LDFLAGS}"  -o config-sync cmd/config-sync/main.go cmd/config-sync/config_sync.go cmd/config-sync/collector.go
