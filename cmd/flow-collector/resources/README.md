@@ -61,3 +61,17 @@ Usage of flow-collector:
 * Small cosmetic rework of authentication/authorization for the new config
   scheme. Before this can stand on its own I think we could benefit form
   re-evaluating this.
+
+Usage:
+
+1. Make sure [cert-manager](https://cert-manager.io/) is installed on your cluster. `kubectl get crd certificates.cert-manager.io`
+1. Make sure skupper is running in the current context's namesapce. `skupper status`
+1. Run the init script to deploy the network-console with prometheus. `./consoleinit.sh`
+1. Retrieve the network-console-users secret ``
+1. See the running console either in browser or via the API.
+```
+export CONSOLE_ADMIN_PWD=$(kubectl get secret/network-console-users -o jsonpath={.data.admin} | base64 -d)
+export CONSOLE_API_URL=https://$(k get svc network-console -o jsonpath="{.status.loadBalancer.ingress[0].ip}"):8010
+curl -k -u "admin:$CONSOLE_ADMIN_PWD" "$CONSOLE_API_URL/api/v1alpha1/sites/"
+```
+

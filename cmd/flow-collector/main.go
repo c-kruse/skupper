@@ -110,6 +110,7 @@ func authenticated(h http.HandlerFunc) http.HandlerFunc {
 		if v := r.Context().Value(authKey); v == nil {
 			rw.Header().Set("WWW-Authenticate", "Basic realm=skupper-network-console")
 			http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 		h(rw, r)
 	}
