@@ -1,4 +1,26 @@
 ---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: network-console-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: network-console-cert
+spec:
+  commonName: network-console
+  secretName: network-console-certs
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: network-console-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,3 +72,19 @@ spec:
         secret:
           defaultMode: 420
           secretName: skupper-local-client
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: network-console
+  name: network-console
+spec:
+  ports:
+  - port: 8010
+    protocol: TCP
+    targetPort: 8010
+  selector:
+    app: network-console
+  type: LoadBalancer
+
