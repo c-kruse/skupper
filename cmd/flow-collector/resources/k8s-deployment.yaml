@@ -41,6 +41,8 @@ spec:
       - image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
         args:
           - /app/flow-collector
+          - -tls-cert=/etc/console/tls.crt
+          - -tls-key=/etc/console/tls.key
           - -enable-console
         imagePullPolicy: Always
         name: network-console

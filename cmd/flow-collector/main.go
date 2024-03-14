@@ -72,18 +72,6 @@ func SetupSignalHandler() (stopCh <-chan struct{}) {
 	return stop
 }
 
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
-		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE")
-		next.ServeHTTP(w, r)
-	})
-}
-
 func authenticate(dir string, user string, password string) bool {
 	filename := path.Join(dir, user)
 	file, err := os.Open(filename)
@@ -191,10 +179,9 @@ func main() {
 	flags.StringVar(&cfg.FlowConnectionFile, "flow-connection-file", "/etc/messaging/connect.json", "Path to the file detailing connection info for the skupper router")
 
 	flags.StringVar(&cfg.APIListenAddress, "listen", ":8010", "The address that the API Server will listen on")
-	flags.BoolVar(&cfg.APIDisableCORS, "disable-cors", false, "Disables CORS for the API Server")
 	flags.BoolVar(&cfg.APIDisableAccessLogs, "disable-access-logs", false, "Disables access logging for the API Server")
-	flags.StringVar(&cfg.CertFile, "cert-file", "/etc/console/tls.crt", "Path to the API Server certificate file")
-	flags.StringVar(&cfg.KeyFile, "key-file", "/etc/console/tls.key", "Path to the API Server certificate key file")
+	flags.StringVar(&cfg.TLSCert, "tls-cert", "", "Path to the API Server certificate file")
+	flags.StringVar(&cfg.TLSKey, "tls-key", "", "Path to the API Server certificate key file matching tls-cert")
 
 	flags.StringVar(&cfg.AuthMode, "authmode", "internal", "API and Console Authentication Mode. One of `internal`, `openshift`, `unsecured`")
 	flags.StringVar(&cfg.BasicAuthDir, "basic-auth-dir", "/etc/console-users", "Directory containing user credentials for basic auth mode")
@@ -204,6 +191,7 @@ func main() {
 	flags.StringVar(&cfg.PrometheusAPI, "prometheus-api", "http://network-console-prometheus:9090", "Prometheus API HTTP endpoint for console")
 
 	flags.DurationVar(&cfg.FlowRecordTTL, "flow-record-ttl", 15*time.Minute, "How long to retain flow records in memory")
+	flags.BoolVar(&cfg.CORSAllowAll, "cors-allow-all", false, "Development option to allow all origins")
 	flags.BoolVar(&cfg.EnableProfile, "profile", false, "Exposes the runtime profiling facilities from net/http/pprof on http://localhost:9970")
 
 	flags.Parse(os.Args[1:])
@@ -281,8 +269,8 @@ func main() {
 	api.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	if !cfg.APIDisableCORS {
-		api.Use(cors)
+	if cfg.CORSAllowAll {
+		api.Use(handlers.CORS())
 	}
 
 	var api1 = api.PathPrefix("/v1alpha1").Subrouter()
@@ -522,8 +510,8 @@ func main() {
 	}
 
 	go func() {
-		if cfg.CertFile != "" {
-			err := s.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile)
+		if cfg.TLSCert != "" {
+			err := s.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
 			if err != nil {
 				log.Fatalf("http server error: %s", err)
 			}

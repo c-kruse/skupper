@@ -47,8 +47,6 @@ spec:
         args:
           - /app/flow-collector
           - -listen=localhost:8080
-          - -cert-file=
-          - -key-file=
           - -authmode=openshift
           - -enable-console
         imagePullPolicy: Always

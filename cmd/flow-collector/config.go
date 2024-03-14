@@ -4,10 +4,9 @@ import "time"
 
 type Config struct {
 	APIListenAddress     string
-	APIDisableCORS       bool
 	APIDisableAccessLogs bool
-	CertFile             string
-	KeyFile              string
+	TLSCert              string
+	TLSKey               string
 
 	EnableConsole   bool
 	ConsoleLocation string
@@ -20,6 +19,7 @@ type Config struct {
 	FlowRecordTTL      time.Duration
 
 	EnableProfile bool
+	CORSAllowAll  bool
 }
 
 type TLSSpec struct {
