@@ -1,0 +1,25 @@
+version: 4
+networks:
+  skupper:
+    external: true
+
+volumes:
+  skupper-local-client:
+    external: true
+
+services:
+  network-console:
+    image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
+    network: skupper
+    command:
+      - /app/flow-collector
+      - -enable-console
+      - -authmode="insecure"
+    volumes:
+      - skupper-local-client:/etc/messaging:z
+    ports:
+      - "8010:8010"
+  network-console-prometheus:
+    image: prom/prometheus:latest
+    network: skupper
+    volumes: ./static:/etc/prometheus:ro,z

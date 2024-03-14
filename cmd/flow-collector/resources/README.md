@@ -37,3 +37,11 @@ export CONSOLE_API_URL=https://$(k get svc network-console -o jsonpath="{.status
 curl -k -u "admin:$CONSOLE_ADMIN_PWD" "$CONSOLE_API_URL/api/v1alpha1/sites/"
 ```
 
+## Podman:
+
+A podman-compose project that runs the console unsecured.
+
+
+1. Make sure skupper deployed as a podman site under your user. `skupper status --platform podman`
+1. Run `podman-compose up -d`
+1. The console should start at http://localhost:8010
