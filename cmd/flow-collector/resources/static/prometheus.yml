@@ -6,6 +6,6 @@ global:
 
 scrape_configs:
   - job_name: "prometheus"
-    metrics_path: "/api/v1alpha1/metrics"
+    metrics_path: "/metrics"
     static_configs:
-      - targets: ["network-console:8010"]
+      - targets: ["network-console:9090"]

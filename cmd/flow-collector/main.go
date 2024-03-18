@@ -178,10 +178,11 @@ func main() {
 
 	flags.StringVar(&cfg.FlowConnectionFile, "flow-connection-file", "/etc/messaging/connect.json", "Path to the file detailing connection info for the skupper router")
 
-	flags.StringVar(&cfg.APIListenAddress, "listen", ":8010", "The address that the API Server will listen on")
+	flags.StringVar(&cfg.APIListenAddress, "listen", ":8080", "The address that the API Server will listen on")
 	flags.BoolVar(&cfg.APIDisableAccessLogs, "disable-access-logs", false, "Disables access logging for the API Server")
 	flags.StringVar(&cfg.TLSCert, "tls-cert", "", "Path to the API Server certificate file")
 	flags.StringVar(&cfg.TLSKey, "tls-key", "", "Path to the API Server certificate key file matching tls-cert")
+	flags.StringVar(&cfg.MetricsListenAddress, "listen-metrics", ":9090", "The address that prometheus metrics server will listen on")
 
 	flags.StringVar(&cfg.AuthMode, "authmode", "internal", "API and Console Authentication Mode. One of `internal`, `openshift`, `unsecured`")
 	flags.StringVar(&cfg.BasicAuthDir, "basic-auth-dir", "/etc/console-users", "Directory containing user credentials for basic auth mode")
@@ -308,9 +309,10 @@ func main() {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
+	metricsHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 	var metricsApi = api1.PathPrefix("/metrics").Subrouter()
 	metricsApi.StrictSlash(true)
-	metricsApi.Handle("/", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+	metricsApi.Handle("/", metricsHandler)
 
 	var eventsourceApi = api1.PathPrefix("/eventsources").Subrouter()
 	eventsourceApi.StrictSlash(true)
@@ -508,6 +510,16 @@ func main() {
 		Addr:    cfg.APIListenAddress,
 		Handler: handlers.CompressHandler(mux),
 	}
+	metricsMux := http.NewServeMux()
+	if !cfg.APIDisableAccessLogs {
+		metricsHandler = handlers.LoggingHandler(os.Stdout, metricsHandler)
+	}
+	metricsMux.Handle("/metrics", metricsHandler)
+	metricsMux.Handle("/metrics/", metricsHandler)
+	promSrv := &http.Server{
+		Addr:    cfg.MetricsListenAddress,
+		Handler: metricsMux,
+	}
 
 	go func() {
 		if cfg.TLSCert != "" {
@@ -520,6 +532,11 @@ func main() {
 			if err != nil {
 				log.Fatalf("http server error: %s", err)
 			}
+		}
+	}()
+	go func() {
+		if err := promSrv.ListenAndServe(); err != nil {
+			log.Fatalf("http metrics server error: %s", err)
 		}
 	}()
 	if cfg.EnableProfile {

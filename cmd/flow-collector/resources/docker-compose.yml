@@ -12,13 +12,12 @@ services:
     image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
     network: skupper
     command:
-      - /app/flow-collector
       - -enable-console
       - -authmode="insecure"
     volumes:
       - skupper-local-client:/etc/messaging:z
     ports:
-      - "8010:8010"
+      - "8080:8080"
   network-console-prometheus:
     image: prom/prometheus:latest
     network: skupper

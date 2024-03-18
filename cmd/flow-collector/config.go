@@ -8,6 +8,8 @@ type Config struct {
 	TLSCert              string
 	TLSKey               string
 
+	MetricsListenAddress string
+
 	EnableConsole   bool
 	ConsoleLocation string
 	PrometheusAPI   string

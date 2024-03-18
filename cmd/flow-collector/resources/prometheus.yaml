@@ -77,12 +77,10 @@ data:
     rule_files:
     scrape_configs:
       - job_name: 'consolemetrics'
-        metrics_path: "/api/v1alpha1/metrics"
-        scheme: "https"
-        tls_config:
-          insecure_skip_verify: true
+        metrics_path: "/metrics/"
+        scheme: "http"
         static_configs:
-          - targets: ["network-console:8010"]
+          - targets: ["network-console:9090"]
   web-config.yml: |
     # TLS configuration.
     #

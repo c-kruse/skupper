@@ -33,7 +33,7 @@ A plain kubernetes deployment has a few extra dependencies.
 1. See the running console either in browser or via the API.
 ```
 export CONSOLE_ADMIN_PWD=$(kubectl get secret/network-console-users -o jsonpath={.data.admin} | base64 -d)
-export CONSOLE_API_URL=https://$(k get svc network-console -o jsonpath="{.status.loadBalancer.ingress[0].ip}"):8010
+export CONSOLE_API_URL=https://$(k get svc network-console -o jsonpath="{.status.loadBalancer.ingress[0].ip}"):8080
 curl -k -u "admin:$CONSOLE_ADMIN_PWD" "$CONSOLE_API_URL/api/v1alpha1/sites/"
 ```
 
@@ -44,4 +44,4 @@ A podman-compose project that runs the console unsecured.
 
 1. Make sure skupper deployed as a podman site under your user. `skupper status --platform podman`
 1. Run `podman-compose up -d`
-1. The console should start at http://localhost:8010
+1. The console should start at http://localhost:8080

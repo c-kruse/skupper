@@ -13,6 +13,10 @@ spec:
     port: 8443
     protocol: TCP
     targetPort: 8443
+  - name: metrics
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
   selector:
     app: network-console
   type: ClusterIP
@@ -45,8 +49,8 @@ spec:
       - name: network-console
         image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
         args:
-          - /app/flow-collector
-          - -listen=localhost:8080
+          - -listen=127.0.0.1:8080
+          - -listen-metrics=:9090
           - -authmode=openshift
           - -enable-console
         imagePullPolicy: Always
@@ -59,6 +63,10 @@ spec:
         volumeMounts:
         - mountPath: /etc/messaging/
           name: skupper-local-client
+        ports:
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
       - name: oauth-proxy
         image: quay.io/openshift/origin-oauth-proxy:4.14.0
         imagePullPolicy: Always
@@ -66,7 +74,7 @@ spec:
         - --https-address=:8443
         - --provider=openshift
         - --openshift-service-account=network-console
-        - --upstream=http://localhost:8080
+        - --upstream=http://127.0.0.1:8080
         - --tls-cert=/etc/tls/proxy-certs/tls.crt
         - --tls-key=/etc/tls/proxy-certs/tls.key
         - --cookie-secret=SECRET

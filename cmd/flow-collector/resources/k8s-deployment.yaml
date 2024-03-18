@@ -40,7 +40,7 @@ spec:
       containers:
       - image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
         args:
-          - /app/flow-collector
+          - -listen=:8443
           - -tls-cert=/etc/console/tls.crt
           - -tls-key=/etc/console/tls.key
           - -enable-console
@@ -60,7 +60,8 @@ spec:
         - mountPath: /etc/messaging/
           name: skupper-local-client
         ports:
-        - containerPort: 8010
+        - containerPort: 9090
+        - containerPort: 8443
       volumes:
       - name: network-console-users
         secret:
@@ -83,9 +84,14 @@ metadata:
   name: network-console
 spec:
   ports:
-  - port: 8010
+  - name: web
+    port: 443
     protocol: TCP
-    targetPort: 8010
+    targetPort: 8443
+  - name: metrics
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
   selector:
     app: network-console
   type: LoadBalancer
