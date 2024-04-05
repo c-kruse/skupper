@@ -1,8 +1,10 @@
+//go:build job
 // +build job
 
 package job
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,14 +12,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/skupperproject/skupper/pkg/utils"
 	"gotest.tools/assert"
 )
 
 func TestBookinfoJob(t *testing.T) {
-	_body, err := tryProductPage()
+	var body string
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	err := utils.RetryWithContext(ctx, time.Millisecond*50, func() (bool, error) {
+		resp, err := tryProductPage()
+		if err != nil {
+			t.Logf("error requesting product page: %s", err)
+			return false, nil
+		}
+		body = string(resp)
+		return true, nil
+	})
 	assert.Assert(t, err)
 
-	body := string(_body)
 	fmt.Printf("body:\n%s\n", body)
 	assert.Assert(t, strings.Contains(body, "Book Details"))
 	assert.Assert(t, strings.Contains(body, "An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!"))
@@ -26,7 +40,7 @@ func TestBookinfoJob(t *testing.T) {
 
 func tryProductPage() ([]byte, error) {
 	client := http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 10 * time.Second,
 	}
 
 	resp, err := client.Get("http://productpage:9080/productpage?u=test")
