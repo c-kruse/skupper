@@ -3,7 +3,11 @@ package network
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 const MINIMUM_VERSION string = "1.5.0"
@@ -177,4 +181,47 @@ func sliceContainsSite(sites []SiteStatusInfo, site SiteStatusInfo) bool {
 	}
 
 	return false
+}
+
+func Diff(a, b NetworkStatusInfo) string {
+	sort.Slice(a.Addresses, func(i, j int) bool {
+		return a.Addresses[i].Name < a.Addresses[j].Name
+	})
+	sort.Slice(b.Addresses, func(i, j int) bool {
+		return b.Addresses[i].Name < b.Addresses[j].Name
+	})
+	sort.Slice(a.SiteStatus, func(i, j int) bool {
+		return a.SiteStatus[i].Site.Name < a.SiteStatus[j].Site.Name
+	})
+	sort.Slice(b.SiteStatus, func(i, j int) bool {
+		return b.SiteStatus[i].Site.Name < b.SiteStatus[j].Site.Name
+	})
+
+	ordered := func(status *NetworkStatusInfo) {
+		sort.Slice(status.Addresses, func(i, j int) bool {
+			return status.Addresses[i].Name < status.Addresses[j].Name
+		})
+		sort.Slice(status.SiteStatus, func(i, j int) bool {
+			return status.SiteStatus[i].Site.Name < status.SiteStatus[j].Site.Name
+		})
+		for _, site := range status.SiteStatus {
+			sort.Slice(site.RouterStatus, func(i, j int) bool {
+				return site.RouterStatus[i].Router.Name < site.RouterStatus[j].Router.Name
+			})
+			for _, router := range site.RouterStatus {
+				sort.Slice(router.Links, func(i, j int) bool {
+					return router.Links[i].Name < router.Links[j].Name
+				})
+				sort.Slice(router.Listeners, func(i, j int) bool {
+					return router.Listeners[i].Address < router.Listeners[j].Address
+				})
+				sort.Slice(router.Connectors, func(i, j int) bool {
+					return router.Connectors[i].Address < router.Connectors[j].Address
+				})
+			}
+		}
+	}
+	ordered(&a)
+	ordered(&b)
+	return cmp.Diff(a, b, cmpopts.EquateEmpty())
 }

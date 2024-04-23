@@ -14,15 +14,20 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-func NewKubeHandler(client v1.ConfigMapInterface) StatusUpdateHandler {
+func NewKubeHandler(client v1.ConfigMapInterface, configMapName string) StatusUpdateHandler {
+	if configMapName == "" {
+		configMapName = types.NetworkStatusConfigMapName
+	}
 	return &kubeHandler{
-		client:  client,
-		hasNext: make(chan struct{}, 1),
+		client:        client,
+		hasNext:       make(chan struct{}, 1),
+		configMapName: configMapName,
 	}
 }
 
 type kubeHandler struct {
-	client v1.ConfigMapInterface
+	client        v1.ConfigMapInterface
+	configMapName string
 
 	mu      sync.Mutex
 	hasNext chan struct{}
@@ -52,7 +57,7 @@ func (h *kubeHandler) Start(ctx context.Context) {
 				networkStatus := string(bs)
 				data := map[string]string{"NetworkStatus": networkStatus}
 				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					current, err := h.client.Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
+					current, err := h.client.Get(ctx, h.configMapName, metav1.GetOptions{})
 					if err != nil {
 						return err
 					}

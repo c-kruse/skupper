@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/briandowns/spinner v1.23.0
-	github.com/c-kruse/vanflow v0.4.2-0.20240307012637-00161f0333cd
+	github.com/c-kruse/vanflow v0.4.4
 	github.com/davecgh/go-spew v1.1.1
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/go-openapi/errors v0.20.3
@@ -44,7 +44,7 @@ require (
 	cloud.google.com/go/compute v1.19.1 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
 	github.com/Azure/azure-sdk-for-go v46.0.0+incompatible // indirect
-	github.com/Azure/go-amqp v1.0.4 // indirect
+	github.com/Azure/go-amqp v1.0.5 // indirect
 	github.com/Azure/go-autorest v14.2.0+incompatible // indirect
 	github.com/Azure/go-autorest/autorest v0.11.1 // indirect
 	github.com/Azure/go-autorest/autorest/adal v0.9.5 // indirect

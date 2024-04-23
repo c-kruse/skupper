@@ -48,6 +48,13 @@ type flowIngest struct {
 func (f *flowIngest) run(ctx context.Context) error {
 	f.ctx = ctx
 	discoveryContainer := f.factory.Create()
+	discoveryContainer.OnSessionError(func(err error) {
+		if _, ok := err.(session.RetryableError); !ok {
+			f.errors <- err
+			return
+		}
+		slog.Info("discovery session container error", slog.Any("error", err))
+	})
 	discoveryContainer.Start(ctx)
 	f.discovery = eventsource.NewDiscovery(discoveryContainer, eventsource.DiscoveryOptions{})
 	go f.discoverSources(ctx)
