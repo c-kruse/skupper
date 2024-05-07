@@ -275,15 +275,17 @@ func (c *flowCollector) updateFlow(prev, entry store.Entry) {
 		if flow.Octets != nil {
 			octetsC = *flow.Octets
 		}
-		if inc := octetsC - octetsP; inc < 0 {
+		delta := octetsC - octetsP
+		slog.Debug("active flow updated", slog.Any("bytes_delta", delta))
+		if delta > 0 {
 			switch flow.ID {
 			case pair.Source:
 				if sent, err := c.vSent.GetMetricWith(pair.Labels.ToProm()); err == nil {
-					sent.Add(float64(inc))
+					sent.Add(float64(delta))
 				}
 			case pair.Dest:
 				if rcv, err := c.vReceived.GetMetricWith(pair.Labels.ToProm()); err == nil {
-					rcv.Add(float64(inc))
+					rcv.Add(float64(delta))
 				}
 			}
 		}
