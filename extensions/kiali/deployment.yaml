@@ -11,6 +11,10 @@ spec:
       app: skupper-kiali-bridge
   template:
     metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9000"
+        prometheus.io/scrape: "true"
       labels:
         app: skupper-kiali-bridge
     spec:
