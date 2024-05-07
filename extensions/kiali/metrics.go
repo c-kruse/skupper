@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/c-kruse/vanflow"
 	"github.com/c-kruse/vanflow/session"
@@ -39,6 +40,12 @@ func (l labelSet) ToProm() prometheus.Labels {
 	}
 }
 
+type flowPair struct {
+	Source string
+	Dest   string
+	Labels labelSet
+}
+
 var (
 	labels = []string{"extension", "reporter", "reporter_id", "security", "flags",
 		"source_cluster", "source_namespace", "source_service", "source_version",
@@ -60,6 +67,15 @@ var (
 		Name: "kiali_ext_tcp_connections_closed_total",
 		Help: "total tcp connections closed",
 	}, labels)
+
+	collectorFlowsTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "collector_flows_total",
+		Help: "number of vanflow flow records stored",
+	})
+	collectorActiveFlowsEvictedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "collector_active_flows_evicted_total",
+		Help: "number of active flow pairs evicted for staleness",
+	})
 )
 
 func newFlowCollector(factory session.ContainerFactory) (*flowCollector, error) {
@@ -77,7 +93,10 @@ func newFlowCollector(factory session.ContainerFactory) (*flowCollector, error) 
 		vClosed:   tcpClosedTotal.MustCurryWith(staticLabels),
 
 		activeFlows:       newFlowsQueue(),
+		pendingEviction:   newFlowsQueue(),
 		flowsPendingMatch: newUnmatchedQueue(),
+
+		evictions: make(chan string, 32),
 	}
 
 	collector.flows = store.NewDefaultCachingStore(
@@ -120,14 +139,112 @@ type flowCollector struct {
 
 	flows             store.Interface   // store the actual flow records
 	activeFlows       *flowsQueue       // index containing active flow pairs
+	pendingEviction   *flowsQueue       // index containing active flow pairs
 	flowsPendingMatch *matchmakingQueue // index containing flows pending a matching pair
 
+	evictions chan string
 }
 
 func (c *flowCollector) Run(ctx context.Context) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	go c.ingest.run(ctx)
-	<-ctx.Done()
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case flowID := <-c.evictions:
+			pair, ok := c.activeFlows.Pop(flowID)
+			if !ok {
+				slog.Error("evicting flow missing from queue", slog.String("flow", flowID))
+				continue
+			}
+			c.pendingEviction.Push(pair)
+		case now := <-ticker.C: // lazy cleanup routines
+
+			// delete flows processed over 30s ago
+			processedDeadline := now.Add(-30 * time.Second)
+			var processed []store.Entry
+			c.pendingEviction.Purge(func(pair flowPair) bool {
+				sourceEntry, err := c.flows.Get(context.TODO(), store.Entry{Record: vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Source)}})
+				if err != nil || !sourceEntry.Found {
+					return true
+				}
+				destEntry, err := c.flows.Get(context.TODO(), store.Entry{Record: vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Dest)}})
+				if err != nil || !destEntry.Found {
+					return true
+				}
+				if sourceEntry.Entry.Meta.UpdatedAt.Before(processedDeadline) && destEntry.Entry.Meta.UpdatedAt.Before(processedDeadline) {
+					processed = append(processed, sourceEntry.Entry, destEntry.Entry)
+					return true
+				}
+				return false
+			})
+			for _, flow := range processed {
+				err := c.flows.Delete(context.TODO(), flow)
+				if err != nil {
+					slog.Error("could not delete flow", slog.Any("error", err))
+					continue
+				}
+				slog.Debug("removed expired flow", slog.Any("id", flow.Record.Identity()))
+			}
+
+			// delete flows without match when stale for 120s
+			matchmakingDeadline := now.Add(-120 * time.Second)
+			var unmatched []store.Entry
+			c.flowsPendingMatch.Purge(func(flowID string) bool {
+				flowEntry, err := c.flows.Get(context.TODO(), store.Entry{Record: vanflow.FlowRecord{BaseRecord: vanflow.NewBase(flowID)}})
+				if err != nil || !flowEntry.Found {
+					return true
+				}
+				if flowEntry.Meta.UpdatedAt.Before(matchmakingDeadline) {
+					unmatched = append(unmatched, flowEntry.Entry)
+					return true
+				}
+				return false
+			})
+			for _, flow := range unmatched {
+				c.flows.Delete(context.TODO(), flow)
+				slog.Debug("purging inactive flows", slog.String("flow", flow.Record.Identity()))
+			}
+
+			// delete stale active flow pairs older than 120s
+			evictionDeadline := now.Add(-120 * time.Second)
+			var evicted []store.Entry
+			c.activeFlows.Purge(func(pair flowPair) bool {
+				sourceEntry, err := c.flows.Get(context.TODO(), store.Entry{Record: vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Source)}})
+				if err != nil || !sourceEntry.Found {
+					return true
+				}
+				destEntry, err := c.flows.Get(context.TODO(), store.Entry{Record: vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Dest)}})
+				if err != nil || !destEntry.Found {
+					return true
+				}
+				if sourceEntry.Entry.Meta.UpdatedAt.Before(evictionDeadline) && destEntry.Entry.Meta.UpdatedAt.Before(evictionDeadline) {
+					evicted = append(evicted, sourceEntry.Entry, destEntry.Entry)
+					return true
+				}
+				return false
+			})
+			for _, flow := range evicted {
+				err := c.flows.Delete(context.TODO(), flow)
+				if err != nil {
+					slog.Error("could not delete active flow", slog.Any("error", err))
+					continue
+				}
+				slog.Debug("removed stale active flow", slog.Any("id", flow.Record.Identity()))
+				collectorActiveFlowsEvictedTotal.Inc()
+			}
+
+			// update collector flows total metric
+			resp, err := c.flows.List(context.TODO(), nil)
+			if err != nil {
+				slog.Debug("error listing flows", slog.Any("error", err))
+				continue
+			}
+			collectorFlowsTotal.Set(float64(len(resp.Entries)))
+		}
+	}
 }
 
 func (c *flowCollector) addFlow(entry store.Entry) {
@@ -142,11 +259,21 @@ func (c *flowCollector) updateFlow(prev, entry store.Entry) {
 	if !ok {
 		pair, ok = c.flowsPendingMatch.MatchFlows(flow.ID, flow.Counterflow)
 		if !ok {
-			slog.Debug("adding pending flow pair match", slog.Any("counterflow", flow.Counterflow), slog.String("flow", flow.ID))
+			var cf string
+			if flow.Counterflow != nil {
+				cf = *flow.Counterflow
+			}
+			slog.Debug("adding pending flow pair match", slog.Any("counterflow", cf), slog.String("flow", flow.ID))
 			c.flowsPendingMatch.Push(flow.ID, flow.Counterflow)
 			return
 		}
-		labelset, source, dest, err := c.resolvePair(pair)
+
+		source, dest, err := c.flowsFromPair(pair)
+		if err != nil {
+			slog.Error("couldn't get flows for pair", slog.Any("error", err))
+		}
+		// ignore pairs when labels cannot be pulled
+		labelset, err := c.labelFlows(source, dest)
 		if err != nil {
 			slog.Debug("error resolving pair labels", slog.Any("counterflow", flow.Counterflow), slog.String("flow", flow.ID), slog.Any("error", err))
 			return
@@ -168,6 +295,7 @@ func (c *flowCollector) updateFlow(prev, entry store.Entry) {
 		}
 	}
 
+	// update sent/received
 	if pf, ok := prev.Record.(*vanflow.FlowRecord); ok {
 		var (
 			octetsP uint64
@@ -193,57 +321,60 @@ func (c *flowCollector) updateFlow(prev, entry store.Entry) {
 		}
 	}
 
-	if c.flowFinished(pair) {
-		slog.Debug("flow pair finished", slog.Any("pair", pair))
+	if c.flowPairClosed(pair) {
+		slog.Debug("flow pair closed", slog.Any("pair", pair))
 		if closed, err := c.vClosed.GetMetricWith(pair.Labels.ToProm()); err == nil {
 			closed.Inc()
 		}
+		c.evictions <- pair.Source
 	}
 }
 
-func (c *flowCollector) resolvePair(pair flowPair) (labelSet, *vanflow.FlowRecord, *vanflow.FlowRecord, error) {
-	var labels labelSet
+func (c *flowCollector) flowsFromPair(pair flowPair) (*vanflow.FlowRecord, *vanflow.FlowRecord, error) {
 	sourceFlow, err := store.Get(context.TODO(), c.flows, &vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Source)})
 	if err != nil {
-		return labels, nil, nil, err
+		return nil, nil, err
 	}
 	destFlow, err := store.Get(context.TODO(), c.flows, &vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Dest)})
-	if err != nil {
-		return labels, nil, nil, err
-	}
+	return sourceFlow, destFlow, err
+}
 
-	sourceParent, err := store.Get(context.TODO(), c.records, &vanflow.ListenerRecord{BaseRecord: vanflow.NewBase(*sourceFlow.Parent)})
-	if err != nil {
-		return labels, nil, nil, err
+func (c *flowCollector) labelFlows(source, dest *vanflow.FlowRecord) (labelSet, error) {
+	var labels labelSet
+	if source.Parent == nil {
+		return labels, fmt.Errorf("source flow missing parent referece")
 	}
-	destParent, err := store.Get(context.TODO(), c.records, &vanflow.ConnectorRecord{BaseRecord: vanflow.NewBase(*destFlow.Parent)})
+	sourceParent, err := store.Get(context.TODO(), c.records, &vanflow.ListenerRecord{BaseRecord: vanflow.NewBase(*source.Parent)})
 	if err != nil {
-		return labels, nil, nil, err
+		return labels, err
+	}
+	if dest.Parent == nil {
+		return labels, fmt.Errorf("dest flow missing parent referece")
+	}
+	destParent, err := store.Get(context.TODO(), c.records, &vanflow.ConnectorRecord{BaseRecord: vanflow.NewBase(*dest.Parent)})
+	if err != nil {
+		return labels, err
 	}
 
 	if sourceParent == nil || destParent == nil {
-		return labels, nil, nil, fmt.Errorf("could not find flow parent relations")
+		return labels, fmt.Errorf("could not find flow parent relations")
 	}
-	if sourceFlow.SourceHost != nil {
-		labels.SourceService = *sourceFlow.SourceHost
+	if source.SourceHost != nil {
+		labels.SourceService = *source.SourceHost
 	}
 	if destParent.DestHost != nil {
 		labels.DestService = *destParent.DestHost
 	}
-	return labels, sourceFlow, destFlow, nil
+	return labels, nil
 }
 
-func (c *flowCollector) flowFinished(pair flowPair) bool {
-	flow, err := store.Get(context.TODO(), c.flows, &vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Source)})
+func (c *flowCollector) flowPairClosed(pair flowPair) bool {
+	source, dest, err := c.flowsFromPair(pair)
 	if err != nil {
 		return false
 	}
-	sourceOpen := flow.EndTime == nil || (flow.StartTime != nil && flow.StartTime.After(flow.EndTime.Time))
-	flow, err = store.Get(context.TODO(), c.flows, &vanflow.FlowRecord{BaseRecord: vanflow.NewBase(pair.Dest)})
-	if err != nil {
-		return false
-	}
-	destOpen := flow.EndTime == nil || (flow.StartTime != nil && flow.StartTime.After(flow.EndTime.Time))
+	sourceOpen := source.EndTime == nil || (source.StartTime != nil && source.StartTime.After(source.EndTime.Time))
+	destOpen := dest.EndTime == nil || (dest.StartTime != nil && dest.StartTime.After(dest.EndTime.Time))
 	if sourceOpen && destOpen {
 		return false
 	} else if sourceOpen {
@@ -256,6 +387,8 @@ func (c *flowCollector) flowFinished(pair flowPair) bool {
 	return true
 }
 
+// matchmakingQueue a special queue for finding flow pairs. It stores flow ids
+// in least recently accessed order so that stale flows can be quickly evicted
 type matchmakingQueue struct {
 	mu    sync.Mutex
 	byID  map[string]*list.Element
@@ -268,6 +401,21 @@ func newUnmatchedQueue() *matchmakingQueue {
 		byID:  make(map[string]*list.Element),
 		byCID: make(map[string]*list.Element),
 		queue: list.New(),
+	}
+}
+
+func (q *matchmakingQueue) Purge(purge func(string) bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.queue.Front() != nil {
+		head := q.queue.Front()
+		if !purge(head.Value.(string)) {
+			return
+		}
+		q.queue.Remove(head)
+		v := head.Value.(string)
+		delete(q.byID, v)
+		delete(q.byCID, v)
 	}
 }
 
@@ -320,6 +468,8 @@ func (q *matchmakingQueue) MatchFlows(flowID string, counterID *string) (flowPai
 	return flowPair{}, false
 }
 
+// flowsQueue is a special queue for storing flowPairs in least recently
+// accessed order so that stale flow pairs can be quickly evicted
 type flowsQueue struct {
 	mu    sync.Mutex
 	byID  map[string]*list.Element
@@ -368,8 +518,14 @@ func (q *flowsQueue) Push(tup flowPair) {
 	q.byID[tup.Dest] = item
 }
 
-type flowPair struct {
-	Source string
-	Dest   string
-	Labels labelSet
+func (q *flowsQueue) Purge(purge func(flowPair) bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.queue.Front() != nil {
+		head := q.queue.Front()
+		if !purge(head.Value.(flowPair)) {
+			return
+		}
+		q.queue.Remove(head)
+	}
 }
