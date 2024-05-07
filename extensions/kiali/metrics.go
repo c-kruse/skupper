@@ -86,11 +86,9 @@ func newFlowCollector(factory session.ContainerFactory) (*flowCollector, error) 
 	dispatch := &store.DispatchRegistry{}
 
 	dispatch.RegisterStore(vanflow.FlowRecord{}, collector.flows)
-	dispatch.RegisterStore(vanflow.SiteRecord{}, collector.records)
 	dispatch.RegisterStore(vanflow.RouterRecord{}, collector.records)
 	dispatch.RegisterStore(vanflow.ListenerRecord{}, collector.records)
 	dispatch.RegisterStore(vanflow.ConnectorRecord{}, collector.records)
-	dispatch.RegisterStore(vanflow.ProcessRecord{}, collector.records)
 
 	collector.ingest = newFlowIngest(factory, dispatch)
 
@@ -314,26 +312,62 @@ func (c *flowCollector) labelFlows(source, dest *vanflow.FlowRecord) (labelSet, 
 	if source.Parent == nil {
 		return labels, fmt.Errorf("source flow missing parent referece")
 	}
-	sourceParent, err := store.Get(context.TODO(), c.records, &vanflow.ListenerRecord{BaseRecord: vanflow.NewBase(*source.Parent)})
+	listener, err := store.Get(context.TODO(), c.records, &vanflow.ListenerRecord{BaseRecord: vanflow.NewBase(*source.Parent)})
 	if err != nil {
 		return labels, err
+	}
+	if listener == nil {
+		return labels, fmt.Errorf("could not find parent of listener side flow")
 	}
 	if dest.Parent == nil {
 		return labels, fmt.Errorf("dest flow missing parent referece")
 	}
-	destParent, err := store.Get(context.TODO(), c.records, &vanflow.ConnectorRecord{BaseRecord: vanflow.NewBase(*dest.Parent)})
+	connector, err := store.Get(context.TODO(), c.records, &vanflow.ConnectorRecord{BaseRecord: vanflow.NewBase(*dest.Parent)})
 	if err != nil {
 		return labels, err
 	}
+	if connector == nil {
+		return labels, fmt.Errorf("could not find parent of connector side flow")
+	}
 
-	if sourceParent == nil || destParent == nil {
-		return labels, fmt.Errorf("could not find flow parent relations")
+	listenerRouter, err := store.Get(context.TODO(), c.records, &vanflow.RouterRecord{BaseRecord: vanflow.NewBase(*listener.Parent)})
+	if err != nil {
+		return labels, err
 	}
-	if source.SourceHost != nil {
-		labels.SourceService = *source.SourceHost
+	if listenerRouter == nil {
+		return labels, fmt.Errorf("could not find parent of listener")
 	}
-	if destParent.DestHost != nil {
-		labels.DestService = *destParent.DestHost
+
+	connectorRouter, err := store.Get(context.TODO(), c.records, &vanflow.RouterRecord{BaseRecord: vanflow.NewBase(*connector.Parent)})
+	if err != nil {
+		return labels, err
+	}
+	if connectorRouter == nil {
+		return labels, fmt.Errorf("could not find parent of connector")
+	}
+
+	labels.SourceCluster = "Kubernetes"
+	if listenerRouter.Parent != nil {
+		labels.SourceCluster = *listenerRouter.Parent
+	}
+	labels.SourceVersion = "unknown"
+	if listener.Address != nil {
+		labels.SourceService = *listener.Address
+	}
+	if listenerRouter.Namespace != nil {
+		labels.SourceNamespace = *listenerRouter.Namespace
+	}
+
+	labels.DestCluster = "Kuberentes"
+	if connectorRouter.Parent != nil {
+		labels.DestCluster = *connectorRouter.Parent
+	}
+	labels.DestVersion = "unknown"
+	if connectorRouter.Namespace != nil {
+		labels.DestNamespace = *connectorRouter.Namespace
+	}
+	if connector.Address != nil {
+		labels.DestService = *connector.Address
 	}
 	return labels, nil
 }
