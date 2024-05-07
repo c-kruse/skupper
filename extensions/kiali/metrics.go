@@ -16,36 +16,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-type labelSet struct {
-	SourceCluster   string
-	SourceNamespace string
-	SourceService   string
-	SourceVersion   string
-	DestCluster     string
-	DestNamespace   string
-	DestService     string
-	DestVersion     string
-}
-
-func (l labelSet) ToProm() prometheus.Labels {
-	return prometheus.Labels{
-		"source_cluster":   l.SourceCluster,
-		"source_namespace": l.SourceNamespace,
-		"source_service":   l.SourceService,
-		"source_version":   l.SourceVersion,
-		"dest_cluster":     l.DestCluster,
-		"dest_namespace":   l.DestNamespace,
-		"dest_service":     l.DestService,
-		"dest_version":     l.DestVersion,
-	}
-}
-
-type flowPair struct {
-	Source string
-	Dest   string
-	Labels labelSet
-}
-
 var (
 	labels = []string{"extension", "reporter", "reporter_id", "security", "flags",
 		"source_cluster", "source_namespace", "source_service", "source_version",
@@ -385,6 +355,36 @@ func (c *flowCollector) flowPairClosed(pair flowPair) bool {
 		return false
 	}
 	return true
+}
+
+type flowPair struct {
+	Source string
+	Dest   string
+	Labels labelSet
+}
+
+type labelSet struct {
+	SourceCluster   string
+	SourceNamespace string
+	SourceService   string
+	SourceVersion   string
+	DestCluster     string
+	DestNamespace   string
+	DestService     string
+	DestVersion     string
+}
+
+func (l labelSet) ToProm() prometheus.Labels {
+	return prometheus.Labels{
+		"source_cluster":   l.SourceCluster,
+		"source_namespace": l.SourceNamespace,
+		"source_service":   l.SourceService,
+		"source_version":   l.SourceVersion,
+		"dest_cluster":     l.DestCluster,
+		"dest_namespace":   l.DestNamespace,
+		"dest_service":     l.DestService,
+		"dest_version":     l.DestVersion,
+	}
 }
 
 // matchmakingQueue a special queue for finding flow pairs. It stores flow ids
