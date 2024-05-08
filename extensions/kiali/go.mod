@@ -3,7 +3,7 @@ module github.com/skupperproject/skupper/extensions/skupper-kiali-bridge
 go 1.22.0
 
 require (
-	github.com/c-kruse/vanflow v0.4.5-0.20240507214350-799161582882
+	github.com/c-kruse/vanflow v0.4.5-0.20240508160649-fd2eefa3d12b
 	github.com/prometheus/client_golang v1.19.0
 )
 
