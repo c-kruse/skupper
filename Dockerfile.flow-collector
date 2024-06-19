@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.20 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.21 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -32,4 +32,4 @@ USER 10000
 WORKDIR /app
 COPY --from=builder /go/src/app/flow-collector .
 COPY --from=console-builder /skupper-console/skupper-console-main/build/ console
-CMD ["/app/flow-collector"]
+ENTRYPOINT ["/app/flow-collector"]

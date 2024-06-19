@@ -1,0 +1,88 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: network-console-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: network-console-cert
+spec:
+  commonName: network-console
+  secretName: network-console-certs
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: network-console-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: network-console
+  name: network-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: network-console
+  template:
+    metadata:
+      labels:
+        app: network-console
+    spec:
+      containers:
+      - image: quay.io/ckruse/skupper/flow-collector:cmdv2-flow-collector
+        imagePullPolicy: Always
+        name: network-console
+        args:
+          - -listen=:8443
+          - -tls-cert=/etc/console/tls.crt
+          - -tls-key=/etc/console/tls.key
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /etc/console/
+          name: network-console-certs
+        - mountPath: /etc/messaging/
+          name: skupper-local-client
+        ports:
+        - containerPort: 8443
+          name: https
+          protocol: TCP
+      volumes:
+      - name: network-console-certs
+        secret:
+          defaultMode: 420
+          secretName: network-console-certs
+      - name: skupper-local-client
+        secret:
+          defaultMode: 420
+          secretName: skupper-local-client
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: network-console
+  name: network-console
+spec:
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app: network-console
+  type: LoadBalancer
+

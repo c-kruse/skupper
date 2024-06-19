@@ -2,326 +2,55 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
+	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
-	"path"
-	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	clientpodman "github.com/skupperproject/skupper/client/podman"
-	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/domain/podman"
-	"github.com/skupperproject/skupper/pkg/utils"
-	"github.com/skupperproject/skupper/pkg/utils/tlscfg"
+	"github.com/skupperproject/skupper/pkg/qdr"
 
-	"github.com/skupperproject/skupper/api/types"
-	"github.com/skupperproject/skupper/client"
 	"github.com/skupperproject/skupper/pkg/certs"
-	"github.com/skupperproject/skupper/pkg/kube"
 	"github.com/skupperproject/skupper/pkg/version"
 )
 
-// should this be in utils?
-type tlsConfig struct {
-	Ca     string `json:"ca,omitempty"`
-	Cert   string `json:"cert,omitempty"`
-	Key    string `json:"key,omitempty"`
-	Verify bool   `json:"recType,omitempty"`
-}
-
-type connectJson struct {
-	Scheme string    `json:"scheme,omitempty"`
-	Host   string    `json:"host,omitempty"`
-	Port   string    `json:"port,omitempty"`
-	Tls    tlsConfig `json:"tls,omitempty"`
-}
-
-type UserResponse struct {
-	Username string `json:"username"`
-	AuthMode string `json:"authType"`
-}
-
-var onlyOneSignalHandler = make(chan struct{})
-var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
-
-func getConnectInfo(file string) (connectJson, error) {
-	cj := connectJson{}
-
-	jsonFile, err := os.ReadFile(file)
-	if err != nil {
-		return cj, err
-	}
-
-	err = json.Unmarshal(jsonFile, &cj)
-	if err != nil {
-		return cj, err
-	}
-
-	return cj, nil
-}
-
-func SetupSignalHandler() (stopCh <-chan struct{}) {
-	close(onlyOneSignalHandler) // panics when called twice
-
-	stop := make(chan struct{})
-	c := make(chan os.Signal, 2)
-	signal.Notify(c, shutdownSignals...)
-	go func() {
-		<-c
-		close(stop)
-		<-c
-		os.Exit(1) // second signal. Exit directly.
-	}()
-
-	return stop
-}
-
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
-		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func authenticate(dir string, user string, password string) bool {
-	filename := path.Join(dir, user)
-	file, err := os.Open(filename)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("COLLECTOR: Failed to authenticate %s, no such user exists", user)
-		} else {
-			log.Printf("COLLECTOR: Failed to authenticate %s: %s", user, err)
-		}
-		return false
-	}
-	defer file.Close()
-
-	bytes, err := io.ReadAll(file)
-	if err != nil {
-		log.Printf("COLLECTOR: Failed to authenticate %s: %s", user, err)
-		return false
-	}
-	return string(bytes) == password
-}
-
-func authenticated(h http.HandlerFunc) http.HandlerFunc {
-	dir := os.Getenv("FLOW_USERS")
-
-	if dir != "" {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, password, ok := r.BasicAuth()
-
-			if ok && authenticate(dir, user, password) {
-				h.ServeHTTP(w, r)
-			} else {
-				w.Header().Set("WWW-Authenticate", "Basic realm=skupper")
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			}
-		})
-	} else {
-		return h
-	}
-}
-
-func getOpenshiftUser(r *http.Request) UserResponse {
-	userResponse := UserResponse{
-		Username: "",
-		AuthMode: string(types.ConsoleAuthModeOpenshift),
-	}
-
-	if cookie, err := r.Cookie("_oauth_proxy"); err == nil && cookie != nil {
-		if cookieDecoded, _ := base64.StdEncoding.DecodeString(cookie.Value); cookieDecoded != nil {
-			userResponse.Username = string(cookieDecoded)
-		}
-	}
-
-	return userResponse
-}
-
-func getInternalUser(r *http.Request) UserResponse {
-	userResponse := UserResponse{
-		Username: "",
-		AuthMode: string(types.ConsoleAuthModeInternal),
-	}
-
-	user, _, ok := r.BasicAuth()
-
-	if ok {
-		userResponse.Username = user
-	}
-
-	return userResponse
-}
-
-func getUnsecuredUser(r *http.Request) UserResponse {
-	return UserResponse{
-		Username: "",
-		AuthMode: string(types.ConsoleAuthModeUnsecured)}
-}
-
-func openshiftLogout(w http.ResponseWriter, r *http.Request) {
-	// Create a new cookie with MaxAge set to -1 to delete the existing cookie.
-	cookie := http.Cookie{
-		Name:   "_oauth_proxy", // openshift cookie name
-		Path:   "/",
-		MaxAge: -1,
-		Domain: r.Host,
-	}
-
-	http.SetCookie(w, &cookie)
-}
-
-func internalLogout(w http.ResponseWriter, r *http.Request, validNonces map[string]bool) {
-	queryParams := r.URL.Query()
-	nonce := queryParams.Get("nonce")
-
-	// When I logout, the browser open the prompt again and , if the credentials are correct, it calls the logout again.
-	// We track the second call using the nonce set from the client app to avoid loop of unauthenticated calls.
-	if _, exists := validNonces[nonce]; exists {
-		delete(validNonces, nonce)
-		fmt.Fprintf(w, "%s", "Logged out")
-
-		return
-	}
-
-	validNonces[nonce] = true
-	w.Header().Set("WWW-Authenticate", "Basic realm=skupper")
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-}
-
-func main() {
-	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	// if -version used, report and exit
-	isVersion := flags.Bool("version", false, "Report the version of the Skupper Flow Collector")
-	isProf := flags.Bool("profile", false, "Exposes the runtime profiling facilities from net/http/pprof on http://localhost:9970")
-
-	flags.Parse(os.Args[1:])
-	if *isVersion {
-		fmt.Println(version.Version)
-		os.Exit(0)
-	}
+func run(cfg Config) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
 
 	// Startup message
-	log.Printf("COLLECTOR: Starting Skupper Flow collector controller version %s \n", version.Version)
+	slog.Info("Flow Collector starting", slog.String("version", version.Version))
 
-	origin := os.Getenv("SKUPPER_SITE_ID")
-	namespace := os.Getenv("SKUPPER_NAMESPACE")
-
-	// set up signals so we handle the first shutdown signal gracefully
-	stopCh := SetupSignalHandler()
-
-	platform := config.GetPlatform()
-	var flowRecordTtl time.Duration
-	var enableConsole bool
-	var prometheusUrl string
-	var authMode string
-	//collecting valid nonces for internal auth mode
-	var validNonces = make(map[string]bool)
-
-	// waiting on skupper-router to be available
-	if platform == "" || platform == types.PlatformKubernetes {
-		cli, err := client.NewClient(namespace, "", "")
-		if err != nil {
-			log.Fatal("COLLECTOR: Error getting van client", err.Error())
-		}
-
-		log.Println("COLLECTOR: Waiting for Skupper router component to start")
-		_, err = kube.WaitDeploymentReady(types.TransportDeploymentName, namespace, cli.KubeClient, time.Second*180, time.Second*5)
-		if err != nil {
-			log.Fatal("COLLECTOR: Error waiting for transport deployment to be ready ", err.Error())
-		}
-
-		siteConfig, err := cli.SiteConfigInspect(context.Background(), nil)
-		if err != nil {
-			log.Fatal("COLLECTOR: Error getting site config", err.Error())
-		}
-
-		flowRecordTtl = siteConfig.Spec.FlowCollector.FlowRecordTtl
-		enableConsole = siteConfig.Spec.EnableConsole
-		authMode = siteConfig.Spec.AuthMode
-
-		svc, err := kube.GetService(types.PrometheusServiceName, cli.Namespace, cli.KubeClient)
-		if err == nil {
-			prometheusUrl = "http://" + svc.Spec.ClusterIP + ":" + fmt.Sprint(svc.Spec.Ports[0].Port) + "/api/v1/"
-		}
-	} else {
-		cfg, err := podman.NewPodmanConfigFileHandler().GetConfig()
-		if err != nil {
-			log.Fatal("Error reading podman site config", err)
-		}
-		podmanCli, err := clientpodman.NewPodmanClient(cfg.Endpoint, "")
-		if err != nil {
-			log.Fatal("Error creating podman client", err)
-		}
-		err = utils.Retry(time.Second, 120, func() (bool, error) {
-			router, err := podmanCli.ContainerInspect(types.TransportDeploymentName)
-			if err != nil {
-				return false, fmt.Errorf("error retrieving %s container state - %w", types.TransportDeploymentName, err)
-			}
-			if !router.Running {
-				return false, nil
-			}
-			return true, nil
-		})
-		if err != nil {
-			log.Fatalf("unable to determine if %s container is running - %s", types.TransportDeploymentName, err)
-		}
-		flowRecordTtl, _ = time.ParseDuration(os.Getenv("FLOW_RECORD_TTL"))
-		enableConsole, _ = strconv.ParseBool(os.Getenv("ENABLE_CONSOLE"))
-		prometheusUrl = "http://skupper-prometheus:9090/api/v1/"
-
-		flowUsers := os.Getenv("FLOW_USERS")
-		// Podman support only unsecured auth mode and internal auth mode
-		authMode = types.ConsoleAuthModeUnsecured
-		if flowUsers != "" {
-			authMode = types.ConsoleAuthModeInternal
-		}
+	conn, err := getConnectInfo(cfg.FlowConnectionFile)
+	if err != nil {
+		return fmt.Errorf("error reading flow connection file: %s", err.Error())
 	}
 
-	tlsConfig := certs.GetTlsConfigRetriever(true, types.ControllerConfigPath+"tls.crt", types.ControllerConfigPath+"tls.key", types.ControllerConfigPath+"ca.crt")
-
-	conn, err := getConnectInfo(types.ControllerConfigPath + "connect.json")
-	if err != nil {
-		log.Fatal("Error getting connect.json", err.Error())
+	var tlsConfig qdr.TlsConfigRetriever
+	if conn.TLS.Key != "" || conn.TLS.CA != "" {
+		tlsConfig = certs.GetTlsConfigRetriever(true, conn.TLS.Cert, conn.TLS.Key, conn.TLS.CA)
 	}
 
 	reg := prometheus.NewRegistry()
-	c, err := NewController(origin, reg, conn.Scheme, conn.Host, conn.Port, tlsConfig, flowRecordTtl)
+	c, err := NewController("", reg, conn.Scheme, conn.Host, conn.Port, tlsConfig, cfg.FlowRecordTTL)
 	if err != nil {
-		log.Fatal("Error getting new flow collector ", err.Error())
+		return fmt.Errorf("error initializing flow collector %s", err.Error())
 	}
-	c.FlowCollector.Collector.PrometheusUrl = prometheusUrl
 
-	// map the authentication mode with the function to get the user
-	userMap := make(map[string]func(*http.Request) UserResponse)
-	userMap[string(types.ConsoleAuthModeOpenshift)] = getOpenshiftUser
-	userMap[string(types.ConsoleAuthModeInternal)] = getInternalUser
-	userMap[string(types.ConsoleAuthModeUnsecured)] = getUnsecuredUser
-
-	logoutMap := make(map[string]func(http.ResponseWriter, *http.Request))
-	logoutMap[string(types.ConsoleAuthModeOpenshift)] = openshiftLogout
-	logoutMap[string(types.ConsoleAuthModeInternal)] = func(w http.ResponseWriter, r *http.Request) {
-		internalLogout(w, r, validNonces)
+	promURL, err := url.JoinPath(cfg.PrometheusAPI, "/api/v1/")
+	if err != nil {
+		return fmt.Errorf("error parsing prometheus api endpoint: %s", err.Error())
 	}
+	c.FlowCollector.Collector.PrometheusUrl = promURL
 
 	var mux = mux.NewRouter().StrictSlash(true)
 
@@ -329,21 +58,17 @@ func main() {
 	api.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	if os.Getenv("USE_CORS") != "" {
-		api.Use(cors)
+	if cfg.CORSAllowAll {
+		api.Use(handlers.CORS())
 	}
 
 	var api1 = api.PathPrefix("/v1alpha1").Subrouter()
 	api1.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	var logUri = os.Getenv("LOG_REQ_URI")
-	if logUri == "true" {
+	if !cfg.APIDisableAccessLogs {
 		api1.Use(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				log.Printf("COLLECTOR: request uri %s \n", r.RequestURI)
-				next.ServeHTTP(w, r)
-			})
+			return handlers.LoggingHandler(os.Stdout, next)
 		})
 	}
 
@@ -354,260 +79,297 @@ func main() {
 
 	var promApi = api1Internal.PathPrefix("/prom").Subrouter()
 	promApi.StrictSlash(true)
-	promApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	promApi.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-	}))
+	})
 
 	var promqueryApi = promApi.PathPrefix("/query").Subrouter()
 	promqueryApi.StrictSlash(true)
-	promqueryApi.HandleFunc("/", authenticated(http.HandlerFunc(c.promqueryHandler)))
-	promqueryApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	promqueryApi.HandleFunc("/", http.HandlerFunc(c.promqueryHandler))
+	promqueryApi.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-	}))
+	})
 
 	var promqueryrangeApi = promApi.PathPrefix("/rangequery").Subrouter()
 	promqueryrangeApi.StrictSlash(true)
-	promqueryrangeApi.HandleFunc("/", authenticated(http.HandlerFunc(c.promqueryrangeHandler)))
-	promqueryrangeApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	promqueryrangeApi.HandleFunc("/", (http.HandlerFunc(c.promqueryrangeHandler)))
+	promqueryrangeApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
+	metricsHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
+	mux.Path("/metrics").Handler(metricsHandler)
 	var metricsApi = api1.PathPrefix("/metrics").Subrouter()
 	metricsApi.StrictSlash(true)
-	metricsApi.Handle("/", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+	metricsApi.Handle("/", metricsHandler)
 
 	var eventsourceApi = api1.PathPrefix("/eventsources").Subrouter()
 	eventsourceApi.StrictSlash(true)
 	eventsourceApi.HandleFunc("/", http.HandlerFunc(c.eventsourceHandler)).Name("list")
 	eventsourceApi.HandleFunc("/{id}", http.HandlerFunc(c.eventsourceHandler)).Name("item")
-	eventsourceApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	eventsourceApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var userApi = api1.PathPrefix("/user").Subrouter()
 	userApi.StrictSlash(true)
-	userApi.HandleFunc("/", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, exists := userMap[authMode]
-
-		if !exists {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		response, err := json.Marshal(handler(r))
-
-		if err != nil {
-			log.Printf("Error /user response: %s", err.Error())
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(response)
-	})))
+	userApi.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
 
 	var userLogout = api1.PathPrefix("/logout").Subrouter()
 	userLogout.StrictSlash(true)
-	userLogout.HandleFunc("/", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler, exists := logoutMap[authMode]
-		if exists {
-			handler(w, r)
-		}
-	})))
+	userLogout.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}))
 
 	var siteApi = api1.PathPrefix("/sites").Subrouter()
 	siteApi.StrictSlash(true)
-	siteApi.HandleFunc("/", authenticated(http.HandlerFunc(c.siteHandler))).Name("list")
-	siteApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.siteHandler))).Name("item")
-	siteApi.HandleFunc("/{id}/processes", authenticated(http.HandlerFunc(c.siteHandler))).Name("processes")
-	siteApi.HandleFunc("/{id}/routers", authenticated(http.HandlerFunc(c.siteHandler))).Name("routers")
-	siteApi.HandleFunc("/{id}/links", authenticated(http.HandlerFunc(c.siteHandler))).Name("links")
-	siteApi.HandleFunc("/{id}/hosts", authenticated(http.HandlerFunc(c.siteHandler))).Name("hosts")
-	siteApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	siteApi.HandleFunc("/", (http.HandlerFunc(c.siteHandler))).Name("list")
+	siteApi.HandleFunc("/{id}", (http.HandlerFunc(c.siteHandler))).Name("item")
+	siteApi.HandleFunc("/{id}/processes", (http.HandlerFunc(c.siteHandler))).Name("processes")
+	siteApi.HandleFunc("/{id}/routers", (http.HandlerFunc(c.siteHandler))).Name("routers")
+	siteApi.HandleFunc("/{id}/links", (http.HandlerFunc(c.siteHandler))).Name("links")
+	siteApi.HandleFunc("/{id}/hosts", (http.HandlerFunc(c.siteHandler))).Name("hosts")
+	siteApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var hostApi = api1.PathPrefix("/hosts").Subrouter()
 	hostApi.StrictSlash(true)
-	hostApi.HandleFunc("/", authenticated(http.HandlerFunc(c.hostHandler))).Name("list")
-	hostApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.hostHandler))).Name("item")
-	hostApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hostApi.HandleFunc("/", (http.HandlerFunc(c.hostHandler))).Name("list")
+	hostApi.HandleFunc("/{id}", (http.HandlerFunc(c.hostHandler))).Name("item")
+	hostApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var routerApi = api1.PathPrefix("/routers").Subrouter()
 	routerApi.StrictSlash(true)
-	routerApi.HandleFunc("/", authenticated(http.HandlerFunc(c.routerHandler))).Name("list")
-	routerApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.routerHandler))).Name("item")
-	routerApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.routerHandler))).Name("flows")
-	routerApi.HandleFunc("/{id}/links", authenticated(http.HandlerFunc(c.routerHandler))).Name("links")
-	routerApi.HandleFunc("/{id}/listeners", authenticated(http.HandlerFunc(c.routerHandler))).Name("listeners")
-	routerApi.HandleFunc("/{id}/connectors", authenticated(http.HandlerFunc(c.routerHandler))).Name("connectors")
-	routerApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	routerApi.HandleFunc("/", (http.HandlerFunc(c.routerHandler))).Name("list")
+	routerApi.HandleFunc("/{id}", (http.HandlerFunc(c.routerHandler))).Name("item")
+	routerApi.HandleFunc("/{id}/flows", (http.HandlerFunc(c.routerHandler))).Name("flows")
+	routerApi.HandleFunc("/{id}/links", (http.HandlerFunc(c.routerHandler))).Name("links")
+	routerApi.HandleFunc("/{id}/listeners", (http.HandlerFunc(c.routerHandler))).Name("listeners")
+	routerApi.HandleFunc("/{id}/connectors", (http.HandlerFunc(c.routerHandler))).Name("connectors")
+	routerApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var linkApi = api1.PathPrefix("/links").Subrouter()
 	linkApi.StrictSlash(true)
-	linkApi.HandleFunc("/", authenticated(http.HandlerFunc(c.linkHandler))).Name("list")
-	linkApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.linkHandler))).Name("item")
-	linkApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	linkApi.HandleFunc("/", (http.HandlerFunc(c.linkHandler))).Name("list")
+	linkApi.HandleFunc("/{id}", (http.HandlerFunc(c.linkHandler))).Name("item")
+	linkApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var listenerApi = api1.PathPrefix("/listeners").Subrouter()
 	listenerApi.StrictSlash(true)
-	listenerApi.HandleFunc("/", authenticated(http.HandlerFunc(c.listenerHandler))).Name("list")
-	listenerApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.listenerHandler))).Name("item")
-	listenerApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.listenerHandler))).Name("flows")
-	listenerApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	listenerApi.HandleFunc("/", (http.HandlerFunc(c.listenerHandler))).Name("list")
+	listenerApi.HandleFunc("/{id}", (http.HandlerFunc(c.listenerHandler))).Name("item")
+	listenerApi.HandleFunc("/{id}/flows", (http.HandlerFunc(c.listenerHandler))).Name("flows")
+	listenerApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var connectorApi = api1.PathPrefix("/connectors").Subrouter()
 	connectorApi.StrictSlash(true)
-	connectorApi.HandleFunc("/", authenticated(http.HandlerFunc(c.connectorHandler))).Name("list")
-	connectorApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.connectorHandler))).Name("item")
-	connectorApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.connectorHandler))).Name("flows")
-	connectorApi.HandleFunc("/{id}/process", authenticated(http.HandlerFunc(c.connectorHandler))).Name("process")
-	connectorApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	connectorApi.HandleFunc("/", (http.HandlerFunc(c.connectorHandler))).Name("list")
+	connectorApi.HandleFunc("/{id}", (http.HandlerFunc(c.connectorHandler))).Name("item")
+	connectorApi.HandleFunc("/{id}/flows", (http.HandlerFunc(c.connectorHandler))).Name("flows")
+	connectorApi.HandleFunc("/{id}/process", (http.HandlerFunc(c.connectorHandler))).Name("process")
+	connectorApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var addressApi = api1.PathPrefix("/addresses").Subrouter()
 	addressApi.StrictSlash(true)
-	addressApi.HandleFunc("/", authenticated(http.HandlerFunc(c.addressHandler))).Name("list")
-	addressApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.addressHandler))).Name("item")
-	addressApi.HandleFunc("/{id}/processes", authenticated(http.HandlerFunc(c.addressHandler))).Name("processes")
-	addressApi.HandleFunc("/{id}/processpairs", authenticated(http.HandlerFunc(c.addressHandler))).Name("processpairs")
-	addressApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.addressHandler))).Name("flows")
-	addressApi.HandleFunc("/{id}/flowpairs", authenticated(http.HandlerFunc(c.addressHandler))).Name("flowpairs")
-	addressApi.HandleFunc("/{id}/listeners", authenticated(http.HandlerFunc(c.addressHandler))).Name("listeners")
-	addressApi.HandleFunc("/{id}/connectors", authenticated(http.HandlerFunc(c.addressHandler))).Name("connectors")
-	addressApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addressApi.HandleFunc("/", (http.HandlerFunc(c.addressHandler))).Name("list")
+	addressApi.HandleFunc("/{id}", (http.HandlerFunc(c.addressHandler))).Name("item")
+	addressApi.HandleFunc("/{id}/processes", (http.HandlerFunc(c.addressHandler))).Name("processes")
+	addressApi.HandleFunc("/{id}/processpairs", (http.HandlerFunc(c.addressHandler))).Name("processpairs")
+	addressApi.HandleFunc("/{id}/flows", (http.HandlerFunc(c.addressHandler))).Name("flows")
+	addressApi.HandleFunc("/{id}/flowpairs", (http.HandlerFunc(c.addressHandler))).Name("flowpairs")
+	addressApi.HandleFunc("/{id}/listeners", (http.HandlerFunc(c.addressHandler))).Name("listeners")
+	addressApi.HandleFunc("/{id}/connectors", (http.HandlerFunc(c.addressHandler))).Name("connectors")
+	addressApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var processApi = api1.PathPrefix("/processes").Subrouter()
 	processApi.StrictSlash(true)
-	processApi.HandleFunc("/", authenticated(http.HandlerFunc(c.processHandler))).Name("list")
-	processApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processHandler))).Name("item")
-	processApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.processHandler))).Name("flows")
-	processApi.HandleFunc("/{id}/addresses", authenticated(http.HandlerFunc(c.processHandler))).Name("addresses")
-	processApi.HandleFunc("/{id}/connector", authenticated(http.HandlerFunc(c.processHandler))).Name("connector")
-	processApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	processApi.HandleFunc("/", (http.HandlerFunc(c.processHandler))).Name("list")
+	processApi.HandleFunc("/{id}", (http.HandlerFunc(c.processHandler))).Name("item")
+	processApi.HandleFunc("/{id}/flows", (http.HandlerFunc(c.processHandler))).Name("flows")
+	processApi.HandleFunc("/{id}/addresses", (http.HandlerFunc(c.processHandler))).Name("addresses")
+	processApi.HandleFunc("/{id}/connector", (http.HandlerFunc(c.processHandler))).Name("connector")
+	processApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var processGroupApi = api1.PathPrefix("/processgroups").Subrouter()
 	processGroupApi.StrictSlash(true)
-	processGroupApi.HandleFunc("/", authenticated(http.HandlerFunc(c.processGroupHandler))).Name("list")
-	processGroupApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processGroupHandler))).Name("item")
-	processGroupApi.HandleFunc("/{id}/processes", authenticated(http.HandlerFunc(c.processGroupHandler))).Name("processes")
-	processGroupApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	processGroupApi.HandleFunc("/", (http.HandlerFunc(c.processGroupHandler))).Name("list")
+	processGroupApi.HandleFunc("/{id}", (http.HandlerFunc(c.processGroupHandler))).Name("item")
+	processGroupApi.HandleFunc("/{id}/processes", (http.HandlerFunc(c.processGroupHandler))).Name("processes")
+	processGroupApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var flowApi = api1.PathPrefix("/flows").Subrouter()
 	flowApi.StrictSlash(true)
-	flowApi.HandleFunc("/", authenticated(http.HandlerFunc(c.flowHandler))).Name("list")
-	flowApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.flowHandler))).Name("item")
-	flowApi.HandleFunc("/{id}/process", authenticated(http.HandlerFunc(c.flowHandler))).Name("process")
-	flowApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	flowApi.HandleFunc("/", (http.HandlerFunc(c.flowHandler))).Name("list")
+	flowApi.HandleFunc("/{id}", (http.HandlerFunc(c.flowHandler))).Name("item")
+	flowApi.HandleFunc("/{id}/process", (http.HandlerFunc(c.flowHandler))).Name("process")
+	flowApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var flowpairApi = api1.PathPrefix("/flowpairs").Subrouter()
 	flowpairApi.StrictSlash(true)
-	flowpairApi.HandleFunc("/", authenticated(http.HandlerFunc(c.flowPairHandler))).Name("list")
-	flowpairApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.flowPairHandler))).Name("item")
-	flowpairApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	flowpairApi.HandleFunc("/", (http.HandlerFunc(c.flowPairHandler))).Name("list")
+	flowpairApi.HandleFunc("/{id}", (http.HandlerFunc(c.flowPairHandler))).Name("item")
+	flowpairApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var sitepairApi = api1.PathPrefix("/sitepairs").Subrouter()
 	sitepairApi.StrictSlash(true)
-	sitepairApi.HandleFunc("/", authenticated(http.HandlerFunc(c.sitePairHandler))).Name("list")
-	sitepairApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.sitePairHandler))).Name("item")
-	sitepairApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sitepairApi.HandleFunc("/", (http.HandlerFunc(c.sitePairHandler))).Name("list")
+	sitepairApi.HandleFunc("/{id}", (http.HandlerFunc(c.sitePairHandler))).Name("item")
+	sitepairApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var processgrouppairApi = api1.PathPrefix("/processgrouppairs").Subrouter()
 	processgrouppairApi.StrictSlash(true)
-	processgrouppairApi.HandleFunc("/", authenticated(http.HandlerFunc(c.processGroupPairHandler))).Name("list")
-	processgrouppairApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processGroupPairHandler))).Name("item")
-	processgrouppairApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	processgrouppairApi.HandleFunc("/", (http.HandlerFunc(c.processGroupPairHandler))).Name("list")
+	processgrouppairApi.HandleFunc("/{id}", (http.HandlerFunc(c.processGroupPairHandler))).Name("item")
+	processgrouppairApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	var processpairApi = api1.PathPrefix("/processpairs").Subrouter()
 	processpairApi.StrictSlash(true)
-	processpairApi.HandleFunc("/", authenticated(http.HandlerFunc(c.processPairHandler))).Name("list")
-	processpairApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processPairHandler))).Name("item")
-	processpairApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	processpairApi.HandleFunc("/", (http.HandlerFunc(c.processPairHandler))).Name("list")
+	processpairApi.HandleFunc("/{id}", (http.HandlerFunc(c.processPairHandler))).Name("item")
+	processpairApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	if enableConsole {
-		mux.PathPrefix("/").Handler(http.FileServer(http.Dir("/app/console/")))
+	if cfg.EnableConsole {
+		mux.PathPrefix("/").Handler(http.FileServer(http.Dir(cfg.ConsoleLocation)))
 	} else {
-		log.Println("COLLECTOR: Skupper console is disabled")
+		slog.Info("Skupper console is disabled.")
 	}
 
 	var collectorApi = api1.PathPrefix("/collectors").Subrouter()
 	collectorApi.StrictSlash(true)
-	collectorApi.HandleFunc("/", authenticated(http.HandlerFunc(c.collectorHandler))).Name("list")
-	collectorApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.collectorHandler))).Name("item")
-	collectorApi.HandleFunc("/{id}/connectors-to-process", authenticated(http.HandlerFunc(c.collectorHandler))).Name("connectors-to-process")
-	collectorApi.HandleFunc("/{id}/flows-to-pair", authenticated(http.HandlerFunc(c.collectorHandler))).Name("flows-to-pair")
-	collectorApi.HandleFunc("/{id}/flows-to-process", authenticated(http.HandlerFunc(c.collectorHandler))).Name("flows-to-process")
-	collectorApi.HandleFunc("/{id}/pair-to-aggregate", authenticated(http.HandlerFunc(c.collectorHandler))).Name("pair-to-aggregate")
-	collectorApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	collectorApi.HandleFunc("/", (http.HandlerFunc(c.collectorHandler))).Name("list")
+	collectorApi.HandleFunc("/{id}", (http.HandlerFunc(c.collectorHandler))).Name("item")
+	collectorApi.HandleFunc("/{id}/connectors-to-process", (http.HandlerFunc(c.collectorHandler))).Name("connectors-to-process")
+	collectorApi.HandleFunc("/{id}/flows-to-pair", (http.HandlerFunc(c.collectorHandler))).Name("flows-to-pair")
+	collectorApi.HandleFunc("/{id}/flows-to-process", (http.HandlerFunc(c.collectorHandler))).Name("flows-to-process")
+	collectorApi.HandleFunc("/{id}/pair-to-aggregate", (http.HandlerFunc(c.collectorHandler))).Name("pair-to-aggregate")
+	collectorApi.NotFoundHandler = (http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	addr := ":8010"
-	if os.Getenv("FLOW_PORT") != "" {
-		addr = ":" + os.Getenv("FLOW_PORT")
-	}
-	if os.Getenv("FLOW_HOST") != "" {
-		addr = os.Getenv("FLOW_HOST") + addr
-	}
-	log.Printf("COLLECTOR: server listening on %s", addr)
 	s := &http.Server{
-		Addr:         addr,
+		Addr:         cfg.APIListenAddress,
 		Handler:      handlers.CompressHandler(mux),
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		TLSConfig:    tlscfg.Default(),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+	tlsEnabled := cfg.TLSCert != ""
+	if tlsEnabled {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			return fmt.Errorf("could not set up certs for api server: %s", err)
+		}
+		s.TLSConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{cert},
+		}
 	}
 
+	runErrors := make(chan error, 1)
 	go func() {
-		_, err := os.Stat("/etc/service-controller/console/tls.crt")
-		if err == nil {
-			err := s.ListenAndServeTLS("/etc/service-controller/console/tls.crt", "/etc/service-controller/console/tls.key")
-			if err != nil {
-				fmt.Println(err)
-			}
+		slog.Info("Starting Network Console API Server",
+			slog.String("address", cfg.APIListenAddress),
+			slog.Bool("tls", tlsEnabled),
+			slog.Bool("console", cfg.EnableConsole))
+		var err error
+		if tlsEnabled {
+			err = s.ListenAndServeTLS("", "")
 		} else {
-			err := s.ListenAndServe()
-			if err != nil {
-				fmt.Println(err)
-			}
+			err = s.ListenAndServe()
+		}
+		if err != nil {
+			runErrors <- fmt.Errorf("server error running api server: %s", err)
 		}
 	}()
-	if *isProf {
+
+	if cfg.EnableProfile {
 		// serve only over localhost loopback
 		go func() {
 			if err := http.ListenAndServe("localhost:9970", nil); err != nil {
-				log.Fatalf("failure running default http server for net/http/pprof: %s", err)
+				runErrors <- fmt.Errorf("server error running profiler server: %s", err)
 			}
 		}()
 	}
 
-	if err = c.Run(stopCh); err != nil {
-		log.Fatal("Error running Flow collector: ", err.Error())
+	stopController := make(chan struct{})
+	defer close(stopController)
+	go func() {
+		if err = c.Run(stopController); err != nil {
+			runErrors <- fmt.Errorf("collector error: %s", err)
+		}
+	}()
+
+	select {
+	case err := <-runErrors:
+		return err
+	case <-ctx.Done():
 	}
 
+	shutdownCtx, sCancel := context.WithTimeout(context.Background(), time.Second)
+	defer sCancel()
+	if err := s.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown did not complete gracefully: %s", err)
+	}
+
+	return nil
+}
+
+func main() {
+	var cfg Config
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	// if -version used, report and exit
+	isVersion := flags.Bool("version", false, "Report the version of the Skupper Flow Collector")
+
+	flags.StringVar(&cfg.FlowConnectionFile, "flow-connection-file", "/etc/messaging/connect.json", "Path to the file detailing connection info for the skupper router")
+
+	flags.StringVar(&cfg.APIListenAddress, "listen", ":8080", "The address that the API Server will listen on")
+	flags.BoolVar(&cfg.APIDisableAccessLogs, "disable-access-logs", false, "Disables access logging for the API Server")
+	flags.StringVar(&cfg.TLSCert, "tls-cert", "", "Path to the API Server certificate file")
+	flags.StringVar(&cfg.TLSKey, "tls-key", "", "Path to the API Server certificate key file matching tls-cert")
+
+	flags.BoolVar(&cfg.EnableConsole, "enable-console", true, "Enables the web console")
+	flags.StringVar(&cfg.ConsoleLocation, "console-location", "/app/console", "Location where the console assets are installed")
+	flags.StringVar(&cfg.PrometheusAPI, "prometheus-api", "http://network-console-prometheus:9090", "Prometheus API HTTP endpoint for console")
+
+	flags.DurationVar(&cfg.FlowRecordTTL, "flow-record-ttl", 15*time.Minute, "How long to retain flow records in memory")
+	flags.BoolVar(&cfg.CORSAllowAll, "cors-allow-all", false, "Development option to allow all origins")
+	flags.BoolVar(&cfg.EnableProfile, "profile", false, "Exposes the runtime profiling facilities from net/http/pprof on http://localhost:9970")
+
+	flags.Parse(os.Args[1:])
+	if *isVersion {
+		fmt.Println(version.Version)
+		os.Exit(0)
+	}
+
+	if err := run(cfg); err != nil {
+		slog.Error("flow collector error", slog.Any("error", err))
+		os.Exit(1)
+	}
 }
