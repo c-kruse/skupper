@@ -205,6 +205,20 @@ func (m *syncMapStore) Index(index string, exemplar Entry) []Entry {
 	}
 	return entries
 }
+func (m *syncMapStore) IndexValues(index string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	idx := m.indicies[index]
+	if len(idx) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(idx))
+	for val := range idx {
+		values = append(values, val)
+	}
+	return values
+}
 
 func (m *syncMapStore) Replace(items []Entry) {
 	m.mu.Lock()

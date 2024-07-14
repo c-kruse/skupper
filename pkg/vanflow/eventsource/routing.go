@@ -1,6 +1,8 @@
 package eventsource
 
 import (
+	"log/slog"
+
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
@@ -17,6 +19,7 @@ func (r RecordStoreRouter) Route(msg vanflow.RecordMessage) {
 		typ := record.GetTypeMeta().String()
 		acc, found := r.Stores[typ]
 		if !found {
+			slog.Info("skipping record with no configured store", slog.String("type", typ))
 			continue
 		}
 		acc.Patch(record, r.Source)

@@ -38,4 +38,5 @@ type Interface interface {
 
 	List() []Entry
 	Index(index string, exemplar Entry) []Entry
+	IndexValues(index string) []string
 }

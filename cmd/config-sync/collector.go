@@ -61,6 +61,8 @@ func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
 		log.Println("Update lock error", err.Error())
 	}
 
+	factory := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{ContainerID: "kube-flow-collector"})
+	statusSync := kubeflow.NewStatusSync(factory, nil, cli.KubeClient.CoreV1().ConfigMaps(cli.Namespace), "skupper-network-status-alpha")
 	fc = flow.NewFlowCollector(flow.FlowCollectorSpec{
 		Mode:                flow.RecordStatus,
 		Namespace:           cli.Namespace,
@@ -72,7 +74,9 @@ func siteCollector(stopCh <-chan struct{}, cli *client.VanClient) {
 
 	go primeBeacons(fc, cli)
 	log.Println("COLLECTOR: Starting flow collector")
+	go statusSync.Run(context.Background())
 	fc.Start(stopCh)
+
 }
 
 // primeBeacons attempts to guess the router and service-controller vanflow IDs
