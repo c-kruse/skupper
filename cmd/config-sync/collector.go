@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -11,10 +10,8 @@ import (
 	"github.com/skupperproject/skupper/api/types"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/pkg/config"
-	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/kube"
 	kubeflow "github.com/skupperproject/skupper/pkg/kube/flow"
-	"github.com/skupperproject/skupper/pkg/qdr"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/session"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,7 +36,6 @@ func updateLockOwner(lockname, namespace string, owner *metav1.OwnerReference, c
 }
 
 func siteCollector(stopCh <-chan struct{}, cli *internalclient.KubeClient) {
-	var fc *flow.FlowCollector
 	siteData := map[string]string{}
 	platform := config.GetPlatform()
 	if platform != types.PlatformKubernetes {
@@ -51,12 +47,7 @@ func siteCollector(stopCh <-chan struct{}, cli *internalclient.KubeClient) {
 	}
 	owner := kube.GetDeploymentOwnerReference(current)
 
-	const shadowNetworkStatusConfigMapName = "skupper-network-status-shadow"
 	existing, err := kube.NewConfigMap(types.NetworkStatusConfigMapName, &siteData, nil, nil, &owner, cli.Namespace, cli.Kube)
-	if err != nil && existing == nil {
-		log.Fatal("Failed to create site status config map ", err.Error())
-	}
-	existing, err = kube.NewConfigMap(shadowNetworkStatusConfigMapName, &siteData, nil, nil, &owner, cli.Namespace, cli.Kube)
 	if err != nil && existing == nil {
 		log.Fatal("Failed to create site status config map ", err.Error())
 	}
@@ -67,40 +58,9 @@ func siteCollector(stopCh <-chan struct{}, cli *internalclient.KubeClient) {
 	}
 
 	factory := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{ContainerID: "kube-flow-collector"})
-	statusSync := kubeflow.NewStatusSync(factory, nil, cli.Kube.CoreV1().ConfigMaps(cli.Namespace), shadowNetworkStatusConfigMapName)
-	fc = flow.NewFlowCollector(flow.FlowCollectorSpec{
-		Mode:                flow.RecordStatus,
-		Namespace:           cli.Namespace,
-		PromReg:             nil,
-		ConnectionFactory:   qdr.NewConnectionFactory("amqp://localhost:5672", nil),
-		FlowRecordTtl:       time.Minute * 15,
-		NetworkStatusClient: cli.Kube,
-	})
-
-	go primeBeacons(fc, cli)
-	log.Println("COLLECTOR: Starting flow collector")
+	statusSync := kubeflow.NewStatusSync(factory, nil, cli.Kube.CoreV1().ConfigMaps(cli.Namespace), types.NetworkStatusConfigMapName)
 	go statusSync.Run(context.Background())
-	fc.Start(stopCh)
 
-}
-
-// primeBeacons attempts to guess the router and service-controller vanflow IDs
-// to pass to the flow collector in order to accelerate startup time.
-func primeBeacons(fc *flow.FlowCollector, cli *internalclient.KubeClient) {
-	podname, _ := os.Hostname()
-	var prospectRouterID string
-	if len(podname) >= 5 {
-		prospectRouterID = fmt.Sprintf("%s:0", podname[len(podname)-5:])
-	}
-	var siteID string
-	cm, err := kube.WaitConfigMapCreated(types.SiteConfigMapName, cli.Namespace, cli.Kube, 5*time.Second, 250*time.Millisecond)
-	if err != nil {
-		log.Printf("COLLECTOR: failed to get skupper-site ConfigMap. Proceeding without Site ID. %s\n", err)
-	} else if cm != nil {
-		siteID = string(cm.ObjectMeta.UID)
-	}
-	log.Printf("COLLECTOR: Priming site with expected beacons for '%s' and '%s'\n", prospectRouterID, siteID)
-	fc.PrimeSiteBeacons(siteID, prospectRouterID)
 }
 
 func startFlowController(stopCh <-chan struct{}, cli *internalclient.KubeClient) error {
