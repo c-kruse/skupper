@@ -21,13 +21,13 @@ import (
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	skupperv1alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v1alpha1"
 	"github.com/skupperproject/skupper/pkg/event"
-	"github.com/skupperproject/skupper/pkg/flow"
 	"github.com/skupperproject/skupper/pkg/kube"
 	"github.com/skupperproject/skupper/pkg/kube/certificates"
 	"github.com/skupperproject/skupper/pkg/kube/claims"
 	"github.com/skupperproject/skupper/pkg/kube/securedaccess"
 	"github.com/skupperproject/skupper/pkg/kube/site"
 	"github.com/skupperproject/skupper/pkg/kube/tokens"
+	"github.com/skupperproject/skupper/pkg/network"
 )
 
 type Controller struct {
@@ -304,8 +304,8 @@ func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error
 		log.Printf("No network status found in %s", key)
 		return nil
 	}
-	status := &flow.NetworkStatus{}
-	err := json.Unmarshal([]byte(encoded), status)
+	var status network.NetworkStatusInfo
+	err := json.Unmarshal([]byte(encoded), &status)
 	if err != nil {
 		log.Printf("Error unmarshalling network status from %s: %s", key, err)
 		return nil
@@ -314,52 +314,43 @@ func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error
 	return c.getSite(cm.ObjectMeta.Namespace).NetworkStatusUpdated(extractSiteRecords(status))
 }
 
-func extractSiteRecords(status *flow.NetworkStatus) []skupperv1alpha1.SiteRecord {
-	if status == nil {
-		return nil
-	}
+func extractSiteRecords(status network.NetworkStatusInfo) []skupperv1alpha1.SiteRecord {
 	var records []skupperv1alpha1.SiteRecord
 	routers := map[string]string{} // router name -> site name
-	for _, site := range status.Sites {
+	for _, site := range status.SiteStatus {
 		for _, router := range site.RouterStatus {
-			if router.Router.Name != nil && site.Site.Name != nil {
-				name := *router.Router.Name
+			if router.Router.Name != "" && site.Site.Name != "" {
+				name := router.Router.Name
 				parts := strings.Split(name, "/")
 				if len(parts) == 2 {
 					name = parts[1]
 				}
-				routers[name] = *site.Site.Name
+				routers[name] = site.Site.Name
 			}
 		}
 	}
-	for _, site := range status.Sites {
+	for _, site := range status.SiteStatus {
 		record := skupperv1alpha1.SiteRecord{
-			Id: site.Site.Identity,
-		}
-		if site.Site.Name != nil {
-			record.Name = *site.Site.Name
-		}
-		if site.Site.Platform != nil {
-			record.Platform = *site.Site.Platform
-		}
-		if site.Site.NameSpace != nil {
-			record.Platform = *site.Site.NameSpace
-		}
-		if site.Site.Version != nil {
-			record.Version = *site.Site.Version
+			Id:        site.Site.Identity,
+			Name:      site.Site.Name,
+			Platform:  site.Site.Platform,
+			Namespace: site.Site.Namespace,
+			Version:   site.Site.Version,
 		}
 		services := map[string]*skupperv1alpha1.ServiceRecord{}
 		for _, router := range site.RouterStatus {
-			for _, link := range router.Links {
-				if link.Name != nil {
-					if siteName, ok := routers[*link.Name]; ok {
-						record.Links = append(record.Links, siteName)
-					}
-				}
-			}
+			// todo(ck): need routeraccess in network status to correlate this now
+			//
+			// for _, link := range router.Links {
+			// 	if link.Name != "" {
+			// 		if siteName, ok := routers[*link.Name]; ok {
+			// 			record.Links = append(record.Links, siteName)
+			// 		}
+			// 	}
+			// }
 			for _, connector := range router.Connectors {
-				if connector.Address != nil && connector.DestHost != nil {
-					address := *connector.Address
+				if connector.Address != "" && connector.DestHost != "" {
+					address := connector.Address
 					service, ok := services[address]
 					if !ok {
 						service = &skupperv1alpha1.ServiceRecord{
@@ -367,12 +358,12 @@ func extractSiteRecords(status *flow.NetworkStatus) []skupperv1alpha1.SiteRecord
 						}
 						services[address] = service
 					}
-					service.Connectors = append(service.Connectors, *connector.DestHost)
+					service.Connectors = append(service.Connectors, connector.DestHost)
 				}
 			}
 			for _, listener := range router.Listeners {
-				if listener.Address != nil && listener.Name != nil {
-					address := *listener.Address
+				if listener.Address != "" && listener.Name != "" {
+					address := listener.Address
 					service, ok := services[address]
 					if !ok {
 						service = &skupperv1alpha1.ServiceRecord{
@@ -380,7 +371,7 @@ func extractSiteRecords(status *flow.NetworkStatus) []skupperv1alpha1.SiteRecord
 						}
 						services[address] = service
 					}
-					service.Listeners = append(service.Listeners, *listener.Name)
+					service.Listeners = append(service.Listeners, listener.Name)
 				}
 			}
 		}
