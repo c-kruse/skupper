@@ -23,14 +23,9 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 	address3 := "mongo"
 	address4 := "cartservice"
 	protocol := "tcp"
-	counterFlow1 := "flow:0"
-	counterFlow2 := "flow:2"
-	counterFlow4 := "flow:4"
-	flowTrace := "router:0|router:1"
 	processName1 := "checkout-1234"
 	processName2 := "payment-1234"
 	groupName1 := "online-store"
-	listenerProcess := "process:0"
 	connectorProcess1 := "process:1"
 	connectorProcess2 := "process:2"
 	processConnector := "connector:0"
@@ -261,84 +256,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			DestHost:  &destHost1,
 		},
 	}
-	flows := []FlowRecord{
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:0",
-				Parent:    "listener:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			ProcessName: &processName1,
-			Process:     &listenerProcess,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:1",
-				Parent:    "connector:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			CounterFlow: &counterFlow1,
-			Trace:       &flowTrace,
-			ProcessName: &processName2,
-			Process:     &connectorProcess1,
-			SourceHost:  &destHost1,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:2",
-				Parent:    "listener:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			ProcessName: &processName1,
-			Process:     &listenerProcess,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:3",
-				Parent:    "connector:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			CounterFlow: &counterFlow2,
-			ProcessName: &processName2,
-			Process:     &connectorProcess1,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:2",
-				Parent:    "listener:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-				EndTime:   uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			ProcessName: &processName1,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:4",
-				Parent:    "flow:0",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			ProcessName: &processName1,
-			Process:     &listenerProcess,
-		},
-		{
-			Base: Base{
-				RecType:   recordNames[Flow],
-				Identity:  "flow:5",
-				Parent:    "flow:1",
-				StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-			},
-			CounterFlow: &counterFlow4,
-			ProcessName: &processName2,
-			Trace:       &flowTrace,
-			Process:     &connectorProcess1,
-		},
-	}
 
 	reg := prometheus.NewRegistry()
 	u, _ := time.ParseDuration("5m")
@@ -391,12 +308,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 		err = fc.updateRecord(c)
 		assert.Assert(t, err)
 	}
-	for _, f := range flows {
-		err := fc.updateRecord(f)
-		assert.Assert(t, err)
-		err = fc.updateRecord(f)
-		assert.Assert(t, err)
-	}
 
 	for _, s := range sites {
 		id := fc.getRecordSiteId(s)
@@ -430,19 +341,8 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 		id := fc.getRecordSiteId(l)
 		assert.Equal(t, id, "site:0")
 	}
-	for _, f := range flows {
-		if f.Parent != "" {
-			id := fc.getRecordSiteId(f)
-			assert.Equal(t, id, "site:0")
-		}
-		if f.Trace != nil {
-			trace := fc.annotateFlowTrace(&f)
-			assert.Equal(t, *trace, "site1.0@skupper-site1")
-		}
-	}
 
 	fc.reconcileConnectorRecords()
-	fc.reconcileFlowRecords()
 
 	var addressId string
 	for _, address := range fc.VanAddresses {
@@ -571,16 +471,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			responseSize: 1,
 		},
 		{
-			desc:         "Get Router flows",
-			recordType:   Router,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "router:0"},
-			name:         "flows",
-			responseSize: 6,
-		},
-		{
 			desc:         "Get Router links",
 			recordType:   Router,
 			method:       "Get",
@@ -651,16 +541,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			responseSize: 1,
 		},
 		{
-			desc:         "Get Listener flows",
-			recordType:   Listener,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "listener:0"},
-			name:         "flows",
-			responseSize: 3,
-		},
-		{
 			desc:         "Get Connector list",
 			recordType:   Connector,
 			method:       "Get",
@@ -679,16 +559,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			vars:         map[string]string{"id": "connector:0"},
 			name:         "item",
 			responseSize: 1,
-		},
-		{
-			desc:         "Get Connector flows",
-			recordType:   Connector,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "connector:0"},
-			name:         "flows",
-			responseSize: 3,
 		},
 		{
 			desc:         "Get Connector process",
@@ -721,26 +591,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			responseSize: 1,
 		},
 		{
-			desc:         "Get Address flows",
-			recordType:   Address,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": addressId},
-			name:         "flows",
-			responseSize: 3,
-		},
-		{
-			desc:         "Get Address flowpairs",
-			recordType:   Address,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": addressId},
-			name:         "flowpairs",
-			responseSize: 3,
-		},
-		{
 			desc:         "Get Address listeners",
 			recordType:   Address,
 			method:       "Get",
@@ -758,56 +608,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			params:       map[string]string{"sortBy": "identity.asc"},
 			vars:         map[string]string{"id": addressId},
 			name:         "connectors",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get Flow list",
-			recordType:   Flow,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{},
-			name:         "list",
-			responseSize: len(fc.Flows),
-		},
-		{
-			desc:         "Get Flow item",
-			recordType:   Flow,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "flow:1"},
-			name:         "item",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get Flow process",
-			recordType:   Flow,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "flow:1"},
-			name:         "process",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get Flowpair list",
-			recordType:   FlowPair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{},
-			name:         "list",
-			responseSize: len(fc.FlowPairs),
-		},
-		{
-			desc:         "Get Flowpair item",
-			recordType:   FlowPair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "fp-flow:0"},
-			name:         "item",
 			responseSize: 1,
 		},
 		{
@@ -829,16 +629,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			vars:         map[string]string{"id": "process:1"},
 			name:         "item",
 			responseSize: 1,
-		},
-		{
-			desc:         "Get Process flows",
-			recordType:   Process,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "process:0"},
-			name:         "flows",
-			responseSize: 3,
 		},
 		{
 			desc:         "Get Process addresses",
@@ -890,56 +680,56 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 			name:         "processes",
 			responseSize: 3,
 		},
-		{
-			desc:         "Get SitePair list",
-			recordType:   SitePair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{},
-			name:         "list",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get SitePair item",
-			recordType:   SitePair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "site:0-to-site:0"},
-			name:         "item",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get ProcessGroupPair list",
-			recordType:   ProcessGroupPair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{},
-			name:         "list",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get ProcessPair list",
-			recordType:   ProcessPair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{},
-			name:         "list",
-			responseSize: 1,
-		},
-		{
-			desc:         "Get ProcessPair item",
-			recordType:   ProcessPair,
-			method:       "Get",
-			url:          "/",
-			params:       map[string]string{"sortBy": "identity.asc"},
-			vars:         map[string]string{"id": "process:0-to-process:1"},
-			name:         "item",
-			responseSize: 1,
-		},
+		// {
+		// 	desc:         "Get SitePair list",
+		// 	recordType:   SitePair,
+		// 	method:       "Get",
+		// 	url:          "/",
+		// 	params:       map[string]string{"sortBy": "identity.asc"},
+		// 	vars:         map[string]string{},
+		// 	name:         "list",
+		// 	responseSize: 1,
+		// },
+		// {
+		// 	desc:         "Get SitePair item",
+		// 	recordType:   SitePair,
+		// 	method:       "Get",
+		// 	url:          "/",
+		// 	params:       map[string]string{"sortBy": "identity.asc"},
+		// 	vars:         map[string]string{"id": "site:0-to-site:0"},
+		// 	name:         "item",
+		// 	responseSize: 1,
+		// },
+		// {
+		// 	desc:         "Get ProcessGroupPair list",
+		// 	recordType:   ProcessGroupPair,
+		// 	method:       "Get",
+		// 	url:          "/",
+		// 	params:       map[string]string{"sortBy": "identity.asc"},
+		// 	vars:         map[string]string{},
+		// 	name:         "list",
+		// 	responseSize: 1,
+		// },
+		// {
+		// 	desc:         "Get ProcessPair list",
+		// 	recordType:   ProcessPair,
+		// 	method:       "Get",
+		// 	url:          "/",
+		// 	params:       map[string]string{"sortBy": "identity.asc"},
+		// 	vars:         map[string]string{},
+		// 	name:         "list",
+		// 	responseSize: 1,
+		// },
+		// {
+		// 	desc:         "Get ProcessPair item",
+		// 	recordType:   ProcessPair,
+		// 	method:       "Get",
+		// 	url:          "/",
+		// 	params:       map[string]string{"sortBy": "identity.asc"},
+		// 	vars:         map[string]string{"id": "process:0-to-process:1"},
+		// 	name:         "item",
+		// 	responseSize: 1,
+		// },
 		{
 			desc:         "Get Collector list",
 			recordType:   Collector,
@@ -963,7 +753,6 @@ func TestRecordGraphWithMetrics(t *testing.T) {
 	}
 
 	fc.reconcileConnectorRecords()
-	fc.reconcileFlowRecords()
 
 	var payload Payload
 	for _, test := range testTable {

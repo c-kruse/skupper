@@ -403,7 +403,6 @@ func main() {
 	routerApi.StrictSlash(true)
 	routerApi.HandleFunc("/", authenticated(http.HandlerFunc(c.routerHandler))).Name("list")
 	routerApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.routerHandler))).Name("item")
-	routerApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.routerHandler))).Name("flows")
 	routerApi.HandleFunc("/{id}/links", authenticated(http.HandlerFunc(c.routerHandler))).Name("links")
 	routerApi.HandleFunc("/{id}/listeners", authenticated(http.HandlerFunc(c.routerHandler))).Name("listeners")
 	routerApi.HandleFunc("/{id}/connectors", authenticated(http.HandlerFunc(c.routerHandler))).Name("connectors")
@@ -423,7 +422,6 @@ func main() {
 	listenerApi.StrictSlash(true)
 	listenerApi.HandleFunc("/", authenticated(http.HandlerFunc(c.listenerHandler))).Name("list")
 	listenerApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.listenerHandler))).Name("item")
-	listenerApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.listenerHandler))).Name("flows")
 	listenerApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -432,7 +430,6 @@ func main() {
 	connectorApi.StrictSlash(true)
 	connectorApi.HandleFunc("/", authenticated(http.HandlerFunc(c.connectorHandler))).Name("list")
 	connectorApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.connectorHandler))).Name("item")
-	connectorApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.connectorHandler))).Name("flows")
 	connectorApi.HandleFunc("/{id}/process", authenticated(http.HandlerFunc(c.connectorHandler))).Name("process")
 	connectorApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -444,8 +441,6 @@ func main() {
 	addressApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.addressHandler))).Name("item")
 	addressApi.HandleFunc("/{id}/processes", authenticated(http.HandlerFunc(c.addressHandler))).Name("processes")
 	addressApi.HandleFunc("/{id}/processpairs", authenticated(http.HandlerFunc(c.addressHandler))).Name("processpairs")
-	addressApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.addressHandler))).Name("flows")
-	addressApi.HandleFunc("/{id}/flowpairs", authenticated(http.HandlerFunc(c.addressHandler))).Name("flowpairs")
 	addressApi.HandleFunc("/{id}/listeners", authenticated(http.HandlerFunc(c.addressHandler))).Name("listeners")
 	addressApi.HandleFunc("/{id}/connectors", authenticated(http.HandlerFunc(c.addressHandler))).Name("connectors")
 	addressApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +451,6 @@ func main() {
 	processApi.StrictSlash(true)
 	processApi.HandleFunc("/", authenticated(http.HandlerFunc(c.processHandler))).Name("list")
 	processApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processHandler))).Name("item")
-	processApi.HandleFunc("/{id}/flows", authenticated(http.HandlerFunc(c.processHandler))).Name("flows")
 	processApi.HandleFunc("/{id}/addresses", authenticated(http.HandlerFunc(c.processHandler))).Name("addresses")
 	processApi.HandleFunc("/{id}/connector", authenticated(http.HandlerFunc(c.processHandler))).Name("connector")
 	processApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -469,23 +463,6 @@ func main() {
 	processGroupApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.processGroupHandler))).Name("item")
 	processGroupApi.HandleFunc("/{id}/processes", authenticated(http.HandlerFunc(c.processGroupHandler))).Name("processes")
 	processGroupApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-
-	var flowApi = api1.PathPrefix("/flows").Subrouter()
-	flowApi.StrictSlash(true)
-	flowApi.HandleFunc("/", authenticated(http.HandlerFunc(c.flowHandler))).Name("list")
-	flowApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.flowHandler))).Name("item")
-	flowApi.HandleFunc("/{id}/process", authenticated(http.HandlerFunc(c.flowHandler))).Name("process")
-	flowApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-
-	var flowpairApi = api1.PathPrefix("/flowpairs").Subrouter()
-	flowpairApi.StrictSlash(true)
-	flowpairApi.HandleFunc("/", authenticated(http.HandlerFunc(c.flowPairHandler))).Name("list")
-	flowpairApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.flowPairHandler))).Name("item")
-	flowpairApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
@@ -524,9 +501,6 @@ func main() {
 	collectorApi.HandleFunc("/", authenticated(http.HandlerFunc(c.collectorHandler))).Name("list")
 	collectorApi.HandleFunc("/{id}", authenticated(http.HandlerFunc(c.collectorHandler))).Name("item")
 	collectorApi.HandleFunc("/{id}/connectors-to-process", authenticated(http.HandlerFunc(c.collectorHandler))).Name("connectors-to-process")
-	collectorApi.HandleFunc("/{id}/flows-to-pair", authenticated(http.HandlerFunc(c.collectorHandler))).Name("flows-to-pair")
-	collectorApi.HandleFunc("/{id}/flows-to-process", authenticated(http.HandlerFunc(c.collectorHandler))).Name("flows-to-process")
-	collectorApi.HandleFunc("/{id}/pair-to-aggregate", authenticated(http.HandlerFunc(c.collectorHandler))).Name("pair-to-aggregate")
 	collectorApi.NotFoundHandler = authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
