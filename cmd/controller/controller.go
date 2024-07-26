@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1beta1"
@@ -316,16 +315,14 @@ func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error
 
 func extractSiteRecords(status network.NetworkStatusInfo) []skupperv1alpha1.SiteRecord {
 	var records []skupperv1alpha1.SiteRecord
-	routers := map[string]string{} // router name -> site name
+	routerAPs := map[string]string{} // router access point ID -> site name
 	for _, site := range status.SiteStatus {
+		if site.Site.Name == "" {
+			continue
+		}
 		for _, router := range site.RouterStatus {
-			if router.Router.Name != "" && site.Site.Name != "" {
-				name := router.Router.Name
-				parts := strings.Split(name, "/")
-				if len(parts) == 2 {
-					name = parts[1]
-				}
-				routers[name] = site.Site.Name
+			for _, ap := range router.AccessPoints {
+				routerAPs[ap.Identity] = site.Site.Name
 			}
 		}
 	}
@@ -341,13 +338,20 @@ func extractSiteRecords(status network.NetworkStatusInfo) []skupperv1alpha1.Site
 		for _, router := range site.RouterStatus {
 			// todo(ck): need routeraccess in network status to correlate this now
 			//
-			// for _, link := range router.Links {
-			// 	if link.Name != "" {
-			// 		if siteName, ok := routers[*link.Name]; ok {
-			// 			record.Links = append(record.Links, siteName)
-			// 		}
-			// 	}
-			// }
+			for _, link := range router.Links {
+				var (
+					name   = link.Name
+					status = link.Status
+					peer   = link.Peer
+				)
+				if name == "" || peer == "" || status != "up" {
+					continue
+				}
+
+				if site, ok := routerAPs[peer]; ok {
+					record.Links = append(record.Links, site)
+				}
+			}
 			for _, connector := range router.Connectors {
 				if connector.Address != "" && connector.DestHost != "" {
 					address := connector.Address
