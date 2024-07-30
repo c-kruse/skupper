@@ -89,20 +89,6 @@ func TestRecordDecoding(t *testing.T) {
 			},
 		},
 		{
-			name:  "flow",
-			stype: reflect.TypeOf(FlowRecord{}),
-			fields: map[int]interface{}{
-				TypeOfRecord:    uint32(Flow),
-				CounterFlow:     uuid.New().String(),
-				SourceHost:      "172.21.122.169",
-				SourcePort:      "9090",
-				Octets:          uint64(1234),
-				Latency:         uint64(15),
-				Trace:           "some-trace-string",
-				ProcessIdentity: uuid.New().String(),
-			},
-		},
-		{
 			name:  "process",
 			stype: reflect.TypeOf(ProcessRecord{}),
 			fields: map[int]interface{}{
@@ -194,15 +180,6 @@ func TestRecordDecoding(t *testing.T) {
 				assert.Equal(t, *logevent.LogText, s.fields[LogText])
 				assert.Equal(t, *logevent.SourceFile, s.fields[SourceFile])
 				assert.Equal(t, *logevent.SourceLine, s.fields[SourceLine])
-			case FlowRecord:
-				flow, ok := record.(FlowRecord)
-				assert.Assert(t, ok)
-				assert.Equal(t, *flow.CounterFlow, s.fields[CounterFlow])
-				assert.Equal(t, *flow.SourceHost, s.fields[SourceHost])
-				assert.Equal(t, *flow.SourcePort, s.fields[SourcePort])
-				assert.Equal(t, *flow.Octets, s.fields[Octets])
-				assert.Equal(t, *flow.Latency, s.fields[Latency])
-				assert.Equal(t, *flow.Trace, s.fields[Trace])
 			case HostRecord:
 				host, ok := record.(HostRecord)
 				assert.Assert(t, ok)

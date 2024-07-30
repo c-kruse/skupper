@@ -416,48 +416,6 @@ func decode(msg *amqp.Message) []interface{} {
 					flow := FlowRecord{
 						Base: base,
 					}
-					if v, ok := m["SourceHost"].(string); ok {
-						flow.SourceHost = &v
-					}
-					if v, ok := m["SourcePort"].(string); ok {
-						flow.SourcePort = &v
-					}
-					if v, ok := m["CounterFlow"].(string); ok {
-						flow.CounterFlow = &v
-					}
-					if v, ok := m["Trace"].(string); ok {
-						flow.Trace = &v
-					}
-					if v, ok := m["Latency"].(uint64); ok {
-						flow.Latency = &v
-					}
-					if v, ok := m["Octets"].(uint64); ok {
-						flow.Octets = &v
-					}
-					if v, ok := m["OctetsOut"].(uint64); ok {
-						flow.OctetsOut = &v
-					}
-					if v, ok := m["OctetsUnacked"].(uint64); ok {
-						flow.OctetsUnacked = &v
-					}
-					if v, ok := m["WindowClosures"].(uint64); ok {
-						flow.WindowClosures = &v
-					}
-					if v, ok := m["WindowSize"].(uint64); ok {
-						flow.WindowSize = &v
-					}
-					if v, ok := m["Reason"].(string); ok {
-						flow.Reason = &v
-					}
-					if v, ok := m["Method"].(string); ok {
-						flow.Method = &v
-					}
-					if v, ok := m["Result"].(string); ok {
-						flow.Result = &v
-					}
-					if v, ok := m["StreamIdentity"].(uint64); ok {
-						flow.StreamIdentity = &v
-					}
 					result = append(result, flow)
 				case Process:
 					process := ProcessRecord{

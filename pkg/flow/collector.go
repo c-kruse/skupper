@@ -140,11 +140,6 @@ func (fc *FlowCollector) NewMetrics(reg prometheus.Registerer) *collectorMetrics
 
 }
 
-type FlowToPairRecord struct {
-	forwardId string
-	created   uint64
-}
-
 type FlowCollectorSpec struct {
 	Namespace         string
 	Origin            string
@@ -154,41 +149,36 @@ type FlowCollectorSpec struct {
 }
 
 type FlowCollector struct {
-	origin                  string
-	namespace               string
-	startTime               uint64
-	Collector               CollectorRecord
-	connectionFactory       messaging.ConnectionFactory
-	recordTtl               time.Duration
-	prometheusReg           prometheus.Registerer
-	metrics                 *collectorMetrics
-	beaconsIncoming         chan []interface{}
-	heartbeatsIncoming      chan []interface{}
-	recordsIncoming         chan []interface{}
-	Request                 chan ApiRequest
-	Response                chan ApiResponse
-	eventSources            map[string]*eventSource
-	beaconReceiver          *receiver
-	pendingFlush            map[string]*senderDirect
-	Beacons                 map[string]*BeaconRecord
-	Sites                   map[string]*SiteRecord
-	Hosts                   map[string]*HostRecord
-	Routers                 map[string]*RouterRecord
-	Links                   map[string]*LinkRecord
-	Listeners               map[string]*ListenerRecord
-	Connectors              map[string]*ConnectorRecord
-	recentConnectors        map[string]*ConnectorRecord
-	Flows                   map[string]*FlowRecord
-	FlowPairs               map[string]*FlowPairRecord
-	FlowAggregates          map[string]*FlowAggregateRecord
-	Processes               map[string]*ProcessRecord
-	ProcessGroups           map[string]*ProcessGroupRecord
-	VanAddresses            map[string]*VanAddressRecord
-	flowsToProcessReconcile map[string]string
-	flowsToPairReconcile    map[string]*FlowToPairRecord
-	connectorsToReconcile   map[string]string
-	processesToReconcile    map[string]*ProcessRecord
-	aggregatesToReconcile   map[string]*FlowPairRecord
+	origin                string
+	namespace             string
+	startTime             uint64
+	Collector             CollectorRecord
+	connectionFactory     messaging.ConnectionFactory
+	recordTtl             time.Duration
+	prometheusReg         prometheus.Registerer
+	metrics               *collectorMetrics
+	beaconsIncoming       chan []interface{}
+	heartbeatsIncoming    chan []interface{}
+	recordsIncoming       chan []interface{}
+	Request               chan ApiRequest
+	Response              chan ApiResponse
+	eventSources          map[string]*eventSource
+	beaconReceiver        *receiver
+	pendingFlush          map[string]*senderDirect
+	Beacons               map[string]*BeaconRecord
+	Sites                 map[string]*SiteRecord
+	Hosts                 map[string]*HostRecord
+	Routers               map[string]*RouterRecord
+	Links                 map[string]*LinkRecord
+	Listeners             map[string]*ListenerRecord
+	Connectors            map[string]*ConnectorRecord
+	recentConnectors      map[string]*ConnectorRecord
+	FlowAggregates        map[string]*FlowAggregateRecord
+	Processes             map[string]*ProcessRecord
+	ProcessGroups         map[string]*ProcessGroupRecord
+	VanAddresses          map[string]*VanAddressRecord
+	connectorsToReconcile map[string]string
+	processesToReconcile  map[string]*ProcessRecord
 }
 
 func getTtl(ttl time.Duration) time.Duration {
@@ -203,38 +193,33 @@ func getTtl(ttl time.Duration) time.Duration {
 
 func NewFlowCollector(spec FlowCollectorSpec) *FlowCollector {
 	fc := &FlowCollector{
-		namespace:               spec.Namespace,
-		origin:                  spec.Origin,
-		startTime:               uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-		connectionFactory:       spec.ConnectionFactory,
-		recordTtl:               getTtl(spec.FlowRecordTtl),
-		prometheusReg:           spec.PromReg,
-		beaconsIncoming:         make(chan []interface{}, 10),
-		heartbeatsIncoming:      make(chan []interface{}, 10),
-		recordsIncoming:         make(chan []interface{}, 10),
-		Request:                 make(chan ApiRequest),
-		Response:                make(chan ApiResponse),
-		eventSources:            make(map[string]*eventSource),
-		pendingFlush:            make(map[string]*senderDirect),
-		Beacons:                 make(map[string]*BeaconRecord),
-		Sites:                   make(map[string]*SiteRecord),
-		Hosts:                   make(map[string]*HostRecord),
-		Routers:                 make(map[string]*RouterRecord),
-		Links:                   make(map[string]*LinkRecord),
-		Listeners:               make(map[string]*ListenerRecord),
-		Connectors:              make(map[string]*ConnectorRecord),
-		recentConnectors:        make(map[string]*ConnectorRecord),
-		Flows:                   make(map[string]*FlowRecord),
-		FlowPairs:               make(map[string]*FlowPairRecord),
-		FlowAggregates:          make(map[string]*FlowAggregateRecord),
-		VanAddresses:            make(map[string]*VanAddressRecord),
-		Processes:               make(map[string]*ProcessRecord),
-		ProcessGroups:           make(map[string]*ProcessGroupRecord),
-		flowsToProcessReconcile: make(map[string]string),
-		flowsToPairReconcile:    make(map[string]*FlowToPairRecord),
-		connectorsToReconcile:   make(map[string]string),
-		processesToReconcile:    make(map[string]*ProcessRecord),
-		aggregatesToReconcile:   make(map[string]*FlowPairRecord),
+		namespace:             spec.Namespace,
+		origin:                spec.Origin,
+		startTime:             uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
+		connectionFactory:     spec.ConnectionFactory,
+		recordTtl:             getTtl(spec.FlowRecordTtl),
+		prometheusReg:         spec.PromReg,
+		beaconsIncoming:       make(chan []interface{}, 10),
+		heartbeatsIncoming:    make(chan []interface{}, 10),
+		recordsIncoming:       make(chan []interface{}, 10),
+		Request:               make(chan ApiRequest),
+		Response:              make(chan ApiResponse),
+		eventSources:          make(map[string]*eventSource),
+		pendingFlush:          make(map[string]*senderDirect),
+		Beacons:               make(map[string]*BeaconRecord),
+		Sites:                 make(map[string]*SiteRecord),
+		Hosts:                 make(map[string]*HostRecord),
+		Routers:               make(map[string]*RouterRecord),
+		Links:                 make(map[string]*LinkRecord),
+		Listeners:             make(map[string]*ListenerRecord),
+		Connectors:            make(map[string]*ConnectorRecord),
+		recentConnectors:      make(map[string]*ConnectorRecord),
+		FlowAggregates:        make(map[string]*FlowAggregateRecord),
+		VanAddresses:          make(map[string]*VanAddressRecord),
+		Processes:             make(map[string]*ProcessRecord),
+		ProcessGroups:         make(map[string]*ProcessGroupRecord),
+		connectorsToReconcile: make(map[string]string),
+		processesToReconcile:  make(map[string]*ProcessRecord),
 	}
 	fc.Collector = CollectorRecord{
 		Base: Base{
@@ -369,7 +354,6 @@ func (c *FlowCollector) recordUpdates(stopCh <-chan struct{}) {
 				}
 			}
 		case <-tickerReconcile.C:
-			c.reconcileFlowRecords()
 			c.reconcileConnectorRecords()
 		case <-tickerAge.C:
 			c.ageAndPurgeRecords()

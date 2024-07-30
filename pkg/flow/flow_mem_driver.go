@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (fc *FlowCollector) inferGatewaySite(siteId string) error {
@@ -136,31 +135,6 @@ func (c *FlowCollector) getRecordSiteId(record interface{}) string {
 				return router.Parent
 			}
 		}
-	case FlowRecord:
-		if flow, ok := record.(FlowRecord); ok {
-			if connector, ok := c.Connectors[flow.Parent]; ok {
-				if router, ok := c.Routers[connector.Parent]; ok {
-					return router.Parent
-				}
-			}
-			if listener, ok := c.Listeners[flow.Parent]; ok {
-				if router, ok := c.Routers[listener.Parent]; ok {
-					return router.Parent
-				}
-			}
-			if l4Flow, ok := c.Flows[flow.Parent]; ok {
-				if connector, ok := c.Connectors[l4Flow.Parent]; ok {
-					if router, ok := c.Routers[connector.Parent]; ok {
-						return router.Parent
-					}
-				}
-				if listener, ok := c.Listeners[l4Flow.Parent]; ok {
-					if router, ok := c.Routers[listener.Parent]; ok {
-						return router.Parent
-					}
-				}
-			}
-		}
 	case ProcessRecord:
 		if process, ok := record.(ProcessRecord); ok {
 			return process.Parent
@@ -173,257 +147,6 @@ func (c *FlowCollector) getRecordSiteId(record interface{}) string {
 		return ""
 	}
 	return ""
-}
-
-func (fc *FlowCollector) getRouterForFlow(flow *FlowRecord) *RouterRecord {
-	if connector, ok := fc.Connectors[flow.Parent]; ok {
-		if router, ok := fc.Routers[connector.Parent]; ok {
-			return router
-		}
-	}
-	if listener, ok := fc.Listeners[flow.Parent]; ok {
-		if router, ok := fc.Routers[listener.Parent]; ok {
-			return router
-		}
-	}
-	if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-		if connector, ok := fc.Connectors[l4Flow.Parent]; ok {
-			if router, ok := fc.Routers[connector.Parent]; ok {
-				return router
-			}
-		}
-		if listener, ok := fc.Listeners[l4Flow.Parent]; ok {
-			if router, ok := fc.Routers[listener.Parent]; ok {
-				return router
-			}
-		}
-	}
-	return nil
-}
-
-func (fc *FlowCollector) getFlowProtocol(flow *FlowRecord) *string {
-	if listener, ok := fc.Listeners[flow.Parent]; ok {
-		return listener.Protocol
-	} else if connector, ok := fc.Connectors[flow.Parent]; ok {
-		return connector.Protocol
-	} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-		if listener, ok := fc.Listeners[l4Flow.Parent]; ok {
-			return listener.Protocol
-		} else if connector, ok := fc.Connectors[l4Flow.Parent]; ok {
-			return connector.Protocol
-		}
-	}
-	return nil
-}
-
-func (fc *FlowCollector) getFlowLabels(flow *FlowRecord) map[string]string {
-	labels := make(map[string]string)
-	if flow.ProcessName != nil {
-		labels["process"] = *flow.ProcessName
-	}
-	if listener, ok := fc.Listeners[flow.Parent]; ok {
-		labels["direction"] = Incoming
-		if listener.AddressId != nil {
-			labels["addressId"] = *listener.AddressId
-		}
-		if listener.Protocol != nil {
-			labels["protocol"] = *listener.Protocol
-		}
-		return labels
-	} else if connector, ok := fc.Connectors[flow.Parent]; ok {
-		labels["direction"] = Outgoing
-		if connector.AddressId != nil {
-			labels["addressId"] = *connector.AddressId
-		}
-		if connector.Protocol != nil {
-			labels["protocol"] = *connector.Protocol
-		}
-		return labels
-	} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-		if listener, ok := fc.Listeners[l4Flow.Parent]; ok {
-			labels["direction"] = Incoming
-			if listener.AddressId != nil {
-				labels["addressId"] = *listener.AddressId
-			}
-			if listener.Protocol != nil {
-				labels["protocol"] = *listener.Protocol
-			}
-		} else if connector, ok := fc.Connectors[l4Flow.Parent]; ok {
-			labels["direction"] = Outgoing
-			if connector.AddressId != nil {
-				labels["addressId"] = *connector.AddressId
-			}
-			if connector.Protocol != nil {
-				labels["protocol"] = *connector.Protocol
-			}
-			return labels
-		}
-	}
-	return labels
-}
-
-func (fc *FlowCollector) getFlowPlace(flow *FlowRecord) FlowPlace {
-	if _, ok := fc.Listeners[flow.Parent]; ok {
-		return clientSide
-	} else if _, ok := fc.Connectors[flow.Parent]; ok {
-		return serverSide
-	} else if _, ok := fc.recentConnectors[flow.Parent]; ok {
-		return serverSide
-	} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-		if _, ok := fc.Listeners[l4Flow.Parent]; ok {
-			return clientSide
-		} else if _, ok := fc.Connectors[l4Flow.Parent]; ok {
-			return serverSide
-		} else if _, ok := fc.recentConnectors[l4Flow.Parent]; ok {
-			return serverSide
-		}
-	}
-	return unknown
-}
-
-func (fc *FlowCollector) annotateFlowTrace(flow *FlowRecord) *string {
-	if flow == nil || flow.Trace == nil {
-		return nil
-	}
-	flowTrace := []string{}
-	parts := strings.Split(*flow.Trace, "|")
-	for _, part := range parts {
-		for _, router := range fc.Routers {
-			if *router.Name == part {
-				if site, ok := fc.Sites[router.Parent]; ok {
-					flowTrace = append(flowTrace, strings.TrimPrefix(*router.Name, "0/")+"@"+*site.Name)
-				}
-			}
-		}
-	}
-	if connector, ok := fc.Connectors[flow.Parent]; ok {
-		if router, ok := fc.Routers[connector.Parent]; ok {
-			if site, ok := fc.Sites[router.Parent]; ok {
-				flowTrace = append(flowTrace, strings.TrimPrefix(*router.Name, "0/")+"@"+*site.Name)
-			}
-		}
-	}
-	if listener, ok := fc.Listeners[flow.Parent]; ok {
-		if router, ok := fc.Routers[listener.Parent]; ok {
-			if site, ok := fc.Sites[router.Parent]; ok {
-				flowTrace = append(flowTrace, strings.TrimPrefix(*router.Name, "0/")+"@"+*site.Name)
-			}
-		}
-	}
-	if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-		if connector, ok := fc.Connectors[l4Flow.Parent]; ok {
-			if router, ok := fc.Routers[connector.Parent]; ok {
-				if site, ok := fc.Sites[router.Parent]; ok {
-					flowTrace = append(flowTrace, strings.TrimPrefix(*router.Name, "0/")+"@"+*site.Name)
-				}
-			}
-		}
-		if listener, ok := fc.Listeners[l4Flow.Parent]; ok {
-			if router, ok := fc.Routers[listener.Parent]; ok {
-				if site, ok := fc.Sites[router.Parent]; ok {
-					flowTrace = append(flowTrace, strings.TrimPrefix(*router.Name, "0/")+"@"+*site.Name)
-				}
-			}
-		}
-	}
-	annotatedTrace := strings.Join(flowTrace, "|")
-	return &annotatedTrace
-}
-
-func (fc *FlowCollector) linkFlowPair(flow *FlowRecord) (*FlowPairRecord, bool) {
-	var sourceSiteId, destSiteId, sourceSiteName, destSiteName string = "", "", "sourceSite", "destSite"
-	var sourceFlow, destFlow *FlowRecord = nil, nil
-	var ok bool
-
-	if flow.CounterFlow == nil {
-		// can't create a pair without a counter flow
-		return nil, false
-	}
-	flow.Place = fc.getFlowPlace(flow)
-	if flow.Place == clientSide {
-		sourceFlow = flow
-		if destFlow, ok = fc.Flows[*flow.CounterFlow]; !ok {
-			return nil, ok
-		}
-	} else if flow.Place == serverSide {
-		destFlow = flow
-		if sourceFlow, ok = fc.Flows[*flow.CounterFlow]; !ok {
-			return nil, ok
-		}
-	} else {
-		return nil, false
-	}
-
-	fwdLabels := fc.getFlowLabels(sourceFlow)
-	revLabels := fc.getFlowLabels(destFlow)
-	if len(fwdLabels) != 4 || len(revLabels) != 4 {
-		return nil, false
-	}
-
-	sourceSiteId = fc.getRecordSiteId(*sourceFlow)
-	if sourceSite, ok := fc.Sites[sourceSiteId]; ok {
-		sourceSiteName = *sourceSite.Name
-	}
-	destSiteId = fc.getRecordSiteId(*destFlow)
-	if destSite, ok := fc.Sites[destSiteId]; ok {
-		destSiteName = *destSite.Name
-	}
-	fwdLabels["sourceSite"] = sourceSiteName + "@_@" + sourceSiteId
-	fwdLabels["destSite"] = destSiteName + "@_@" + destSiteId
-	fwdLabels["sourceProcess"] = *sourceFlow.ProcessName
-	fwdLabels["destProcess"] = *destFlow.ProcessName
-	delete(fwdLabels, "process")
-	revLabels["sourceSite"] = destSiteName + "@_@" + destSiteId
-	revLabels["destSite"] = sourceSiteName + "@_@" + sourceSiteId
-	revLabels["sourceProcess"] = *destFlow.ProcessName
-	revLabels["destProcess"] = *sourceFlow.ProcessName
-	delete(revLabels, "process")
-
-	fp := &FlowPairRecord{
-		Base: Base{
-			RecType:   recordNames[FlowPair],
-			Identity:  "fp-" + sourceFlow.Identity,
-			StartTime: sourceFlow.StartTime,
-			EndTime:   sourceFlow.EndTime,
-		},
-		SourceSiteId:      sourceSiteId,
-		DestinationSiteId: destSiteId,
-		ForwardFlow:       sourceFlow,
-		CounterFlow:       destFlow,
-	}
-	if sourceFlow.EndTime != 0 {
-		fp.Duration = sourceFlow.EndTime - sourceFlow.StartTime
-	}
-	if sourceSite, ok := fc.Sites[sourceSiteId]; ok {
-		fp.SourceSiteName = sourceSite.Name
-	} else {
-		return fp, ok
-	}
-	if destSite, ok := fc.Sites[destSiteId]; ok {
-		fp.DestinationSiteName = destSite.Name
-	} else {
-		return fp, ok
-	}
-	fp.FlowTrace = fc.annotateFlowTrace(destFlow)
-
-	// setup flow metrics inc flow count, set octets, assign metric to flow, etc.
-	addressId := fwdLabels["addressId"]
-	if va, ok := fc.VanAddresses[addressId]; ok {
-		fwdLabels["address"] = va.Name
-		delete(fwdLabels, "addressId")
-		revLabels["address"] = va.Name
-		delete(revLabels, "addressId")
-		err := fc.setupFlowMetrics(va, sourceFlow, fwdLabels)
-		if err != nil {
-			log.Println("COLLECTOR: metric setup error", err.Error())
-		}
-		err = fc.setupFlowMetrics(va, destFlow, revLabels)
-		if err != nil {
-			log.Println("COLLECTOR: metric setup error", err.Error())
-		}
-	}
-
-	return fp, ok
 }
 
 func prettyPrint(i interface{}) string {
@@ -462,14 +185,6 @@ func (fc *FlowCollector) addRecord(record interface{}) error {
 		if connector, ok := record.(*ConnectorRecord); ok {
 			fc.Connectors[connector.Identity] = connector
 		}
-	case *FlowRecord:
-		if flow, ok := record.(*FlowRecord); ok {
-			fc.Flows[flow.Identity] = flow
-		}
-	case *FlowPairRecord:
-		if flowPair, ok := record.(*FlowPairRecord); ok {
-			fc.FlowPairs[flowPair.Identity] = flowPair
-		}
 	case *ProcessRecord:
 		if process, ok := record.(*ProcessRecord); ok {
 			fc.Processes[process.Identity] = process
@@ -486,6 +201,7 @@ func (fc *FlowCollector) addRecord(record interface{}) error {
 		if va, ok := record.(*VanAddressRecord); ok {
 			fc.VanAddresses[va.Identity] = va
 		}
+	case *FlowRecord:
 	default:
 		return fmt.Errorf("Unknown record type to add")
 	}
@@ -498,6 +214,7 @@ func (fc *FlowCollector) deleteRecord(record interface{}) error {
 	}
 	log.Printf("FLOW_LOG: %s\n", prettyPrint(record))
 	switch record.(type) {
+	case *FlowRecord:
 	case *SiteRecord:
 		if site, ok := record.(*SiteRecord); ok {
 			delete(fc.Sites, site.Identity)
@@ -523,14 +240,6 @@ func (fc *FlowCollector) deleteRecord(record interface{}) error {
 			// keep around for flows that will be terminated
 			fc.recentConnectors[connector.Identity] = connector
 			delete(fc.Connectors, connector.Identity)
-		}
-	case *FlowRecord:
-		if flow, ok := record.(*FlowRecord); ok {
-			delete(fc.Flows, flow.Identity)
-		}
-	case *FlowPairRecord:
-		if flowPair, ok := record.(*FlowPairRecord); ok {
-			delete(fc.FlowPairs, flowPair.Identity)
 		}
 	case *ProcessRecord:
 		if process, ok := record.(*ProcessRecord); ok {
@@ -575,6 +284,7 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 				pending.heartbeat = true
 			}
 		}
+	case FlowRecord:
 	case SiteRecord:
 		if site, ok := record.(SiteRecord); ok {
 			if current, ok := fc.Sites[site.Identity]; !ok {
@@ -679,11 +389,6 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 								Name:     *listener.Address,
 								Protocol: *listener.Protocol,
 							}
-							va.flowCount = make(map[metricKey]prometheus.Counter)
-							va.activeFlowCount = make(map[metricKey]prometheus.Gauge)
-							va.octetCount = make(map[metricKey]prometheus.Counter)
-							va.lastAccessed = make(map[metricKey]prometheus.Gauge)
-							va.flowLatency = make(map[metricKey]prometheus.Observer)
 							fc.addRecord(va)
 						}
 						listener.AddressId = &va.Identity
@@ -744,11 +449,6 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 								Name:     *listener.Address,
 								Protocol: *listener.Protocol,
 							}
-							va.flowCount = make(map[metricKey]prometheus.Counter)
-							va.activeFlowCount = make(map[metricKey]prometheus.Gauge)
-							va.octetCount = make(map[metricKey]prometheus.Counter)
-							va.lastAccessed = make(map[metricKey]prometheus.Gauge)
-							va.flowLatency = make(map[metricKey]prometheus.Observer)
 							fc.addRecord(va)
 						}
 						current.AddressId = &va.Identity
@@ -781,11 +481,6 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 									Name:     *connector.Address,
 									Protocol: *connector.Protocol,
 								}
-								va.flowCount = make(map[metricKey]prometheus.Counter)
-								va.activeFlowCount = make(map[metricKey]prometheus.Gauge)
-								va.octetCount = make(map[metricKey]prometheus.Counter)
-								va.lastAccessed = make(map[metricKey]prometheus.Gauge)
-								va.flowLatency = make(map[metricKey]prometheus.Observer)
 								fc.VanAddresses[va.Identity] = va
 								fc.addRecord(va)
 							}
@@ -855,11 +550,6 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 								Name:     *connector.Address,
 								Protocol: *connector.Protocol,
 							}
-							va.flowCount = make(map[metricKey]prometheus.Counter)
-							va.activeFlowCount = make(map[metricKey]prometheus.Gauge)
-							va.octetCount = make(map[metricKey]prometheus.Counter)
-							va.lastAccessed = make(map[metricKey]prometheus.Gauge)
-							va.flowLatency = make(map[metricKey]prometheus.Observer)
 							fc.addRecord(va)
 						}
 						current.AddressId = &va.Identity
@@ -867,107 +557,6 @@ func (fc *FlowCollector) updateRecord(record interface{}) error {
 				}
 			}
 			fc.updateLastHeard(connector.Source)
-		}
-	case FlowRecord:
-		if flow, ok := record.(FlowRecord); ok {
-			if current, ok := fc.Flows[flow.Identity]; !ok {
-				if flow.StartTime != 0 && flow.EndTime != 0 {
-					if flow.Parent == "" {
-						log.Printf("COLLECTOR: Incomplete flow record for identity %s details %+v\n", flow.Identity, flow)
-					}
-				}
-				if flow.StartTime != 0 {
-					if flow.Parent != "" {
-						flow.Protocol = fc.getFlowProtocol(&flow)
-						flow.Place = fc.getFlowPlace(&flow)
-						if listener, ok := fc.Listeners[flow.Parent]; ok {
-							siteId := fc.getRecordSiteId(*listener)
-							// TODO: workaround for gateway
-							if fc.isGatewaySite(siteId) {
-								fc.inferGatewayProcess(siteId, *flow.SourceHost)
-							}
-						}
-					}
-					fc.addRecord(&flow)
-					if flow.CounterFlow != nil {
-						fc.flowsToPairReconcile[flow.Identity] = &FlowToPairRecord{
-							forwardId: *flow.CounterFlow,
-							created:   uint64(time.Now().UnixNano()) / uint64(time.Microsecond)}
-					}
-					fc.flowsToProcessReconcile[flow.Identity] = flow.Identity
-				}
-			} else {
-				if current.SourceHost == nil && flow.SourceHost != nil {
-					current.SourceHost = flow.SourceHost
-				}
-				if current.SourcePort == nil && flow.SourcePort != nil {
-					current.SourcePort = flow.SourcePort
-				}
-				if current.Parent == "" && flow.Parent != "" {
-					current.Parent = flow.Parent
-					current.Protocol = fc.getFlowProtocol(current)
-					current.Place = fc.getFlowPlace(current)
-					if listener, ok := fc.Listeners[flow.Parent]; ok {
-						// TODO: workaround for gateway
-						siteId := fc.getRecordSiteId(*listener)
-						if fc.isGatewaySite(siteId) {
-							fc.inferGatewayProcess(siteId, *flow.SourceHost)
-						}
-					}
-				}
-				if flow.Octets != nil {
-					current.Octets = flow.Octets
-					if current.octetMetric != nil {
-						current.octetMetric.Add(float64(*current.Octets - current.lastOctets))
-					}
-					current.lastOctets = *current.Octets
-				}
-				if flow.OctetsOut != nil {
-					current.OctetsOut = flow.OctetsOut
-				}
-				if flow.OctetsUnacked != nil {
-					current.OctetsUnacked = flow.OctetsUnacked
-				}
-				if flow.WindowClosures != nil {
-					current.WindowClosures = flow.WindowClosures
-				}
-				if flow.WindowSize != nil {
-					current.WindowSize = flow.WindowSize
-				}
-				if flow.Latency != nil {
-					current.Latency = flow.Latency
-				}
-				if flow.Trace != nil {
-					current.Trace = flow.Trace
-				}
-				if flow.Reason != nil {
-					current.Reason = flow.Reason
-				}
-				if flow.Method != nil {
-					current.Method = flow.Method
-				}
-				if flow.Result != nil {
-					current.Result = flow.Result
-				}
-				if flow.StreamIdentity != nil {
-					current.StreamIdentity = flow.StreamIdentity
-				}
-				if flow.CounterFlow != nil && current.CounterFlow == nil {
-					current.CounterFlow = flow.CounterFlow
-				}
-				if flow.EndTime > 0 && current.EndTime == 0 {
-					current.EndTime = flow.EndTime
-					if current.activeFlowMetric != nil {
-						current.activeFlowMetric.Dec()
-					}
-					if fc.getFlowPlace(current) == clientSide {
-						if flowpair, ok := fc.FlowPairs["fp-"+current.Identity]; ok {
-							flowpair.EndTime = current.EndTime
-							flowpair.Duration = flowpair.EndTime - flowpair.StartTime
-						}
-					}
-				}
-			}
 		}
 	case ProcessRecord:
 		if process, ok := record.(ProcessRecord); ok {
@@ -1249,50 +838,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 				}
 			}
 		case "flows":
-			flows := []FlowRecord{}
-			if id, ok := vars["id"]; ok {
-				if _, ok := fc.Routers[id]; ok {
-					for connId, connector := range fc.Connectors {
-						if connector.Parent == id {
-							for _, flow := range fc.Flows {
-								if flow.Parent == connId {
-									p.TotalCount++
-									if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-										flows = append(flows, *flow)
-									}
-								} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-									if l4Flow.Parent == connId {
-										p.TotalCount++
-										if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-											flows = append(flows, *flow)
-										}
-									}
-								}
-							}
-						}
-					}
-					for listenerId, listener := range fc.Listeners {
-						if listener.Parent == id {
-							for _, flow := range fc.Flows {
-								if flow.Parent == listenerId {
-									p.TotalCount++
-									if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-										flows = append(flows, *flow)
-									}
-								} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-									if l4Flow.Parent == listenerId {
-										p.TotalCount++
-										if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-											flows = append(flows, *flow)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
 		case "links":
 			links := []linkRecordResponse{}
 			linkHandler := newLinkResponseHandler(fc.Sites, fc.Routers)
@@ -1390,27 +935,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 				}
 			}
 		case "flows":
-			flows := []FlowRecord{}
-			if id, ok := vars["id"]; ok {
-				if _, ok := fc.Listeners[id]; ok {
-					for _, flow := range fc.Flows {
-						if flow.Parent == id {
-							p.TotalCount++
-							if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-								flows = append(flows, *flow)
-							}
-						} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-							if l4Flow.Parent == id {
-								p.TotalCount++
-								if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-									flows = append(flows, *flow)
-								}
-							}
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
 		}
 	case Connector:
 		switch request.HandlerName {
@@ -1431,27 +955,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 				}
 			}
 		case "flows":
-			flows := []FlowRecord{}
-			if id, ok := vars["id"]; ok {
-				if _, ok := fc.Connectors[id]; ok {
-					for _, flow := range fc.Flows {
-						if flow.Parent == id {
-							p.TotalCount++
-							if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-								flows = append(flows, *flow)
-							}
-						} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-							if l4Flow.Parent == id {
-								p.TotalCount++
-								if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-									flows = append(flows, *flow)
-								}
-							}
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
 		case "process":
 			if id, ok := vars["id"]; ok {
 				if connector, ok := fc.Connectors[id]; ok {
@@ -1484,82 +987,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 					p.Results = address
 				}
 			}
-		case "flows":
-			flows := []FlowRecord{}
-			if id, ok := vars["id"]; ok {
-				if vanaddr, ok := fc.VanAddresses[id]; ok {
-					for connId, connector := range fc.Connectors {
-						if *connector.Address == vanaddr.Name {
-							for _, flow := range fc.Flows {
-								if flow.Parent == connId && *connector.Protocol == "tcp" {
-									p.TotalCount++
-									if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-										flows = append(flows, *flow)
-									}
-								} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-									if l4Flow.Parent == connId {
-										p.TotalCount++
-										if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-											flows = append(flows, *flow)
-										}
-									}
-								}
-							}
-						}
-					}
-					for listenerId, listener := range fc.Listeners {
-						if *listener.Address == vanaddr.Name {
-							for _, flow := range fc.Flows {
-								if flow.Parent == listenerId && *listener.Protocol == "tcp" {
-									p.TotalCount++
-									if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-										flows = append(flows, *flow)
-									}
-								} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-									if l4Flow.Parent == listenerId {
-										p.TotalCount++
-										if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-											flows = append(flows, *flow)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
-		case "flowpairs":
-			flowPairs := []FlowPairRecord{}
-			if id, ok := vars["id"]; ok {
-				if vanaddr, ok := fc.VanAddresses[id]; ok {
-					// forward flow for a flow pair is indexed by listener flow id
-					for listenerId, listener := range fc.Listeners {
-						if *listener.Address == vanaddr.Name {
-							for flowId, flow := range fc.Flows {
-								if flow.Parent == listenerId && flow.CounterFlow != nil {
-									if flowpair, ok := fc.FlowPairs["fp-"+flowId]; ok {
-										p.TotalCount++
-										if filterRecord(*flowpair, queryParams) && flowpair.Base.TimeRangeValid(queryParams) {
-											flowPairs = append(flowPairs, *flowpair)
-										}
-									}
-								} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-									if l4Flow.Parent == listenerId {
-										if flowpair, ok := fc.FlowPairs["fp-"+flowId]; ok {
-											p.TotalCount++
-											if filterRecord(*flowpair, queryParams) && flowpair.Base.TimeRangeValid(queryParams) {
-												flowPairs = append(flowPairs, *flowpair)
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flowPairs, &p, queryParams)
 		case "processes":
 			processes := []ProcessRecord{}
 			unique := make(map[string]*ProcessRecord)
@@ -1660,19 +1087,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 					p.Results = process
 				}
 			}
-		case "flows":
-			flows := []FlowRecord{}
-			if id, ok := vars["id"]; ok {
-				for _, flow := range fc.Flows {
-					if flow.Process != nil && *flow.Process == id {
-						p.TotalCount++
-						if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-							flows = append(flows, *flow)
-						}
-					}
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
 		case "addresses":
 			addresses := []VanAddressRecord{}
 			if id, ok := vars["id"]; ok {
@@ -1752,55 +1166,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 				}
 			}
 			retrieveError = sortAndSlice(processes, &p, queryParams)
-		}
-	case Flow:
-		switch request.HandlerName {
-		case "list":
-			flows := []FlowRecord{}
-			for _, flow := range fc.Flows {
-				if filterRecord(*flow, queryParams) && flow.Base.TimeRangeValid(queryParams) {
-					flows = append(flows, *flow)
-				}
-			}
-			p.TotalCount = len(fc.Flows)
-			retrieveError = sortAndSlice(flows, &p, queryParams)
-		case "item":
-			if id, ok := vars["id"]; ok {
-				if flow, ok := fc.Flows[id]; ok {
-					p.Count = 1
-					p.Results = flow
-				}
-			}
-		case "process":
-			if id, ok := vars["id"]; ok {
-				if flow, ok := fc.Flows[id]; ok {
-					if flow.Process != nil {
-						if process, ok := fc.Processes[*flow.Process]; ok {
-							p.Count = 1
-							p.Results = process
-						}
-					}
-				}
-			}
-		}
-	case FlowPair:
-		switch request.HandlerName {
-		case "list":
-			flowPairs := []FlowPairRecord{}
-			for _, flowPair := range fc.FlowPairs {
-				if filterRecord(*flowPair, queryParams) && flowPair.Base.TimeRangeValid(queryParams) {
-					flowPairs = append(flowPairs, *flowPair)
-				}
-			}
-			p.TotalCount = len(fc.FlowPairs)
-			retrieveError = sortAndSlice(flowPairs, &p, queryParams)
-		case "item":
-			if id, ok := vars["id"]; ok {
-				if flowPair, ok := fc.FlowPairs[id]; ok {
-					p.Count = 1
-					p.Results = flowPair
-				}
-			}
 		}
 	case SitePair:
 		sourceId := url.Query().Get("sourceId")
@@ -2020,31 +1385,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 				}
 			}
 			retrieveError = sortAndSlice(connectors, &p, queryParams)
-		case "flows-to-pair":
-			flows := []string{}
-			for reverseId, ftpr := range fc.flowsToPairReconcile {
-				p.TotalCount++
-				flows = append(flows, ftpr.forwardId+"-"+reverseId)
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
-		case "flows-to-process":
-			flows := []string{}
-			for _, flowId := range fc.flowsToProcessReconcile {
-				if _, ok := fc.Flows[flowId]; ok {
-					p.TotalCount++
-					flows = append(flows, flowId)
-				}
-			}
-			retrieveError = sortAndSlice(flows, &p, queryParams)
-		case "pair-to-aggregate":
-			flowPairs := []string{}
-			for flowPairId := range fc.aggregatesToReconcile {
-				if _, ok := fc.FlowPairs[flowPairId]; ok {
-					p.TotalCount++
-					flowPairs = append(flowPairs, flowPairId)
-				}
-			}
-			retrieveError = sortAndSlice(flowPairs, &p, queryParams)
 		}
 	default:
 		log.Println("COLLECTOR: Unrecognize record request", request.RecordType)
@@ -2064,299 +1404,6 @@ func (fc *FlowCollector) retrieve(request ApiRequest) (*string, error) {
 	}
 	sd := string(data)
 	return &sd, nil
-}
-
-func (fc *FlowCollector) getFlowProcess(id string) (ProcessRecord, bool) {
-	if flow, ok := fc.Flows[id]; ok {
-		if flow.Process != nil {
-			if process, ok := fc.Processes[*flow.Process]; ok {
-				return *process, ok
-			}
-		}
-	}
-	return ProcessRecord{}, false
-}
-
-func (fc *FlowCollector) setupFlowMetrics(va *VanAddressRecord, flow *FlowRecord, metricLabel prometheus.Labels) error {
-	var flowMetric prometheus.Counter
-	var octetMetric prometheus.Counter
-	var flowLatencyMetric prometheus.Observer
-	var lastAccessedMetric prometheus.Gauge
-	var activeFlowMetric prometheus.Gauge
-	var err error
-	var ok bool
-
-	key := metricKey{}
-	if key.sourceSite, ok = metricLabel["sourceSite"]; !ok {
-		return fmt.Errorf("Metric label missing source site key")
-	}
-	if key.sourceProcess, ok = metricLabel["sourceProcess"]; !ok {
-		return fmt.Errorf("Metric label missing source process key")
-	}
-	if key.destSite, ok = metricLabel["destSite"]; !ok {
-		return fmt.Errorf("Metric label missing dest site key")
-	}
-	if key.destProcess, ok = metricLabel["destProcess"]; !ok {
-		return fmt.Errorf("Metric label missing dest process key")
-	}
-
-	if flowMetric, ok = va.flowCount[key]; !ok {
-		flowMetric, err = fc.metrics.flows.GetMetricWith(metricLabel)
-		if err != nil {
-			return err
-		} else {
-			va.flowCount[key] = flowMetric
-		}
-	}
-	flowMetric.Inc()
-
-	if octetMetric, ok = va.octetCount[key]; !ok {
-		octetMetric, err = fc.metrics.octets.GetMetricWith(metricLabel)
-		if err != nil {
-			return err
-		} else {
-			va.octetCount[key] = octetMetric
-		}
-	}
-	flow.octetMetric = octetMetric
-	if flow.Octets != nil {
-		octetMetric.Add(float64(*flow.Octets))
-		flow.lastOctets = *flow.Octets
-	}
-
-	if flowLatencyMetric, ok = va.flowLatency[key]; !ok {
-		flowLatencyMetric, err = fc.metrics.flowLatency.GetMetricWith(metricLabel)
-		if err != nil {
-			return err
-		} else {
-			va.flowLatency[key] = flowLatencyMetric
-		}
-	}
-	if flow.Latency != nil {
-		flowLatencyMetric.Observe(float64(*flow.Latency))
-	}
-
-	if lastAccessedMetric, ok = va.lastAccessed[key]; !ok {
-		lastAccessedMetric, err = fc.metrics.lastAccessed.GetMetricWith(metricLabel)
-		if err != nil {
-			return err
-		} else {
-			va.lastAccessed[key] = lastAccessedMetric
-		}
-	}
-	lastAccessedMetric.Set(float64((flow.StartTime / uint64(time.Microsecond))))
-
-	if activeFlowMetric, ok = va.activeFlowCount[key]; !ok {
-		activeFlowMetric, err = fc.metrics.activeFlows.GetMetricWith(metricLabel)
-		if err != nil {
-			return err
-		} else {
-			va.activeFlowCount[key] = activeFlowMetric
-		}
-	}
-	flow.activeFlowMetric = activeFlowMetric
-	if flow.EndTime == 0 {
-		activeFlowMetric.Inc()
-	}
-
-	if direction, ok := metricLabel["direction"]; ok {
-		if direction == Incoming {
-			if flow.Method != nil {
-				metricLabel["method"] = *flow.Method
-				httpReqsMethod, err := fc.metrics.httpReqsMethod.GetMetricWith(metricLabel)
-				if err != nil {
-					return err
-				} else {
-					httpReqsMethod.Inc()
-				}
-				delete(metricLabel, "method")
-			}
-		}
-		// note: observed code to be present in both forward in reverse flows (e.g. directions)
-		if flow.Result != nil {
-			metricLabel["code"] = *flow.Result
-			httpReqsResult, err := fc.metrics.httpReqsResult.GetMetricWith(metricLabel)
-			if err != nil {
-				return err
-			} else {
-				httpReqsResult.Inc()
-			}
-			delete(metricLabel, "code")
-		}
-	}
-	return nil
-}
-
-func (fc *FlowCollector) reconcileFlowRecords() error {
-	age := uint64(time.Now().UnixNano())/uint64(time.Microsecond) - uint64(fc.recordTtl.Microseconds())
-
-	m, err := fc.metrics.activeReconcile.GetMetricWith(prometheus.Labels{"reconcileTask": "flowsToProcess"})
-	if err == nil {
-		m.Set(float64(len(fc.flowsToProcessReconcile)))
-	}
-	for _, flowId := range fc.flowsToProcessReconcile {
-		if flow, ok := fc.Flows[flowId]; ok {
-			siteId := fc.getRecordSiteId(*flow)
-			if siteId == "" {
-				continue
-			}
-			if flow.SourceHost != nil {
-				if connector, ok := fc.Connectors[flow.Parent]; ok {
-					flow.Place = serverSide
-					if connector.ProcessId != nil && connector.AddressId != nil {
-						flow.Process = connector.ProcessId
-						if process, ok := fc.Processes[*flow.Process]; ok {
-							flow.ProcessName = process.Name
-						}
-						delete(fc.flowsToProcessReconcile, flowId)
-					} else {
-						if fc.needForSiteProcess(flow, siteId, connector.StartTime, false) {
-							delete(fc.flowsToProcessReconcile, flowId)
-						}
-					}
-				} else if listener, ok := fc.Listeners[flow.Parent]; ok {
-					flow.Place = clientSide
-					if listener.AddressId != nil {
-						found := false
-						for _, process := range fc.Processes {
-							if siteId == process.Parent && process.SourceHost != nil {
-								if *flow.SourceHost == *process.SourceHost {
-									flow.Process = &process.Identity
-									flow.ProcessName = process.Name
-									found = true
-									delete(fc.flowsToProcessReconcile, flowId)
-								}
-							}
-						}
-						if !found {
-							if fc.needForSiteProcess(flow, siteId, listener.StartTime, true) {
-								delete(fc.flowsToProcessReconcile, flowId)
-							}
-						}
-					}
-				}
-			} else if l4Flow, ok := fc.Flows[flow.Parent]; ok {
-				if l4Flow.Process != nil {
-					flow.Process = l4Flow.Process
-					flow.ProcessName = l4Flow.ProcessName
-					delete(fc.flowsToProcessReconcile, flowId)
-				}
-			}
-		} else {
-			delete(fc.flowsToProcessReconcile, flowId)
-		}
-	}
-	m, err = fc.metrics.activeReconcile.GetMetricWith(prometheus.Labels{"reconcileTask": "flowsToPair"})
-	if err == nil {
-		m.Set(float64(len(fc.flowsToPairReconcile)))
-	}
-	for reverseId, ftpr := range fc.flowsToPairReconcile {
-		if age > ftpr.created {
-			delete(fc.flowsToPairReconcile, reverseId)
-		} else if reverseFlow, ok := fc.Flows[reverseId]; ok {
-			if forwardFlow, ok := fc.Flows[ftpr.forwardId]; ok {
-				forwardFlow.CounterFlow = &reverseFlow.Identity
-				flowPair, ok := fc.linkFlowPair(forwardFlow)
-				if ok {
-					flowPair.Protocol = forwardFlow.Protocol
-					fc.FlowPairs[flowPair.Identity] = flowPair
-					fc.aggregatesToReconcile[flowPair.Identity] = flowPair
-					delete(fc.flowsToPairReconcile, reverseId)
-				}
-			}
-		}
-	}
-	m, err = fc.metrics.activeReconcile.GetMetricWith(prometheus.Labels{"reconcileTask": "pairToAggregate"})
-	if err == nil {
-		m.Set(float64(len(fc.aggregatesToReconcile)))
-	}
-	for flowPairId, flowPair := range fc.aggregatesToReconcile {
-		if flowPair.ForwardFlow != nil && flowPair.CounterFlow != nil {
-			ffp, ffpOk := fc.getFlowProcess(flowPair.ForwardFlow.Identity)
-			cfp, cfpOk := fc.getFlowProcess(flowPair.CounterFlow.Identity)
-			if ffpOk && cfpOk {
-				siteAggregateId := flowPair.SourceSiteId + "-to-" + flowPair.DestinationSiteId
-				if _, ok := fc.FlowAggregates[siteAggregateId]; !ok {
-					sfa := &FlowAggregateRecord{
-						Base: Base{
-							RecType:   recordNames[FlowAggregate],
-							Identity:  siteAggregateId,
-							StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-						},
-						PairType:      recordNames[Site],
-						SourceId:      &flowPair.SourceSiteId,
-						DestinationId: &flowPair.DestinationSiteId,
-					}
-					if sourceSite, ok := fc.Sites[flowPair.SourceSiteId]; ok {
-						sfa.SourceName = sourceSite.Name
-					}
-					if destinationSite, ok := fc.Sites[flowPair.DestinationSiteId]; ok {
-						sfa.DestinationName = destinationSite.Name
-					}
-					fc.FlowAggregates[siteAggregateId] = sfa
-				}
-				flowPair.SiteAggregateId = &siteAggregateId
-				// next process pairs
-				processAggregateId := ffp.Identity + "-to-" + cfp.Identity
-				if _, ok := fc.FlowAggregates[processAggregateId]; !ok {
-					pfa := &FlowAggregateRecord{
-						Base: Base{
-							RecType:   recordNames[FlowAggregate],
-							Identity:  processAggregateId,
-							StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-						},
-						PairType:      recordNames[Process],
-						SourceId:      &ffp.Identity,
-						DestinationId: &cfp.Identity,
-					}
-					if sourceProcess, ok := fc.Processes[ffp.Identity]; ok {
-						pfa.SourceName = sourceProcess.Name
-						sourceSiteId := fc.getRecordSiteId(*sourceProcess)
-						if sourceSite, ok := fc.Sites[sourceSiteId]; ok {
-							pfa.SourceSiteId = &sourceSiteId
-							pfa.SourceSiteName = sourceSite.Name
-						}
-					}
-					if destinationProcess, ok := fc.Processes[cfp.Identity]; ok {
-						if destinationProcess.Name != nil {
-							pfa.DestinationName = destinationProcess.Name
-						}
-						destinationSiteId := fc.getRecordSiteId(*destinationProcess)
-						if destinationSite, ok := fc.Sites[destinationSiteId]; ok {
-							pfa.DestinationSiteId = &destinationSiteId
-							pfa.DestinationSiteName = destinationSite.Name
-						}
-					}
-					fc.FlowAggregates[processAggregateId] = pfa
-				}
-				flowPair.ProcessAggregateId = &processAggregateId
-				// next process group pairs
-				processGroupAggregateId := *ffp.GroupIdentity + "-to-" + *cfp.GroupIdentity
-				if _, ok := fc.FlowAggregates[processGroupAggregateId]; !ok {
-					pgfa := &FlowAggregateRecord{
-						Base: Base{
-							RecType:   recordNames[FlowAggregate],
-							Identity:  processGroupAggregateId,
-							StartTime: uint64(time.Now().UnixNano()) / uint64(time.Microsecond),
-						},
-						PairType:      recordNames[ProcessGroup],
-						SourceId:      ffp.GroupIdentity,
-						DestinationId: cfp.GroupIdentity,
-					}
-					if sourceProcessGroup, ok := fc.ProcessGroups[*ffp.GroupIdentity]; ok {
-						pgfa.SourceName = sourceProcessGroup.Name
-					}
-					if destinationProcessGroup, ok := fc.ProcessGroups[*cfp.GroupIdentity]; ok {
-						pgfa.DestinationName = destinationProcessGroup.Name
-					}
-					fc.FlowAggregates[processGroupAggregateId] = pgfa
-				}
-				flowPair.ProcessGroupAggregateId = &processGroupAggregateId
-				delete(fc.aggregatesToReconcile, flowPairId)
-			}
-		}
-	}
-	return nil
 }
 
 func (fc *FlowCollector) reconcileConnectorRecords() error {
@@ -2429,18 +1476,6 @@ func (fc *FlowCollector) reconcileConnectorRecords() error {
 }
 
 func (fc *FlowCollector) ageAndPurgeRecords() error {
-	age := uint64(time.Now().UnixNano())/uint64(time.Microsecond) - uint64(fc.recordTtl.Microseconds())
-
-	for flowId, flow := range fc.Flows {
-		router := fc.getRouterForFlow(flow)
-		if flow.EndTime != 0 && age > flow.EndTime || router == nil {
-			fc.deleteRecord(flow)
-			if flowPair, ok := fc.FlowPairs["fp-"+flowId]; ok {
-				fc.deleteRecord(flowPair)
-			}
-		}
-	}
-
 	t := time.Now()
 	for _, source := range fc.eventSources {
 		diff := uint64(t.UnixNano())/uint64(time.Microsecond) - source.EventSourceRecord.LastHeard
@@ -2564,61 +1599,4 @@ func (fc *FlowCollector) purgeEventSource(eventSource EventSourceRecord) error {
 	delete(fc.eventSources, eventSource.Identity)
 
 	return nil
-}
-
-func (fc *FlowCollector) createSiteProcess(name string, site SiteRecord) ProcessRecord {
-	parts := strings.Split(site.Identity, "-")
-	processName := name + "-" + parts[0]
-	processGroupName := name
-	process := ProcessRecord{}
-	process.RecType = recordNames[Process]
-	process.Identity = uuid.New().String()
-	process.Parent = site.Identity
-	process.ParentName = site.Name
-	process.StartTime = site.StartTime
-	process.Name = &processName
-	process.GroupName = &processGroupName
-	process.ProcessRole = &Remote
-	fc.updateRecord(process)
-	return process
-}
-
-func (fc *FlowCollector) needForSiteProcess(flow *FlowRecord, siteId string, startTime uint64, client bool) bool {
-	if fc.getFlowPlace(flow) == unknown {
-		return false
-	}
-	parts := strings.Split(siteId, "-")
-	name := "site-servers"
-	if client {
-		name = "site-clients"
-	}
-	processName := name + "-" + parts[0]
-	diffTime := startTime
-	wait := 120 * oneSecond
-	if fc.startTime > startTime {
-		diffTime = fc.startTime
-		wait = 120 * oneSecond
-	}
-	diff := uint64(time.Now().UnixNano())/uint64(time.Microsecond) - diffTime
-	found := false
-	if diff > wait && flow.Process == nil {
-		log.Printf("COLLECTOR: Associating flow %s to external process %s\n", flow.Identity, processName)
-		for _, process := range fc.Processes {
-			if process.Name != nil && *process.Name == processName {
-				flow.Process = &process.Identity
-				flow.ProcessName = process.Name
-				found = true
-				break
-			}
-		}
-		if !found {
-			if site, ok := fc.Sites[siteId]; ok {
-				process := fc.createSiteProcess(name, *site)
-				flow.Process = &process.Identity
-				flow.ProcessName = &processName
-				found = true
-			}
-		}
-	}
-	return found
 }

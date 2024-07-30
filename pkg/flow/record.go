@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -321,25 +320,13 @@ type LogEventRecord struct {
 	SourceLine  *uint64 `json:"lineNumber,omitempty"`
 }
 
-type metricKey struct {
-	sourceSite    string
-	sourceProcess string
-	destSite      string
-	destProcess   string
-}
-
 // Van Address represents a service that is attached to the application network
 type VanAddressRecord struct {
 	Base
-	Name            string `json:"name,omitempty"`
-	Protocol        string `json:"protocol,omitempty"`
-	ListenerCount   int    `json:"listenerCount"`
-	ConnectorCount  int    `json:"connectorCount"`
-	flowCount       map[metricKey]prometheus.Counter
-	octetCount      map[metricKey]prometheus.Counter
-	lastAccessed    map[metricKey]prometheus.Gauge
-	flowLatency     map[metricKey]prometheus.Observer
-	activeFlowCount map[metricKey]prometheus.Gauge
+	Name           string `json:"name,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+	ListenerCount  int    `json:"listenerCount"`
+	ConnectorCount int    `json:"connectorCount"`
 }
 
 type ProcessRecord struct {
@@ -365,54 +352,13 @@ type ProcessGroupRecord struct {
 	ProcessCount     int     `json:"processCount,omitempty"`
 }
 
-type FlowPlace int
-
-const (
-	unknown    FlowPlace = iota
-	clientSide           // forward flow
-	serverSide           // counter flow
-)
-
 type FlowRecord struct {
 	Base
-	SourceHost       *string   `json:"sourceHost,omitempty"`
-	SourcePort       *string   `json:"sourcePort,omitempty"`
-	CounterFlow      *string   `json:"counterFlow,omitempty"`
-	Trace            *string   `json:"trace,omitempty"`
-	Latency          *uint64   `json:"latency,omitempty"`
-	Octets           *uint64   `json:"octets"`
-	OctetsOut        *uint64   `json:"octetsOut,omitempty"`
-	OctetsUnacked    *uint64   `json:"octetsUnacked,omitempty"`
-	WindowClosures   *uint64   `json:"windowClosures,omitempty"`
-	WindowSize       *uint64   `json:"windowSize,omitempty"`
-	Reason           *string   `json:"reason,omitempty"`
-	Method           *string   `json:"method,omitempty"`
-	Result           *string   `json:"result,omitempty"`
-	StreamIdentity   *uint64   `json:"streamIdentity,omitempty"`
-	Process          *string   `json:"process,omitempty"`
-	ProcessName      *string   `json:"processName,omitempty"`
-	Protocol         *string   `json:"protocol,omitempty"`
-	Place            FlowPlace `json:"place"`
-	lastOctets       uint64
-	octetMetric      prometheus.Counter
-	activeFlowMetric prometheus.Gauge
 }
 
 // Note a flowpair does not have a defined parent relationship through Base
 type FlowPairRecord struct {
 	Base
-	Duration                uint64      `json:"duration"`
-	Protocol                *string     `json:"protocol,omitempty"`
-	SourceSiteId            string      `json:"sourceSiteId,omitempty"`
-	SourceSiteName          *string     `json:"sourceSiteName,omitempty"`
-	DestinationSiteId       string      `json:"destinationSiteId,omitempty"`
-	DestinationSiteName     *string     `json:"destinationSiteName,omitempty"`
-	FlowTrace               *string     `json:"flowTrace,omitempty"`
-	ForwardFlow             *FlowRecord `json:"forwardFlow,omitempty"`
-	CounterFlow             *FlowRecord `json:"counterFlow,omitempty"`
-	SiteAggregateId         *string     `json:"siteAggregateId,omitempty"`
-	ProcessGroupAggregateId *string     `json:"processGroupAggregateId,omitempty"`
-	ProcessAggregateId      *string     `json:"processAggregateId,omitempty"`
 }
 
 type FlowAggregateRecord struct {
