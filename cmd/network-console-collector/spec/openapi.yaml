@@ -173,6 +173,56 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/getFlowAggregateByID'
+  /api/v1alpha1/routerlinks/:
+    get:
+      tags: [link]
+      operationId: routerlinks
+      responses:
+        '200':
+          $ref: '#/components/responses/getRouterLinks'
+  /api/v1alpha1/routerlinks/{id}/:
+    get:
+      tags: [link]
+      operationId: routerlinkByID
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '200':
+          $ref: '#/components/responses/getRouterLinkByID'
+  /api/v1alpha1/routeraccess/:
+    get:
+      tags: [link]
+      operationId: routeraccess
+      responses:
+        '200':
+          $ref: '#/components/responses/getRouterAccess'
+  /api/v1alpha1/routeraccess/{id}/:
+    get:
+      tags: [link]
+      operationId: routeraccessByID
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '200':
+          $ref: '#/components/responses/getRouterAccessByID'
+  /api/v1alpha1/links/:
+    get:
+      tags: [link]
+      deprecated: true
+      operationId: links
+      responses:
+        '410':
+          $ref: '#/components/responses/notSupported'
+  /api/v1alpha1/links/{id}/:
+    get:
+      tags: [link]
+      deprecated: true
+      operationId: linkByID
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '410':
+          $ref: '#/components/responses/notSupported'
 
 
   /api/v1alpha1/sites/{id}/processes/:
@@ -388,6 +438,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/FlowAggregateListResponse'
+    getRouterLinks:
+      description: response with a list of router links
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RouterLinkListResponse'
+    getRouterAccess:
+      description: response with a list of router access
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RouterAccessListResponse'
     getSiteByID:
       description: response with a single site
       content:
@@ -436,6 +498,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/FlowAggregateResponse'
+    getRouterLinkByID:
+      description: response with a single router link
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RouterLinkResponse'
+    getRouterAccessByID:
+      description: response with a single router link
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RouterAccessResponse'
   schemas:
     baseResponse:
       type: object
@@ -594,6 +668,38 @@ components:
           properties:
             results:
               $ref: '#/components/schemas/FlowAggregateRecord'
+    RouterLinkListResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/RouterLinkRecord'
+    RouterLinkResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              $ref: '#/components/schemas/RouterLinkRecord'
+    RouterAccessListResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/RouterAccessRecord'
+    RouterAccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              $ref: '#/components/schemas/RouterAccessRecord'
     baseRecord:
       type: object
       required:
@@ -806,6 +912,63 @@ components:
             destinationSiteName:
               type: string
             protocol:
+              type: string
+    operStatusType:
+      type: string
+      enum:
+        - up
+        - down
+    RouterLinkRecord:
+      allOf:
+        - $ref: '#/components/schemas/baseRecord'
+        - type: object
+          required:
+            - name
+            - linkCost
+            - role
+            - peer
+            - status
+            - octets
+            - octetsReverse
+            - sourceSiteId
+            - destinationSiteId
+          properties:
+            name:
+              type: string
+            linkCost:
+              type: integer
+              format: uint64
+            role:
+              type: string
+            peer:
+              type: string
+            status:
+              $ref: '#/components/schemas/operStatusType'
+            octets:
+              type: integer
+              format: uint64
+            octetsReverse:
+              type: integer
+              format: uint64
+            sourceSiteId:
+              type: string
+            destinationSiteId:
+              type: string
+    RouterAccessRecord:
+      allOf:
+        - $ref: '#/components/schemas/baseRecord'
+        - type: object
+          required:
+            - name
+            - linkCount
+            - role
+          properties:
+            name:
+              type: string
+            linkCount:
+              type: integer
+              format: uint64
+            role:
               type: string
 tags:
   - name: site

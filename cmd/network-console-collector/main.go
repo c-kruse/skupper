@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -22,6 +24,9 @@ import (
 	"github.com/skupperproject/skupper/pkg/certs"
 	"github.com/skupperproject/skupper/pkg/version"
 )
+
+//go:embed spec/*
+var specDir embed.FS
 
 func run(cfg Config) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -251,6 +256,12 @@ func run(cfg Config) error {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
+	specfs := fs.FS(specDir)
+	content, err := fs.Sub(specfs, "spec")
+	if err != nil {
+		return fmt.Errorf("could not set up static spec filesystem: %s", err)
+	}
+	mux.PathPrefix("/swagger").Handler(http.StripPrefix("/swagger/", http.FileServer(http.FS(content))))
 	if cfg.EnableConsole {
 		mux.PathPrefix("/").Handler(http.FileServer(http.Dir(cfg.ConsoleLocation)))
 	}
