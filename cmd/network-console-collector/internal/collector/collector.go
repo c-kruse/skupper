@@ -19,9 +19,6 @@ import (
 
 func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 	sessionCtr := factory.Create()
-	sessionCtr.OnSessionError(func(err error) {
-		logger.Error("session error on collector container", slog.Any("error", err))
-	})
 
 	discovery := eventsource.NewDiscovery(sessionCtr, eventsource.DiscoveryOptions{})
 
@@ -133,9 +130,36 @@ func (c *Collector) handleForgotten(source eventsource.Info) {
 func (c *Collector) Run(ctx context.Context) error {
 	c.session.Start(ctx)
 	g, ctx := errgroup.WithContext(ctx)
+	g.Go(c.runSession(ctx))
 	g.Go(c.runDiscovery(ctx))
 	g.Go(c.runRecordCleanup(ctx))
 	return g.Wait()
+}
+
+func (c *Collector) runSession(ctx context.Context) func() error {
+	return func() error {
+		sessionErrors := make(chan error, 1)
+		c.session.OnSessionError(func(err error) {
+			sessionErrors <- err
+		})
+		c.session.Start(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case err := <-sessionErrors:
+				retryable, ok := err.(session.RetryableError)
+				if !ok {
+					return fmt.Errorf("unrecoverable session error: %w", err)
+				}
+				c.logger.Error("session error on collector container",
+					slog.Any("error", retryable),
+					slog.Duration("delay", retryable.Retry()),
+				)
+
+			}
+		}
+	}
 }
 
 func (c *Collector) runDiscovery(ctx context.Context) func() error {

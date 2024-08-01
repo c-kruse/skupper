@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/api"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector"
 	"github.com/skupperproject/skupper/pkg/vanflow/session"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/skupperproject/skupper/pkg/version"
 )
@@ -28,17 +30,9 @@ func run(cfg Config) error {
 	// Startup message
 	logger.Info("Network Console Collector starting", slog.String("skupper_version", version.Version))
 
-	var (
-		sessionConfig session.ContainerConfig
-		err           error
-	)
-	sessionConfig.TLSConfig, err = cfg.RouterTLS.config()
+	sessionConfig, err := configureSession(cfg.RouterTLS)
 	if err != nil {
 		return fmt.Errorf("failed to load router tls configuration: %s", err)
-	}
-
-	if cfg.RouterTLS.hasCert() {
-		sessionConfig.SASLType = session.SASLTypeExternal
 	}
 
 	reg := prometheus.NewRegistry()
@@ -81,8 +75,8 @@ func run(cfg Config) error {
 		}
 	}
 
-	runErrors := make(chan error, 1)
-	go func() {
+	g, runCtx := errgroup.WithContext(ctx)
+	g.Go(func() error {
 		logger.Info("Starting Network Console API Server",
 			slog.String("address", cfg.APIListenAddress),
 			slog.Bool("tls", tlsEnabled),
@@ -94,40 +88,62 @@ func run(cfg Config) error {
 			err = s.ListenAndServe()
 		}
 		if err != nil {
-			runErrors <- fmt.Errorf("server error running api server: %s", err)
+			return fmt.Errorf("server error running api server: %s", err)
 		}
-	}()
+		return nil
+	})
+	g.Go(func() error {
+		<-runCtx.Done()
+		logger.Debug("Shutting down Network Console API Server")
+		shutdownCtx, sCancel := context.WithTimeout(context.Background(), time.Second)
+		defer sCancel()
+		if err := s.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("api server shutdown did not complete gracefully: %s", err)
+		}
+		logger.Debug("Network Console API Server shutdown clean")
+		return nil
+	})
 
 	if cfg.EnableProfile {
 		// serve only over localhost loopback
 		const pprofAddr = "localhost:9970"
-		go func() {
+		pprofSrv := &http.Server{
+			Addr: pprofAddr,
+		}
+		g.Go(func() error {
 			logger.Info("Starting Network Console Profiling Server",
 				slog.String("address", pprofAddr))
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				runErrors <- fmt.Errorf("server error running profiler server: %s", err)
+
+			err := pprofSrv.ListenAndServe()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("server error running profiler server: %s", err)
 			}
-		}()
+			return nil
+		})
+		g.Go(func() error {
+			<-runCtx.Done()
+			logger.Debug("Shutting down Network Console Profiling Server")
+			shutdownCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer sCancel()
+			if err := pprofSrv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("pprof server shutdown did not complete gracefully: %s", err)
+			}
+			logger.Debug("Network Console Profiling Server shutdown clean")
+			return nil
+		})
 	}
 
-	go func() {
-		if err = collector.Run(ctx); err != nil {
-			runErrors <- fmt.Errorf("collector error: %s", err)
+	g.Go(func() error {
+		logger.Debug("Starting Network Console Collector")
+		if err := collector.Run(runCtx); err != nil {
+			return fmt.Errorf("collector error: %w", err)
 		}
-	}()
+		return nil
+	})
 
-	select {
-	case err := <-runErrors:
+	if err := g.Wait(); err != nil && !errors.Is(err, ctx.Err()) {
 		return err
-	case <-ctx.Done():
 	}
-
-	shutdownCtx, sCancel := context.WithTimeout(context.Background(), time.Second)
-	defer sCancel()
-	if err := s.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown did not complete gracefully: %s", err)
-	}
-
 	return nil
 }
 
@@ -178,4 +194,16 @@ func defaultPrometheusAPI(base string) (*url.URL, error) {
 	}
 	targetPromAPI = targetPromAPI.JoinPath("/api/v1/")
 	return targetPromAPI, nil
+}
+
+func configureSession(tlsCfg TLSSpec) (ctrCfg session.ContainerConfig, err error) {
+	ctrCfg.TLSConfig, err = tlsCfg.config()
+	if err != nil {
+		return
+	}
+	if tlsCfg.hasCert() {
+		ctrCfg.SASLType = session.SASLTypeExternal
+	}
+
+	return ctrCfg, err
 }

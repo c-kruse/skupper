@@ -5,17 +5,23 @@ import (
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
 
-func toProcessRecord(in store.Entry) ProcessRecord {
-	process := in.Record.(vanflow.ProcessRecord)
+func toProcessRecord(in store.Entry) (ProcessRecord, bool) {
+	process, ok := in.Record.(vanflow.ProcessRecord)
+	if !ok {
+		return ProcessRecord{}, false
+	}
 	return ProcessRecord{
 		BaseRecord: toBase(process.BaseRecord, process.Parent, in.Source.ID),
 		Name:       process.Name,
 		GroupName:  process.Group,
 		ImageName:  process.ImageName,
-	}
+	}, true
 }
-func toRouterRecord(in store.Entry) RouterRecord {
-	router := in.Record.(vanflow.RouterRecord)
+func toRouterRecord(in store.Entry) (RouterRecord, bool) {
+	router, ok := in.Record.(vanflow.RouterRecord)
+	if !ok {
+		return RouterRecord{}, false
+	}
 	return RouterRecord{
 		BaseRecord:   toBase(router.BaseRecord, router.Parent, in.Source.ID),
 		Name:         dref(router.Name),
@@ -24,11 +30,14 @@ func toRouterRecord(in store.Entry) RouterRecord {
 		ImageName:    dref(router.ImageName),
 		ImageVersion: dref(router.ImageVersion),
 		Mode:         dref(router.Mode),
-	}
+	}, true
 }
 
-func toSiteRecord(in store.Entry) SiteRecord {
-	site := in.Record.(vanflow.SiteRecord)
+func toSiteRecord(in store.Entry) (SiteRecord, bool) {
+	site, ok := in.Record.(vanflow.SiteRecord)
+	if !ok {
+		return SiteRecord{}, false
+	}
 	return SiteRecord{
 		BaseRecord:  toBase(site.BaseRecord, nil, in.Source.ID),
 		Location:    dref(site.Location),
@@ -38,7 +47,7 @@ func toSiteRecord(in store.Entry) SiteRecord {
 		Policy:      dref(site.Policy),
 		Provider:    dref(site.Provider),
 		SiteVersion: dref(site.Version),
-	}
+	}, true
 }
 
 func toBase(in vanflow.BaseRecord, parent *string, source string) BaseRecord {

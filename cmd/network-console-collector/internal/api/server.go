@@ -25,366 +25,242 @@ var emptySingleResponse = BaseResponse{
 var _ ServerInterface = (*server)(nil)
 
 type server struct {
-	addressServer
-	connectorServer
-	processServer
-	processgroupServer
-	linkServer
-	siteServer
-	routerServer
-	listenerServer
+	logger  *slog.Logger
+	records store.Interface
+
+	siteHandler    handleByID
+	routerHandler  handleByID
+	processHandler handleByID
+
+	siteListHandler    handleStoreEntries
+	routerListHandler  handleStoreEntries
+	processListHandler handleStoreEntries
 }
 
 func buildServer(logger *slog.Logger, records store.Interface) *server {
 	return &server{
-		siteServer: siteServer{
-			logger:  logger,
-			records: records,
-		},
-		routerServer: routerServer{
-			logger:  logger,
-			records: records,
-		},
-		processServer: processServer{
-			logger:  logger,
-			records: records,
-		},
-	}
-}
+		logger:  logger,
+		records: records,
 
-type siteServer struct {
-	logger  *slog.Logger
-	records store.Interface
+		siteHandler:    handlerForStore[SiteRecord, SiteResponse](logger, records, toSiteRecord),
+		routerHandler:  handlerForStore[RouterRecord, RouterResponse](logger, records, toRouterRecord),
+		processHandler: handlerForStore[ProcessRecord, ProcessResponse](logger, records, toProcessRecord),
+
+		siteListHandler:    handlerForEntries[SiteRecord, SiteListResponse](logger, toSiteRecord),
+		routerListHandler:  handlerForEntries[RouterRecord, RouterListResponse](logger, toRouterRecord),
+		processListHandler: handlerForEntries[ProcessRecord, ProcessListResponse](logger, toProcessRecord),
+	}
 }
 
 // (GET /api/v1alpha1/sites/)
-func (c *siteServer) Sites(w http.ResponseWriter, r *http.Request) {
-	log := requestLogger(c.logger, r)
-	var response SiteListResponse
-
-	sites := listByType[vanflow.SiteRecord](c.records)
-	response.Results = make([]SiteRecord, len(sites))
-	for i := range sites {
-		response.Results[i] = toSiteRecord(sites[i])
-	}
-	response.Results, response.BaseResponse = filterAndOrderResults(r, response.Results)
-	if err := encode(w, http.StatusOK, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) Sites(w http.ResponseWriter, r *http.Request) {
+	c.siteListHandler.Handle(w, r, listByType[vanflow.SiteRecord](c.records))
 }
 
 // (GET /api/v1alpha1/sites/{id}/)
-func (c *siteServer) SiteById(w http.ResponseWriter, r *http.Request, id string) {
-	log := requestLogger(c.logger, r)
-
-	var (
-		response SiteResponse
-		status   int = http.StatusNotFound
-	)
-
-	if site, ok := c.records.Get(id); ok {
-		status = http.StatusOK
-		record := toSiteRecord(site)
-		response.Results = &record
-		response.Count = 1
-	}
-	if err := encode(w, status, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) SiteById(w http.ResponseWriter, r *http.Request, id string) {
+	c.siteHandler.Handle(w, r, id)
 }
 
 // (GET /api/v1alpha1/sites/{id}/routers/)
-func (c *siteServer) RoutersBySite(w http.ResponseWriter, r *http.Request, id string) {
-	log := requestLogger(c.logger, r)
-	var response RouterListResponse
-
+func (c *server) RoutersBySite(w http.ResponseWriter, r *http.Request, id string) {
 	exemplar := store.Entry{Record: vanflow.RouterRecord{Parent: &id}}
-	entries := index(c.records, collector.IndexByTypeParent, exemplar)
-	response.Results = make([]RouterRecord, len(entries))
-	for i := range entries {
-		response.Results[i] = toRouterRecord(entries[i])
-	}
-	response.Results, response.BaseResponse = filterAndOrderResults(r, response.Results)
-	if err := encode(w, http.StatusOK, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+	c.routerListHandler.Handle(w, r, index(c.records, collector.IndexByTypeParent, exemplar))
 }
 
 // (GET /api/v1alpha1/sites/{id}/processes/)
-func (c *siteServer) ProcessesBySite(w http.ResponseWriter, r *http.Request, id string) {
-	log := requestLogger(c.logger, r)
-	var response ProcessListResponse
-
+func (c *server) ProcessesBySite(w http.ResponseWriter, r *http.Request, id string) {
 	exemplar := store.Entry{Record: vanflow.ProcessRecord{Parent: &id}}
-	entries := index(c.records, collector.IndexByTypeParent, exemplar)
-	response.Results = make([]ProcessRecord, len(entries))
-	for i := range entries {
-		response.Results[i] = toProcessRecord(entries[i])
-	}
-	response.Results, response.BaseResponse = filterAndOrderResults(r, response.Results)
-	if err := encode(w, http.StatusOK, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+	c.routerListHandler.Handle(w, r, index(c.records, collector.IndexByTypeParent, exemplar))
 }
 
 // (GET /api/v1alpha1/sites/{id}/flows/)
-func (c *siteServer) FlowsBySite(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) FlowsBySite(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/sites/{id}/links/)
-func (c *siteServer) LinksBySite(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) LinksBySite(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/sitepairs/)
-func (c *siteServer) Sitepairs(w http.ResponseWriter, r *http.Request) {
+func (c *server) Sitepairs(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/sitepairs/{id}/)
-func (c *siteServer) SitepairByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) SitepairByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
-type routerServer struct {
-	logger  *slog.Logger
-	records store.Interface
-}
-
 // (GET /api/v1alpha1/routers/)
-func (c *routerServer) Routers(w http.ResponseWriter, r *http.Request) {
-	log := requestLogger(c.logger, r)
-	var response RouterListResponse
-
-	entries := listByType[vanflow.RouterRecord](c.records)
-	response.Results = make([]RouterRecord, len(entries))
-	for i := range entries {
-		response.Results[i] = toRouterRecord(entries[i])
-	}
-	response.Results, response.BaseResponse = filterAndOrderResults(r, response.Results)
-	if err := encode(w, http.StatusOK, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) Routers(w http.ResponseWriter, r *http.Request) {
+	c.routerListHandler.Handle(w, r, listByType[vanflow.RouterRecord](c.records))
 }
 
 // (GET /api/v1alpha1/routers/{id}/)
-func (c *routerServer) RouterByID(w http.ResponseWriter, r *http.Request, id string) {
-	var (
-		response RouterResponse
-		status   int = http.StatusNotFound
-		log          = requestLogger(c.logger, r)
-	)
-
-	if entry, ok := c.records.Get(id); ok {
-		status = http.StatusOK
-		record := toRouterRecord(entry)
-		response.Results = &record
-		response.Count = 1
-	}
-	if err := encode(w, status, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) RouterByID(w http.ResponseWriter, r *http.Request, id string) {
+	c.routerHandler.Handle(w, r, id)
 }
 
 // (GET /api/v1alpha1/routers/{id}/connectors/)
-func (c *routerServer) ConnectorsByRouter(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ConnectorsByRouter(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/routers/{id}/flows/)
-func (c *routerServer) FlowsByRouter(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) FlowsByRouter(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/routers/{id}/links/)
-func (c *routerServer) LinksByRouter(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) LinksByRouter(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/routers/{id}/listeners/)
-func (c *routerServer) ListenersByRouter(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ListenersByRouter(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
-type addressServer struct {
-}
-
 // (GET /api/v1alpha1/addresses/)
-func (c *addressServer) Addresses(w http.ResponseWriter, r *http.Request) {
+func (c *server) Addresses(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/addresses/{id}/)
-func (c *addressServer) AddressByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) AddressByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/addresses/{id}/connectors/)
-func (c *addressServer) ConnectorsByAddress(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ConnectorsByAddress(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/addresses/{id}/listeners/)
-func (c *addressServer) ListenersByAddress(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ListenersByAddress(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/addresses/{id}/processes/)
-func (c *addressServer) ProcessesByAddress(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcessesByAddress(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/addresses/{id}/processpairs/)
-func (c *addressServer) ProcessPairsByAddress(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcessPairsByAddress(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
-type connectorServer struct{}
-
 // (GET /api/v1alpha1/connectors/)
-func (c *connectorServer) Connectors(w http.ResponseWriter, r *http.Request) {
+func (c *server) Connectors(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/connectors/{id}/)
-func (c *connectorServer) ConnectorByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ConnectorByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
-type linkServer struct{}
-
 // (GET /api/v1alpha1/links/)
-func (c *linkServer) Links(w http.ResponseWriter, r *http.Request) {
+func (c *server) Links(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/links/{id}/)
-func (c *linkServer) LinkByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) LinkByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/routeraccess/)
-func (c *linkServer) Routeraccess(w http.ResponseWriter, r *http.Request) {
+func (c *server) Routeraccess(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/routeraccess/{id}/)
-func (c *linkServer) RouteraccessByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) RouteraccessByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/routerlinks/)
-func (c *linkServer) Routerlinks(w http.ResponseWriter, r *http.Request) {
+func (c *server) Routerlinks(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/routerlinks/{id}/)
-func (c *linkServer) RouterlinkByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) RouterlinkByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
-type listenerServer struct{}
-
 // (GET /api/v1alpha1/listeners/)
-func (c *listenerServer) Listeners(w http.ResponseWriter, r *http.Request) {
+func (c *server) Listeners(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/listeners/{id}/)
-func (c *listenerServer) ListenerByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ListenerByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/listeners/{id}/flows)
-func (c *listenerServer) FlowsByListener(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) FlowsByListener(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
-type processServer struct {
-	logger  *slog.Logger
-	records store.Interface
-}
-
 // (GET /api/v1alpha1/processes/)
-func (c *processServer) Processes(w http.ResponseWriter, r *http.Request) {
-	log := requestLogger(c.logger, r)
-	var response ProcessListResponse
-
-	entries := listByType[vanflow.ProcessRecord](c.records)
-	response.Results = make([]ProcessRecord, len(entries))
-	for i := range entries {
-		response.Results[i] = toProcessRecord(entries[i])
-	}
-	response.Results, response.BaseResponse = filterAndOrderResults(r, response.Results)
-	if err := encode(w, http.StatusOK, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) Processes(w http.ResponseWriter, r *http.Request) {
+	c.processListHandler.Handle(w, r, listByType[vanflow.ProcessRecord](c.records))
 }
 
 // (GET /api/v1alpha1/processes/{id}/)
-func (c *processServer) ProcessById(w http.ResponseWriter, r *http.Request, id string) {
-	var (
-		response ProcessResponse
-		status   int = http.StatusNotFound
-		log          = requestLogger(c.logger, r)
-	)
-
-	if entry, ok := c.records.Get(id); ok {
-		status = http.StatusOK
-		record := toProcessRecord(entry)
-		response.Results = &record
-		response.Count = 1
-	}
-	if err := encode(w, status, response); err != nil {
-		log.Error("response write error", slog.Any("error", err))
-	}
+func (c *server) ProcessById(w http.ResponseWriter, r *http.Request, id string) {
+	c.processHandler.Handle(w, r, id)
 }
 
 // (GET /api/v1alpha1/processes/{id}/addresses/)
-func (c *processServer) AddressesByProcess(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) AddressesByProcess(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/processes/{id}/connector/)
-func (c *processServer) ConnectorByProcess(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ConnectorByProcess(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/processpairs/)
-func (c *processServer) Processpairs(w http.ResponseWriter, r *http.Request) {
+func (c *server) Processpairs(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/processpairs/{id}/)
-func (c *processServer) ProcesspairByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcesspairByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
-type processgroupServer struct{}
-
 // (GET /api/v1alpha1/processgrouppairs/)
-func (c *processgroupServer) Processgrouppairs(w http.ResponseWriter, r *http.Request) {
+func (c *server) Processgrouppairs(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/processgrouppairs/{id}/)
-func (c *processgroupServer) ProcessgrouppairByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcessgrouppairByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/processgroups/)
-func (c *processgroupServer) Processgroups(w http.ResponseWriter, r *http.Request) {
+func (c *server) Processgroups(w http.ResponseWriter, r *http.Request) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/processgroups/{id}/)
-func (c *processgroupServer) ProcessgroupByID(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcessgroupByID(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
 // (GET /api/v1alpha1/processgroups/{id}/processes/)
-func (c *processgroupServer) ProcessesByProcessGroup(w http.ResponseWriter, r *http.Request, id string) {
+func (c *server) ProcessesByProcessGroup(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
@@ -401,4 +277,92 @@ func ordered(entries []store.Entry) []store.Entry {
 		return strings.Compare(entries[i].Record.Identity(), entries[j].Record.Identity()) < 0
 	})
 	return entries
+}
+
+type wrapSetOptional[R any, T any] interface {
+	SetResponseOptional[R]
+	*T
+}
+
+type handleByID interface {
+	Handle(w http.ResponseWriter, r *http.Request, id string)
+}
+
+func handlerForStore[R any, T any, TP wrapSetOptional[R, T]](log *slog.Logger, stor store.Interface, x func(store.Entry) (R, bool)) handleByID {
+	return handler[R, T, TP]{
+		X:      x,
+		Logger: log,
+		Stor:   stor,
+	}
+}
+
+type handler[R any, T any, TP wrapSetOptional[R, T]] struct {
+	X      func(store.Entry) (R, bool)
+	Logger *slog.Logger
+	Stor   store.Interface
+}
+
+func (h handler[R, T, TP]) Handle(w http.ResponseWriter, r *http.Request, id string) {
+	var (
+		response TP  = new(T)
+		status   int = http.StatusNotFound
+	)
+
+	if entry, ok := h.Stor.Get(id); ok {
+
+		if record, ok := h.X(entry); ok {
+			status = http.StatusOK
+			response.Set(&record)
+			response.SetCount(1)
+		}
+	}
+	if err := encode(w, status, response); err != nil {
+		log := requestLogger(h.Logger, r)
+		log.Error("response write error", slog.Any("error", err))
+	}
+}
+
+type wrapSetRequired[R any, T any] interface {
+	SetResponse[R]
+	*T
+}
+
+type handleStoreEntries interface {
+	Handle(w http.ResponseWriter, r *http.Request, entries []store.Entry)
+}
+
+func handlerForEntries[R any, T any, TP wrapSetRequired[[]R, T]](log *slog.Logger, x func(store.Entry) (R, bool)) handleStoreEntries {
+	return listHandler[R, T, TP]{
+		X:      x,
+		Logger: log,
+	}
+}
+
+type listHandler[R any, T any, TP wrapSetRequired[[]R, T]] struct {
+	X      func(store.Entry) (R, bool)
+	Logger *slog.Logger
+}
+
+func (h listHandler[R, T, TP]) Handle(w http.ResponseWriter, r *http.Request, entries []store.Entry) {
+	var (
+		response TP  = new(T)
+		status   int = http.StatusNotFound
+	)
+
+	results := make([]R, 0, len(entries))
+	for _, entry := range entries {
+		if record, ok := h.X(entry); ok {
+			results = append(results, record)
+		}
+	}
+	results, base := filterAndOrderResults(r, results)
+	response.Set(results)
+	response.SetCount(base.Count)
+	response.SetTotalCount(base.TotalCount)
+	response.SetStatus(base.Status)
+	response.SetTimeRangeCount(base.TimeRangeCount)
+	if err := encode(w, status, response); err != nil {
+		log := requestLogger(h.Logger, r)
+		log.Error("response write error", slog.Any("error", err))
+	}
 }
