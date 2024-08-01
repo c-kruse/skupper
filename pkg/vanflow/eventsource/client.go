@@ -26,6 +26,7 @@ type Client struct {
 	eventSource Info
 
 	lock              sync.Mutex
+	closeOnce         sync.Once
 	cleanup           []func()
 	heartbeatHandlers []HeartbeatMessageHandler
 	recordHandlers    []RecordMessageHandler
@@ -143,12 +144,14 @@ func (c *Client) Listen(ctx context.Context, attributes ListenerConfigProvider) 
 
 // Close stops all listeners
 func (c *Client) Close() {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	for _, cancel := range c.cleanup {
-		cancel()
-	}
-	c.wg.Wait()
+	c.closeOnce.Do(func() {
+		c.lock.Lock()
+		defer c.lock.Unlock()
+		for _, cancel := range c.cleanup {
+			cancel()
+		}
+		c.wg.Wait()
+	})
 }
 
 // SendFlush sends a FlushMessage to the Event Source
