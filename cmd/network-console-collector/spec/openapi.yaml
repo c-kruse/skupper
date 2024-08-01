@@ -551,6 +551,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -567,6 +568,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -583,6 +585,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -599,6 +602,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -608,6 +612,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -624,6 +629,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -640,6 +646,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -656,6 +663,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -672,6 +680,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -681,6 +690,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               $ref: '#/components/schemas/RouterLinkRecord'
@@ -688,6 +698,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
+          required: [results]
           properties:
             results:
               type: array
@@ -704,6 +715,7 @@ components:
       type: object
       required:
         - identity
+        - parent
         - startTime
         - endTime
       properties:
@@ -723,6 +735,14 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseRecord'
         - type: object
+          required:
+            - location
+            - provider
+            - platform
+            - name
+            - nameSpace
+            - siteVersion
+            - policy
           properties:
             location:
               type: string
@@ -771,6 +791,13 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseRecord'
         - type: object
+          required:
+            - name
+            - mode
+            - imageName
+            - imageVersion
+            - hostName
+            - buildVersion
           properties:
             name:
               type: string

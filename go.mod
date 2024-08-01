@@ -20,6 +20,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/interconnectedcloud/go-amqp v0.12.6-0.20200506124159-f51e540008b5
 	github.com/oapi-codegen/oapi-codegen/v2 v2.3.0
+	github.com/oapi-codegen/runtime v1.1.1
 	github.com/openshift/api v0.0.0-20210428205234-a8389931bee7
 	github.com/openshift/client-go v0.0.0-20210112165513-ebc401615f47
 	github.com/prometheus/client_golang v1.14.0
@@ -60,6 +61,7 @@ require (
 	github.com/Azure/go-autorest/tracing v0.6.0 // indirect
 	github.com/PuerkitoBio/purell v1.1.1 // indirect
 	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect
+	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
