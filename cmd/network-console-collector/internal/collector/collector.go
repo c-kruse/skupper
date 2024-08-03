@@ -5,11 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/eventsource"
 	"github.com/skupperproject/skupper/pkg/vanflow/session"
@@ -26,20 +25,31 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 		logger:        logger,
 		session:       sessionCtr,
 		discovery:     discovery,
+		sourceRef:     store.SourceRef{Version: "v1alpha1", ID: "collector"},
 		recordMapping: make(eventsource.RecordStoreMap),
 		purgeQueue:    make(chan store.SourceRef, 8),
+		events:        make(chan changeEvent, 32),
 		clients:       make(map[string]*eventsource.Client),
-		Records: store.NewSyncMapStore(store.SyncMapStoreConfig{
-			Indexers: map[string]store.Indexer{
-				store.SourceIndex:      store.SourceIndexer,
-				store.TypeIndex:        store.TypeIndexer,
-				IndexByTypeParent:      indexByTypeParent,
-				IndexByAddress:         indexByAddress,
-				IndexByParentHost:      indexByParentHost,
-				IndexByLifecycleStatus: indexByLifecycleStatus,
-			},
-		}),
+		Graph:         &Graph{},
 	}
+
+	c.Records = store.NewSyncMapStore(store.SyncMapStoreConfig{
+		Handlers: store.EventHandlerFuncs{
+			OnAdd:    c.handleStoreAdd,
+			OnChange: c.handleStoreChange,
+			OnDelete: c.handleStoreDelete,
+		},
+		Indexers: map[string]store.Indexer{
+			store.SourceIndex:      store.SourceIndexer,
+			store.TypeIndex:        store.TypeIndexer,
+			IndexByTypeParent:      indexByTypeParent,
+			IndexByAddress:         indexByAddress,
+			IndexByParentHost:      indexByParentHost,
+			IndexByLifecycleStatus: indexByLifecycleStatus,
+			IndexByTypeName:        indexByTypeName,
+		},
+	})
+
 	for _, record := range recordTypes {
 		c.recordMapping[record.GetTypeMeta().String()] = c.Records
 	}
@@ -51,10 +61,12 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 
 type Collector struct {
 	Records       store.Interface
+	Graph         *Graph
 	recordMapping eventsource.RecordStoreMap
 
 	session   session.Container
 	discovery *eventsource.Discovery
+	sourceRef store.SourceRef
 
 	logger *slog.Logger
 
@@ -62,7 +74,35 @@ type Collector struct {
 	clients map[string]*eventsource.Client
 
 	purgeQueue chan store.SourceRef
+	events     chan changeEvent
 }
+
+type changeEvent interface {
+	ID() string
+	GetTypeMeta() vanflow.TypeMeta
+}
+
+type addEvent struct {
+	Record vanflow.Record
+}
+
+func (i addEvent) ID() string                    { return i.Record.Identity() }
+func (i addEvent) GetTypeMeta() vanflow.TypeMeta { return i.Record.GetTypeMeta() }
+
+type deleteEvent struct {
+	Record vanflow.Record
+}
+
+func (i deleteEvent) ID() string                    { return i.Record.Identity() }
+func (i deleteEvent) GetTypeMeta() vanflow.TypeMeta { return i.Record.GetTypeMeta() }
+
+type updateEvent struct {
+	Prev vanflow.Record
+	Curr vanflow.Record
+}
+
+func (i updateEvent) ID() string                    { return i.Curr.Identity() }
+func (i updateEvent) GetTypeMeta() vanflow.TypeMeta { return i.Curr.GetTypeMeta() }
 
 func (c *Collector) discoveryHandler(ctx context.Context) func(eventsource.Info) {
 	return func(source eventsource.Info) {
@@ -131,9 +171,126 @@ func (c *Collector) Run(ctx context.Context) error {
 	c.session.Start(ctx)
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(c.runSession(ctx))
+	g.Go(c.runWorkQueue(ctx))
 	g.Go(c.runDiscovery(ctx))
 	g.Go(c.runRecordCleanup(ctx))
 	return g.Wait()
+}
+
+func (c *Collector) handleStoreAdd(e store.Entry) {
+	if err := c.Graph.Record(e.Record); err != nil {
+		c.logger.Error("graphing error", slog.Any("error", err))
+	}
+	c.events <- addEvent{Record: e.Record}
+}
+
+func (c *Collector) handleStoreChange(p, e store.Entry) {
+	if err := c.Graph.Record(e.Record); err != nil {
+		c.logger.Error("graphing error", slog.Any("error", err))
+	}
+	c.events <- updateEvent{Prev: p.Record, Curr: e.Record}
+}
+func (c *Collector) handleStoreDelete(e store.Entry) {
+	c.Graph.Remove(e.Record)
+	c.events <- deleteEvent{Record: e.Record}
+}
+
+func (c *Collector) updateGraph(event changeEvent, stor store.Interface) {
+	if dEvent, ok := event.(deleteEvent); ok {
+		c.Graph.Remove(dEvent.Record)
+		return
+	}
+	entry, ok := stor.Get(event.ID())
+	if !ok {
+		return
+	}
+	c.Graph.Record(entry.Record)
+}
+
+func (c *Collector) runWorkQueue(ctx context.Context) func() error {
+	reactors := map[vanflow.TypeMeta][]func(event changeEvent, stor store.Interface){}
+	for _, r := range recordTypes {
+		reactors[r.GetTypeMeta()] = append(reactors[r.GetTypeMeta()], c.updateGraph)
+	}
+	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddress)
+	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddress)
+	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroup)
+	return func() error {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case event := <-c.events:
+				for _, reactor := range reactors[event.GetTypeMeta()] {
+					reactor(event, c.Records)
+				}
+			}
+		}
+	}
+}
+
+func ensureProcessGroup(event changeEvent, stor store.Interface) {
+	if _, ok := event.(deleteEvent); ok {
+		return
+	}
+	entry, ok := stor.Get(event.ID())
+	if !ok {
+		return
+	}
+	proccess := entry.Record.(vanflow.ProcessRecord)
+	if proccess.Group == nil {
+		return
+	}
+	groupName := *proccess.Group
+	startTime := time.Now()
+	if proccess.StartTime != nil {
+		startTime = proccess.StartTime.Time
+	}
+
+	groups := stor.Index(IndexByTypeName, store.Entry{Record: ProcessGroupRecord{Name: groupName}})
+	if len(groups) > 0 {
+		return
+	}
+	stor.Add(ProcessGroupRecord{ID: uuid.New().String(), Name: groupName, Start: startTime}, store.SourceRef{})
+}
+
+func ensureAddress(event changeEvent, stor store.Interface) {
+	if _, ok := event.(deleteEvent); ok {
+		return
+	}
+	entry, ok := stor.Get(event.ID())
+	if !ok {
+		return
+	}
+	var (
+		address   string
+		startTime time.Time
+	)
+	switch r := entry.Record.(type) {
+	case vanflow.ListenerRecord:
+		if r.Address != nil {
+			address = *r.Address
+		}
+		if r.StartTime != nil {
+			startTime = r.StartTime.Time
+		}
+	case vanflow.ConnectorRecord:
+		if r.Address != nil {
+			address = *r.Address
+		}
+		if r.StartTime != nil {
+			startTime = r.StartTime.Time
+		}
+	default:
+	}
+	if address == "" {
+		return
+	}
+	addresses := stor.Index(IndexByTypeName, store.Entry{Record: AddressRecord{Name: address}})
+	if len(addresses) > 0 {
+		return
+	}
+	stor.Add(AddressRecord{ID: uuid.New().String(), Name: address, Start: startTime}, store.SourceRef{})
 }
 
 func (c *Collector) runSession(ctx context.Context) func() error {
@@ -226,7 +383,37 @@ const (
 	IndexByAddress         = "ByAddress"
 	IndexByParentHost      = "ByParentHost"
 	IndexByLifecycleStatus = "ByLifecycleStatus"
+	IndexByTypeName        = "ByTypeAndName"
 )
+
+func indexByTypeName(e store.Entry) []string {
+	optionalSingle := func(prefix string, s *string) []string {
+		if s != nil {
+			return []string{fmt.Sprintf("%s/%s", prefix, *s)}
+		}
+		return nil
+	}
+	switch record := e.Record.(type) {
+	case AddressRecord:
+		return optionalSingle(record.GetTypeMeta().String(), &record.Name)
+	case ProcessGroupRecord:
+		return optionalSingle(record.GetTypeMeta().String(), &record.Name)
+	case vanflow.SiteRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	case vanflow.RouterRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	case vanflow.LinkRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	case vanflow.ListenerRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	case vanflow.ConnectorRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	case vanflow.ProcessRecord:
+		return optionalSingle(record.GetTypeMeta().String(), record.Name)
+	default:
+		return nil
+	}
+}
 
 func indexByParentHost(e store.Entry) []string {
 	if proc, ok := e.Record.(vanflow.ProcessRecord); ok {
@@ -315,18 +502,6 @@ func indexByLifecycleStatus(e store.Entry) []string {
 	default:
 		return nil
 	}
-}
-
-func listByType[T vanflow.Record](stor store.Interface) []store.Entry {
-	var r T
-	return ordered(stor.Index(store.TypeIndex, store.Entry{Record: r}))
-}
-
-func ordered(entries []store.Entry) []store.Entry {
-	sort.Slice(entries, func(i, j int) bool {
-		return strings.Compare(entries[i].Record.Identity(), entries[j].Record.Identity()) < 0
-	})
-	return entries
 }
 
 func sourceRef(source eventsource.Info) store.SourceRef {

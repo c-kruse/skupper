@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector"
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
 
@@ -26,11 +29,12 @@ type Config struct {
 func NewServer(cfg Config,
 	logger *slog.Logger,
 	recordStore store.Interface,
+	graph *collector.Graph,
 	metricsRegistry *prometheus.Registry,
 	specFS fs.FS) http.Handler {
 	router := mux.NewRouter()
 
-	server := buildServer(logger, recordStore)
+	server := buildServer(logger, recordStore, graph)
 
 	var middlewares []mux.MiddlewareFunc = []mux.MiddlewareFunc{
 		handlers.CompressHandler,
@@ -43,7 +47,14 @@ func NewServer(cfg Config,
 
 	if cfg.UseAccessLogging {
 		m := func(next http.Handler) http.Handler {
-			return handlers.LoggingHandler(os.Stdout, next)
+			return handlers.CustomLoggingHandler(os.Stdout, next, func(_ io.Writer, params handlers.LogFormatterParams) {
+				logger.Info(fmt.Sprintf(`"%s %s %s"`, params.Request.Method, params.URL.Path, params.Request.Proto),
+					slog.Time("ts", params.TimeStamp),
+					slog.Int("status", params.StatusCode),
+					slog.Int("size", params.Size),
+					slog.String("source", params.Request.RemoteAddr),
+				)
+			})
 		}
 		middlewares = append(middlewares, m)
 		proxyMiddlewares = append(proxyMiddlewares, m)

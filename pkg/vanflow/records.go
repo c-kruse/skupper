@@ -120,6 +120,7 @@ func (r ListenerRecord) GetTypeMeta() TypeMeta {
 type ConnectorRecord struct {
 	BaseRecord
 	Parent      *string `vflow:"2"`
+	Name        *string `vflow:"30"` //unspeced
 	ProcessID   *string `vflow:"7"`
 	DestHost    *string `vflow:"15"`
 	Protocol    *string `vflow:"16"`

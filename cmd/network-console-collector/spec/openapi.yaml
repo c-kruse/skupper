@@ -212,7 +212,7 @@ paths:
       operationId: links
       responses:
         '410':
-          $ref: '#/components/responses/notSupported'
+          $ref: '#/components/responses/getLinks'
   /api/v1alpha1/links/{id}/:
     get:
       tags: [link]
@@ -222,7 +222,7 @@ paths:
         - $ref: '#/components/parameters/pathID'
       responses:
         '410':
-          $ref: '#/components/responses/notSupported'
+          $ref: '#/components/responses/getLinkByID'
 
 
   /api/v1alpha1/sites/{id}/processes/:
@@ -385,7 +385,13 @@ components:
         type: string
   responses:
     notSupported:
-      description: response to unsupported endpoint
+      description: response from unsupported endpoint
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    errorNotFound:
+      description: resource not found
       content:
         application/json:
           schema:
@@ -438,6 +444,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/FlowAggregateListResponse'
+    getLinks:
+      description: response with a list of links
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LinkListResponse'
     getRouterLinks:
       description: response with a list of router links
       content:
@@ -498,6 +510,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/FlowAggregateResponse'
+    getLinkByID:
+      description: response with a single link
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LinkResponse'
     getRouterLinkByID:
       description: response with a single router link
       content:
@@ -539,7 +557,12 @@ components:
           type: string
           description: todo
     ErrorResponse:
-      $ref: '#/components/schemas/baseResponse'
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
     SiteResponse:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
@@ -676,6 +699,23 @@ components:
           properties:
             results:
               $ref: '#/components/schemas/FlowAggregateRecord'
+    LinkListResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          required: [results]
+          properties:
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/LinkRecord'
+    LinkResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              $ref: '#/components/schemas/LinkRecord'
     RouterLinkListResponse:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
@@ -690,7 +730,6 @@ components:
       allOf:
         - $ref: '#/components/schemas/baseResponse'
         - type: object
-          required: [results]
           properties:
             results:
               $ref: '#/components/schemas/RouterLinkRecord'
@@ -945,6 +984,31 @@ components:
       enum:
         - up
         - down
+    LinkRecord:
+      allOf:
+        - $ref: '#/components/schemas/baseRecord'
+        - type: object
+          required:
+            - name
+            - linkCost
+            - mode
+            - direction
+            - sourceSiteId
+            - destinationSiteId
+          properties:
+            name:
+              type: string
+            linkCost:
+              type: integer
+              format: uint64
+            mode:
+              type: string
+            direction:
+              type: string
+            sourceSiteId:
+              type: string
+            destinationSiteId:
+              type: string
     RouterLinkRecord:
       allOf:
         - $ref: '#/components/schemas/baseRecord'

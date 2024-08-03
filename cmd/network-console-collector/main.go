@@ -57,6 +57,7 @@ func run(cfg Config) error {
 			UseAccessLogging:  !cfg.APIDisableAccessLogs,
 		}, logger.With(slog.String("component", "api")),
 		collector.Records,
+		collector.Graph,
 		reg,
 		specContent,
 	)

@@ -83,7 +83,9 @@ type ConnectorResponse struct {
 }
 
 // ErrorResponse defines model for ErrorResponse.
-type ErrorResponse = BaseResponse
+type ErrorResponse struct {
+	Status string `json:"status"`
+}
 
 // FlowAggregateListResponse defines model for FlowAggregateListResponse.
 type FlowAggregateListResponse struct {
@@ -117,6 +119,35 @@ type FlowAggregateResponse struct {
 	BaseResponse `yaml:",inline"`
 	// Embedded fields due to inline allOf schema
 	Results *FlowAggregateRecord `json:"results,omitempty"`
+}
+
+// LinkListResponse defines model for LinkListResponse.
+type LinkListResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results []LinkRecord `json:"results"`
+}
+
+// LinkRecord defines model for LinkRecord.
+type LinkRecord struct {
+	// Embedded struct due to allOf(#/components/schemas/baseRecord)
+	BaseRecord `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	DestinationSiteId string `json:"destinationSiteId"`
+	Direction         string `json:"direction"`
+	LinkCost          uint64 `json:"linkCost"`
+	Mode              string `json:"mode"`
+	Name              string `json:"name"`
+	SourceSiteId      string `json:"sourceSiteId"`
+}
+
+// LinkResponse defines model for LinkResponse.
+type LinkResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results *LinkRecord `json:"results,omitempty"`
 }
 
 // ListenerListResponse defines model for ListenerListResponse.
@@ -237,7 +268,7 @@ type RouterLinkResponse struct {
 	// Embedded struct due to allOf(#/components/schemas/baseResponse)
 	BaseResponse `yaml:",inline"`
 	// Embedded fields due to inline allOf schema
-	Results RouterLinkRecord `json:"results"`
+	Results *RouterLinkRecord `json:"results,omitempty"`
 }
 
 // RouterListResponse defines model for RouterListResponse.
@@ -350,6 +381,12 @@ type GetFlowAggregateByID = FlowAggregateResponse
 
 // GetFlowAggregates defines model for getFlowAggregates.
 type GetFlowAggregates = FlowAggregateListResponse
+
+// GetLinkByID defines model for getLinkByID.
+type GetLinkByID = LinkResponse
+
+// GetLinks defines model for getLinks.
+type GetLinks = LinkListResponse
 
 // GetListenerByID defines model for getListenerByID.
 type GetListenerByID = ListenerResponse

@@ -11,12 +11,16 @@ func toProcessRecord(in store.Entry) (ProcessRecord, bool) {
 		return ProcessRecord{}, false
 	}
 	return ProcessRecord{
-		BaseRecord: toBase(process.BaseRecord, process.Parent, in.Source.ID),
-		Name:       process.Name,
-		GroupName:  process.Group,
-		ImageName:  process.ImageName,
+		BaseRecord:  toBase(process.BaseRecord, process.Parent, in.Source.ID),
+		Name:        process.Name,
+		GroupName:   process.Group,
+		ProcessRole: process.Mode,
+		ImageName:   process.ImageName,
+		Image:       process.ImageVersion,
+		SourceHost:  process.SourceHost,
 	}, true
 }
+
 func toRouterRecord(in store.Entry) (RouterRecord, bool) {
 	router, ok := in.Record.(vanflow.RouterRecord)
 	if !ok {

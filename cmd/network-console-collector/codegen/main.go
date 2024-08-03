@@ -40,6 +40,7 @@ func main() {
 	flags.StringVar(&output, "o", "", "file to write output to. defaults to stdout")
 	flags.Usage = func() {
 		fmt.Println("codegen [options...] <source file>")
+		fmt.Println("generates setters for Response objects.")
 		flags.PrintDefaults()
 	}
 	flags.Parse(os.Args[1:])
@@ -103,6 +104,7 @@ func main() {
 						ResultName: field.Names[0].String(),
 						ResultType: rt,
 					})
+					break
 				}
 			}
 		}

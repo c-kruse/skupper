@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -27,51 +28,64 @@ var _ ServerInterface = (*server)(nil)
 type server struct {
 	logger  *slog.Logger
 	records store.Interface
-
-	siteHandler    handleByID
-	routerHandler  handleByID
-	processHandler handleByID
-
-	siteListHandler    handleStoreEntries
-	routerListHandler  handleStoreEntries
-	processListHandler handleStoreEntries
+	graph   *collector.Graph
 }
 
-func buildServer(logger *slog.Logger, records store.Interface) *server {
+func buildServer(logger *slog.Logger, records store.Interface, g *collector.Graph) *server {
 	return &server{
 		logger:  logger,
 		records: records,
-
-		siteHandler:    handlerForStore[SiteRecord, SiteResponse](logger, records, toSiteRecord),
-		routerHandler:  handlerForStore[RouterRecord, RouterResponse](logger, records, toRouterRecord),
-		processHandler: handlerForStore[ProcessRecord, ProcessResponse](logger, records, toProcessRecord),
-
-		siteListHandler:    handlerForEntries[SiteRecord, SiteListResponse](logger, toSiteRecord),
-		routerListHandler:  handlerForEntries[RouterRecord, RouterListResponse](logger, toRouterRecord),
-		processListHandler: handlerForEntries[ProcessRecord, ProcessListResponse](logger, toProcessRecord),
+		graph:   g,
 	}
 }
 
 // (GET /api/v1alpha1/sites/)
 func (c *server) Sites(w http.ResponseWriter, r *http.Request) {
-	c.siteListHandler.Handle(w, r, listByType[vanflow.SiteRecord](c.records))
+	entries := listByType[vanflow.SiteRecord](c.records)
+	results := make([]SiteRecord, len(entries))
+	for i := range entries {
+		results[i], _ = toSiteRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &SiteListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/sites/{id}/)
 func (c *server) SiteById(w http.ResponseWriter, r *http.Request, id string) {
-	c.siteHandler.Handle(w, r, id)
+	err := handleOptionalResult(w, &SiteResponse{}, withMapping(toSiteRecord).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/sites/{id}/routers/)
 func (c *server) RoutersBySite(w http.ResponseWriter, r *http.Request, id string) {
 	exemplar := store.Entry{Record: vanflow.RouterRecord{Parent: &id}}
-	c.routerListHandler.Handle(w, r, index(c.records, collector.IndexByTypeParent, exemplar))
+	entries := index(c.records, collector.IndexByTypeParent, exemplar)
+	results := make([]RouterRecord, len(entries))
+	for i := range entries {
+		results[i], _ = toRouterRecord(entries[i])
+	}
+
+	if err := handleResultSet(w, r, &RouterListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/sites/{id}/processes/)
 func (c *server) ProcessesBySite(w http.ResponseWriter, r *http.Request, id string) {
 	exemplar := store.Entry{Record: vanflow.ProcessRecord{Parent: &id}}
-	c.routerListHandler.Handle(w, r, index(c.records, collector.IndexByTypeParent, exemplar))
+
+	entries := index(c.records, collector.IndexByTypeParent, exemplar)
+	results := make([]ProcessRecord, len(entries))
+	for i := range entries {
+		results[i], _ = toProcessRecord(entries[i])
+	}
+
+	if err := handleResultSet(w, r, &ProcessListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/sites/{id}/flows/)
@@ -96,12 +110,22 @@ func (c *server) SitepairByID(w http.ResponseWriter, r *http.Request, id string)
 
 // (GET /api/v1alpha1/routers/)
 func (c *server) Routers(w http.ResponseWriter, r *http.Request) {
-	c.routerListHandler.Handle(w, r, listByType[vanflow.RouterRecord](c.records))
+	entries := listByType[vanflow.RouterRecord](c.records)
+	results := make([]RouterRecord, len(entries))
+	for i := range entries {
+		results[i], _ = toRouterRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &RouterListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routers/{id}/)
 func (c *server) RouterByID(w http.ResponseWriter, r *http.Request, id string) {
-	c.routerHandler.Handle(w, r, id)
+	err := handleOptionalResult(w, &RouterResponse{}, withMapping(toRouterRecord).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routers/{id}/connectors/)
@@ -124,9 +148,36 @@ func (c *server) ListenersByRouter(w http.ResponseWriter, r *http.Request, id st
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
+func (c *server) addresses() map[string]AddressRecord {
+	routingKeys := collector.NodesByType[collector.RoutingKeyNode](c.graph)
+	records := make(map[string]AddressRecord, len(routingKeys))
+	for _, address := range routingKeys {
+		listenrIDs := collector.ChildNodes[collector.ListenerNode](c.graph, address)
+		connectorIDs := collector.ChildNodes[collector.ListenerNode](c.graph, address)
+		if len(listenrIDs)+len(connectorIDs) == 0 {
+			continue
+		}
+		records[address] = AddressRecord{
+			BaseRecord:     BaseRecord{Identity: address},
+			Name:           address,
+			ConnectorCount: len(connectorIDs),
+			ListenerCount:  len(listenrIDs),
+		}
+	}
+
+	return nil
+}
+
 // (GET /api/v1alpha1/addresses/)
 func (c *server) Addresses(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	entries := listByType[collector.AddressRecord](c.records)
+	results := make([]AddressRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asAddress(entries[i])
+	}
+	if err := handleResultSet(w, r, &AddressListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/addresses/{id}/)
@@ -156,7 +207,50 @@ func (c *server) ProcessPairsByAddress(w http.ResponseWriter, r *http.Request, i
 
 // (GET /api/v1alpha1/connectors/)
 func (c *server) Connectors(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	entries := listByType[vanflow.ConnectorRecord](c.records)
+	results := make([]ConnectorRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asConnectorRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &ConnectorListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+
+func (c *server) asConnectorRecord(in store.Entry) (ConnectorRecord, bool) {
+	record, ok := in.Record.(vanflow.ConnectorRecord)
+	if !ok {
+		return ConnectorRecord{}, false
+	}
+	var (
+		addressID  string
+		targetName string
+	)
+	if record.Address != nil {
+		if id, ok := collector.ParentNode[collector.AddressNode](c.graph, *record.Address); ok {
+			addressID = id
+		}
+	}
+	if record.ProcessID != nil {
+		p, ok := c.records.Get(*record.ProcessID)
+		if ok {
+			if proc, ok := p.Record.(vanflow.ProcessRecord); ok {
+				targetName = dref(proc.Name)
+			}
+		}
+	}
+
+	return ConnectorRecord{
+		BaseRecord: toBase(record.BaseRecord, nil, in.Source.ID),
+		Name:       dref(record.Name),
+		Address:    dref(record.Address),
+		AddressId:  &addressID,
+		Target:     targetName,
+		ProcessId:  dref(record.ProcessID),
+		DestHost:   dref(record.DestHost),
+		DestPort:   dref(record.DestPort),
+		Protocol:   dref(record.Protocol),
+	}, true
 }
 
 // (GET /api/v1alpha1/connectors/{id}/)
@@ -166,7 +260,52 @@ func (c *server) ConnectorByID(w http.ResponseWriter, r *http.Request, id string
 
 // (GET /api/v1alpha1/links/)
 func (c *server) Links(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	linkEntries := listByType[vanflow.LinkRecord](c.records)
+	results := make([]LinkRecord, 0, len(linkEntries))
+
+	for _, le := range linkEntries {
+		if lr, ok := c.asLinkRecord(le); ok {
+			results = append(results, lr)
+		}
+	}
+	if err := handleResultSet(w, r, &LinkListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+
+func (c *server) asLinkRecord(in store.Entry) (r LinkRecord, ok bool) {
+	link := in.Record.(vanflow.LinkRecord)
+	if link.Status == nil || *link.Status != "up" || link.Peer == nil {
+		return r, false
+	}
+	accessEntry, ok := c.records.Get(*link.Peer)
+	if !ok {
+		return r, false
+	}
+	routerAccess, ok := accessEntry.Record.(vanflow.RouterAccessRecord)
+	if !ok {
+		return r, false
+	}
+
+	var (
+		sourceSiteID string
+		destSiteID   string
+	)
+	if peerSite, ok := collector.ParentNode[collector.SiteNode](c.graph, routerAccess.ID); ok {
+		destSiteID = peerSite
+	}
+	if linkSite, ok := collector.ParentNode[collector.SiteNode](c.graph, link.ID); ok {
+		sourceSiteID = linkSite
+	}
+	return LinkRecord{
+		BaseRecord:        toBase(link.BaseRecord, link.Parent, in.Source.ID),
+		Name:              dref(link.Name),
+		Direction:         "outgoing",
+		Mode:              dref(link.Role),
+		LinkCost:          dref(link.LinkCost),
+		SourceSiteId:      sourceSiteID,
+		DestinationSiteId: destSiteID,
+	}, true
 }
 
 // (GET /api/v1alpha1/links/{id}/)
@@ -184,9 +323,71 @@ func (c *server) RouteraccessByID(w http.ResponseWriter, r *http.Request, id str
 	encode(w, http.StatusNotFound, emptySingleResponse)
 }
 
+func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
+	record, ok := entry.Record.(collector.AddressRecord)
+	if !ok {
+		return AddressRecord{}, false
+	}
+	var (
+		listenerCt  int
+		connectorCt int
+	)
+	listenerIDs := collector.ChildNodes[collector.ListenerNode](c.graph, record.Name)
+	listenerCt = len(listenerIDs)
+
+	connectorIDs := collector.ChildNodes[collector.ConnectorNode](c.graph, record.Name)
+	connectorCt = len(connectorIDs)
+
+	return AddressRecord{
+		BaseRecord: BaseRecord{
+			Identity:  record.ID,
+			StartTime: uint64(record.Start.UnixMicro()),
+		},
+		Name:           record.Name,
+		ListenerCount:  listenerCt,
+		ConnectorCount: connectorCt,
+		Protocol:       "tcp", // todo(ck)
+	}, true
+}
+func (c *server) asRouterLink(entry store.Entry) (RouterLinkRecord, bool) {
+	link, ok := entry.Record.(vanflow.LinkRecord)
+	if !ok {
+		return RouterLinkRecord{}, false
+	}
+	var (
+		status       OperStatusType = OperStatusTypeDown
+		sourceSiteID string
+		destSiteID   string
+	)
+	if link.Status != nil && *link.Status == string(OperStatusTypeUp) {
+		status = OperStatusTypeUp
+	}
+	sourceSiteID, _ = collector.ParentNode[collector.SiteNode](c.graph, link.ID)
+	if link.Peer != nil {
+		destSiteID, _ = collector.ParentNode[collector.SiteNode](c.graph, *link.Peer)
+	}
+	return RouterLinkRecord{
+		BaseRecord:        toBase(link.BaseRecord, nil, entry.Source.ID),
+		LinkCost:          dref(link.LinkCost),
+		Name:              dref(link.Name),
+		Peer:              dref(link.Peer),
+		Role:              dref(link.Role),
+		Status:            status,
+		SourceSiteId:      sourceSiteID,
+		DestinationSiteId: destSiteID,
+	}, true
+}
+
 // (GET /api/v1alpha1/routerlinks/)
 func (c *server) Routerlinks(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	links := listByType[vanflow.LinkRecord](c.records)
+	results := make([]RouterLinkRecord, len(links))
+	for i := range links {
+		results[i], _ = c.asRouterLink(links[i])
+	}
+	if err := handleResultSet(w, r, &RouterLinkListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routerlinks/{id}/)
@@ -211,12 +412,50 @@ func (c *server) FlowsByListener(w http.ResponseWriter, r *http.Request, id stri
 
 // (GET /api/v1alpha1/processes/)
 func (c *server) Processes(w http.ResponseWriter, r *http.Request) {
-	c.processListHandler.Handle(w, r, listByType[vanflow.ProcessRecord](c.records))
+	entries := listByType[vanflow.ProcessRecord](c.records)
+	results := make([]ProcessRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asProcessRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &ProcessListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
+	process, ok := entry.Record.(vanflow.ProcessRecord)
+	if !ok {
+		return ProcessRecord{}, false
+	}
+	var addresses *[]string
+	var processGroupID *string
+	if process.Group != nil {
+		groups := c.records.Index(collector.IndexByTypeName, store.Entry{Record: collector.ProcessGroupRecord{Name: dref(process.Group)}})
+		if len(groups) > 0 {
+			gid := groups[0].Record.Identity()
+			processGroupID = &gid
+		}
+	}
+	// connectors referencing this process
+
+	return ProcessRecord{
+		BaseRecord:    toBase(process.BaseRecord, process.Parent, entry.Source.ID),
+		Name:          process.Name,
+		GroupName:     process.Group,
+		GroupIdentity: processGroupID,
+		ProcessRole:   process.Mode,
+		ImageName:     process.ImageName,
+		Image:         process.ImageVersion,
+		SourceHost:    process.SourceHost,
+		Addresses:     addresses,
+	}, true
 }
 
 // (GET /api/v1alpha1/processes/{id}/)
 func (c *server) ProcessById(w http.ResponseWriter, r *http.Request, id string) {
-	c.processHandler.Handle(w, r, id)
+	err := handleOptionalResult(w, &ProcessResponse{}, withMapping(toProcessRecord).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/processes/{id}/addresses/)
@@ -251,7 +490,6 @@ func (c *server) ProcessgrouppairByID(w http.ResponseWriter, r *http.Request, id
 
 // (GET /api/v1alpha1/processgroups/)
 func (c *server) Processgroups(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
 }
 
 // (GET /api/v1alpha1/processgroups/{id}/)
@@ -262,6 +500,10 @@ func (c *server) ProcessgroupByID(w http.ResponseWriter, r *http.Request, id str
 // (GET /api/v1alpha1/processgroups/{id}/processes/)
 func (c *server) ProcessesByProcessGroup(w http.ResponseWriter, r *http.Request, id string) {
 	encode(w, http.StatusOK, emptyListResponse)
+}
+
+func (c *server) logWriteError(r *http.Request, err error) {
+	requestLogger(c.logger, r).Error("failed to write response", slog.Any("error", err))
 }
 
 func index(stor store.Interface, index string, exemplar store.Entry) []store.Entry {
@@ -279,90 +521,40 @@ func ordered(entries []store.Entry) []store.Entry {
 	return entries
 }
 
-type wrapSetOptional[R any, T any] interface {
-	SetResponseOptional[R]
-	*T
-}
-
-type handleByID interface {
-	Handle(w http.ResponseWriter, r *http.Request, id string)
-}
-
-func handlerForStore[R any, T any, TP wrapSetOptional[R, T]](log *slog.Logger, stor store.Interface, x func(store.Entry) (R, bool)) handleByID {
-	return handler[R, T, TP]{
-		X:      x,
-		Logger: log,
-		Stor:   stor,
+func handleOptionalResult[R any, T SetResponseOptional[R]](w http.ResponseWriter, response T, getRecord func() (R, bool)) error {
+	if record, ok := getRecord(); ok {
+		response.Set(&record)
+		response.SetCount(1)
 	}
+	if err := encode(w, http.StatusOK, response); err != nil {
+		return fmt.Errorf("response write error: %s", err)
+	}
+	return nil
 }
 
-type handler[R any, T any, TP wrapSetOptional[R, T]] struct {
-	X      func(store.Entry) (R, bool)
-	Logger *slog.Logger
-	Stor   store.Interface
+func handleResultSet[R any, T SetResponse[[]R]](w http.ResponseWriter, r *http.Request, response T, records []R) error {
+	x, b := filterAndOrderResults(r, records)
+	response.Set(x)
+	response.SetCount(b.Count)
+	response.SetStatus(b.Status)
+	response.SetTotalCount(b.TotalCount)
+	if err := encode(w, http.StatusOK, response); err != nil {
+		return fmt.Errorf("response write error: %s", err)
+	}
+	return nil
 }
 
-func (h handler[R, T, TP]) Handle(w http.ResponseWriter, r *http.Request, id string) {
-	var (
-		response TP  = new(T)
-		status   int = http.StatusNotFound
-	)
+func withMapping[R any](fn func(store.Entry) (R, bool)) oneToOne[R] {
+	return oneToOne[R](fn)
+}
 
-	if entry, ok := h.Stor.Get(id); ok {
+type oneToOne[R any] func(store.Entry) (R, bool)
 
-		if record, ok := h.X(entry); ok {
-			status = http.StatusOK
-			response.Set(&record)
-			response.SetCount(1)
+func (fn oneToOne[R]) ByID(stor store.Interface, id string) func() (R, bool) {
+	return func() (r R, ok bool) {
+		if e, ok := stor.Get(id); ok {
+			return fn(e)
 		}
-	}
-	if err := encode(w, status, response); err != nil {
-		log := requestLogger(h.Logger, r)
-		log.Error("response write error", slog.Any("error", err))
-	}
-}
-
-type wrapSetRequired[R any, T any] interface {
-	SetResponse[R]
-	*T
-}
-
-type handleStoreEntries interface {
-	Handle(w http.ResponseWriter, r *http.Request, entries []store.Entry)
-}
-
-func handlerForEntries[R any, T any, TP wrapSetRequired[[]R, T]](log *slog.Logger, x func(store.Entry) (R, bool)) handleStoreEntries {
-	return listHandler[R, T, TP]{
-		X:      x,
-		Logger: log,
-	}
-}
-
-type listHandler[R any, T any, TP wrapSetRequired[[]R, T]] struct {
-	X      func(store.Entry) (R, bool)
-	Logger *slog.Logger
-}
-
-func (h listHandler[R, T, TP]) Handle(w http.ResponseWriter, r *http.Request, entries []store.Entry) {
-	var (
-		response TP  = new(T)
-		status   int = http.StatusNotFound
-	)
-
-	results := make([]R, 0, len(entries))
-	for _, entry := range entries {
-		if record, ok := h.X(entry); ok {
-			results = append(results, record)
-		}
-	}
-	results, base := filterAndOrderResults(r, results)
-	response.Set(results)
-	response.SetCount(base.Count)
-	response.SetTotalCount(base.TotalCount)
-	response.SetStatus(base.Status)
-	response.SetTimeRangeCount(base.TimeRangeCount)
-	if err := encode(w, status, response); err != nil {
-		log := requestLogger(h.Logger, r)
-		log.Error("response write error", slog.Any("error", err))
+		return r, false
 	}
 }

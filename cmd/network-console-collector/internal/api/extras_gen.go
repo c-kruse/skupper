@@ -32,6 +32,16 @@ func (r *FlowAggregateResponse) Set(e *FlowAggregateRecord) {
 }
 
 // Set result
+func (r *LinkListResponse) Set(e []LinkRecord) {
+	r.Results = e
+}
+
+// Set result
+func (r *LinkResponse) Set(e *LinkRecord) {
+	r.Results = e
+}
+
+// Set result
 func (r *ListenerListResponse) Set(e []ListenerRecord) {
 	r.Results = e
 }
@@ -67,7 +77,7 @@ func (r *RouterLinkListResponse) Set(e []RouterLinkRecord) {
 }
 
 // Set result
-func (r *RouterLinkResponse) Set(e RouterLinkRecord) {
+func (r *RouterLinkResponse) Set(e *RouterLinkRecord) {
 	r.Results = e
 }
 
