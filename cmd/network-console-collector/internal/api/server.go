@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector"
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/graph"
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/records"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
@@ -27,15 +29,15 @@ var _ ServerInterface = (*server)(nil)
 
 type server struct {
 	logger  *slog.Logger
+	coll    *collector.Collector
 	records store.Interface
-	graph   *collector.Graph
 }
 
-func buildServer(logger *slog.Logger, records store.Interface, g *collector.Graph) *server {
+func buildServer(logger *slog.Logger, records store.Interface, c *collector.Collector) ServerInterface {
 	return &server{
 		logger:  logger,
 		records: records,
-		graph:   g,
+		coll:    c,
 	}
 }
 
@@ -95,7 +97,27 @@ func (c *server) FlowsBySite(w http.ResponseWriter, r *http.Request, id string) 
 
 // (GET /api/v1alpha1/sites/{id}/links/)
 func (c *server) LinksBySite(w http.ResponseWriter, r *http.Request, id string) {
-	encode(w, http.StatusOK, emptyListResponse)
+	var linkEntries []store.Entry
+	siteNode, ok := c.coll.GetNode(id).(graph.Site)
+	if ok {
+		linkNodes := siteNode.Links()
+		linkEntries = make([]store.Entry, 0, len(linkNodes))
+		for _, ln := range linkNodes {
+			if le, ok := ln.Get(); ok {
+				linkEntries = append(linkEntries, le)
+			}
+		}
+	}
+	results := make([]LinkRecord, 0, len(linkEntries))
+
+	for _, le := range linkEntries {
+		if lr, ok := c.asLinkRecord(le); ok {
+			results = append(results, lr)
+		}
+	}
+	if err := handleResultSet(w, r, &LinkListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/sitepairs/)
@@ -140,7 +162,17 @@ func (c *server) FlowsByRouter(w http.ResponseWriter, r *http.Request, id string
 
 // (GET /api/v1alpha1/routers/{id}/links/)
 func (c *server) LinksByRouter(w http.ResponseWriter, r *http.Request, id string) {
-	encode(w, http.StatusOK, emptyListResponse)
+	linkEntries := index(c.records, collector.IndexByTypeParent, store.Entry{Record: vanflow.LinkRecord{Parent: &id}})
+	results := make([]LinkRecord, 0, len(linkEntries))
+
+	for _, le := range linkEntries {
+		if lr, ok := c.asLinkRecord(le); ok {
+			results = append(results, lr)
+		}
+	}
+	if err := handleResultSet(w, r, &LinkListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routers/{id}/listeners/)
@@ -148,29 +180,9 @@ func (c *server) ListenersByRouter(w http.ResponseWriter, r *http.Request, id st
 	encode(w, http.StatusOK, emptyListResponse)
 }
 
-func (c *server) addresses() map[string]AddressRecord {
-	routingKeys := collector.NodesByType[collector.RoutingKeyNode](c.graph)
-	records := make(map[string]AddressRecord, len(routingKeys))
-	for _, address := range routingKeys {
-		listenrIDs := collector.ChildNodes[collector.ListenerNode](c.graph, address)
-		connectorIDs := collector.ChildNodes[collector.ListenerNode](c.graph, address)
-		if len(listenrIDs)+len(connectorIDs) == 0 {
-			continue
-		}
-		records[address] = AddressRecord{
-			BaseRecord:     BaseRecord{Identity: address},
-			Name:           address,
-			ConnectorCount: len(connectorIDs),
-			ListenerCount:  len(listenrIDs),
-		}
-	}
-
-	return nil
-}
-
 // (GET /api/v1alpha1/addresses/)
 func (c *server) Addresses(w http.ResponseWriter, r *http.Request) {
-	entries := listByType[collector.AddressRecord](c.records)
+	entries := listByType[records.AddressRecord](c.records)
 	results := make([]AddressRecord, len(entries))
 	for i := range entries {
 		results[i], _ = c.asAddress(entries[i])
@@ -226,10 +238,8 @@ func (c *server) asConnectorRecord(in store.Entry) (ConnectorRecord, bool) {
 		addressID  string
 		targetName string
 	)
-	if record.Address != nil {
-		if id, ok := collector.ParentNode[collector.AddressNode](c.graph, *record.Address); ok {
-			addressID = id
-		}
+	if cn, ok := c.coll.GetNode(record.ID).(graph.Connector); ok {
+		addressID = cn.Address().ID()
 	}
 	if record.ProcessID != nil {
 		p, ok := c.records.Get(*record.ProcessID)
@@ -278,24 +288,13 @@ func (c *server) asLinkRecord(in store.Entry) (r LinkRecord, ok bool) {
 	if link.Status == nil || *link.Status != "up" || link.Peer == nil {
 		return r, false
 	}
-	accessEntry, ok := c.records.Get(*link.Peer)
-	if !ok {
-		return r, false
-	}
-	routerAccess, ok := accessEntry.Record.(vanflow.RouterAccessRecord)
-	if !ok {
-		return r, false
-	}
-
 	var (
 		sourceSiteID string
 		destSiteID   string
 	)
-	if peerSite, ok := collector.ParentNode[collector.SiteNode](c.graph, routerAccess.ID); ok {
-		destSiteID = peerSite
-	}
-	if linkSite, ok := collector.ParentNode[collector.SiteNode](c.graph, link.ID); ok {
-		sourceSiteID = linkSite
+	if link, ok := c.coll.GetNode(link.ID).(graph.Link); ok {
+		sourceSiteID = link.Parent().Parent().ID()
+		destSiteID = link.Peer().Parent().Parent().ID()
 	}
 	return LinkRecord{
 		BaseRecord:        toBase(link.BaseRecord, link.Parent, in.Source.ID),
@@ -324,7 +323,7 @@ func (c *server) RouteraccessByID(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
-	record, ok := entry.Record.(collector.AddressRecord)
+	record, ok := entry.Record.(records.AddressRecord)
 	if !ok {
 		return AddressRecord{}, false
 	}
@@ -332,11 +331,10 @@ func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
 		listenerCt  int
 		connectorCt int
 	)
-	listenerIDs := collector.ChildNodes[collector.ListenerNode](c.graph, record.Name)
-	listenerCt = len(listenerIDs)
+	addressNode := c.coll.GetNode(record.ID).(graph.Address)
 
-	connectorIDs := collector.ChildNodes[collector.ConnectorNode](c.graph, record.Name)
-	connectorCt = len(connectorIDs)
+	listenerCt = len(addressNode.Listeners())
+	connectorCt = len(addressNode.Connectors())
 
 	return AddressRecord{
 		BaseRecord: BaseRecord{
@@ -349,6 +347,7 @@ func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
 		Protocol:       "tcp", // todo(ck)
 	}, true
 }
+
 func (c *server) asRouterLink(entry store.Entry) (RouterLinkRecord, bool) {
 	link, ok := entry.Record.(vanflow.LinkRecord)
 	if !ok {
@@ -362,9 +361,10 @@ func (c *server) asRouterLink(entry store.Entry) (RouterLinkRecord, bool) {
 	if link.Status != nil && *link.Status == string(OperStatusTypeUp) {
 		status = OperStatusTypeUp
 	}
-	sourceSiteID, _ = collector.ParentNode[collector.SiteNode](c.graph, link.ID)
-	if link.Peer != nil {
-		destSiteID, _ = collector.ParentNode[collector.SiteNode](c.graph, *link.Peer)
+	n := c.coll.GetNode(link.ID)
+	sourceSiteID = n.Parent().Parent().ID()
+	if linkNode, ok := n.(graph.Link); ok {
+		destSiteID = linkNode.Peer().Parent().Parent().ID()
 	}
 	return RouterLinkRecord{
 		BaseRecord:        toBase(link.BaseRecord, nil, entry.Source.ID),
@@ -426,33 +426,50 @@ func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
 	if !ok {
 		return ProcessRecord{}, false
 	}
-	var addresses *[]string
+	var pAddresses *[]string
+	var addresses []string
 	var processGroupID *string
+	binding := "unbound"
 	if process.Group != nil {
-		groups := c.records.Index(collector.IndexByTypeName, store.Entry{Record: collector.ProcessGroupRecord{Name: dref(process.Group)}})
+		groups := c.records.Index(collector.IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: dref(process.Group)}})
 		if len(groups) > 0 {
 			gid := groups[0].Record.Identity()
 			processGroupID = &gid
 		}
 	}
-	// connectors referencing this process
+	if node, ok := c.coll.GetNode(process.ID).(graph.Process); ok {
+		for _, cNode := range node.Connectors() {
+			if addressEntry, ok := cNode.Address().Get(); ok {
+				address, ok := addressEntry.Record.(records.AddressRecord)
+				if !ok {
+					continue
+				}
+				addresses = append(addresses, fmt.Sprintf("%s@%s@%s", address.Name, address.ID, "tcp"))
+			}
+		}
+	}
+	if len(addresses) > 0 {
+		pAddresses = &addresses
+		binding = "bound"
+	}
 
 	return ProcessRecord{
-		BaseRecord:    toBase(process.BaseRecord, process.Parent, entry.Source.ID),
-		Name:          process.Name,
-		GroupName:     process.Group,
-		GroupIdentity: processGroupID,
-		ProcessRole:   process.Mode,
-		ImageName:     process.ImageName,
-		Image:         process.ImageVersion,
-		SourceHost:    process.SourceHost,
-		Addresses:     addresses,
+		BaseRecord:     toBase(process.BaseRecord, process.Parent, entry.Source.ID),
+		Name:           process.Name,
+		GroupName:      process.Group,
+		GroupIdentity:  processGroupID,
+		ProcessRole:    process.Mode,
+		ImageName:      process.ImageName,
+		Image:          process.ImageVersion,
+		SourceHost:     process.SourceHost,
+		Addresses:      pAddresses,
+		ProcessBinding: &binding,
 	}, true
 }
 
 // (GET /api/v1alpha1/processes/{id}/)
 func (c *server) ProcessById(w http.ResponseWriter, r *http.Request, id string) {
-	err := handleOptionalResult(w, &ProcessResponse{}, withMapping(toProcessRecord).ByID(c.records, id))
+	err := handleOptionalResult(w, &ProcessResponse{}, withMapping(c.asProcessRecord).ByID(c.records, id))
 	if err != nil {
 		c.logWriteError(r, err)
 	}
@@ -490,15 +507,66 @@ func (c *server) ProcessgrouppairByID(w http.ResponseWriter, r *http.Request, id
 
 // (GET /api/v1alpha1/processgroups/)
 func (c *server) Processgroups(w http.ResponseWriter, r *http.Request) {
+	entries := listByType[records.ProcessGroupRecord](c.records)
+	results := make([]ProcessGroupRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asProcessGroupRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &ProcessGroupListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+func (c *server) asProcessGroupRecord(entry store.Entry) (ProcessGroupRecord, bool) {
+	process, ok := entry.Record.(records.ProcessGroupRecord)
+	if !ok {
+		return ProcessGroupRecord{}, false
+	}
+	allProcesses := c.records.Index(store.TypeIndex, store.Entry{Record: vanflow.ProcessRecord{}})
+	var (
+		pCount int
+		role   string
+	)
+	for _, p := range allProcesses {
+		if proc := p.Record.(vanflow.ProcessRecord); proc.Group != nil && *proc.Group == process.Name {
+			pCount++
+			if role == "" && proc.Mode != nil {
+				role = *proc.Mode
+			}
+		}
+	}
+	// connectors referencing this process
+
+	return ProcessGroupRecord{
+		BaseRecord:       BaseRecord{Identity: process.ID, StartTime: uint64(process.Start.UnixMicro())},
+		Name:             process.Name,
+		ProcessCount:     pCount,
+		ProcessGroupRole: role,
+	}, true
 }
 
 // (GET /api/v1alpha1/processgroups/{id}/)
 func (c *server) ProcessgroupByID(w http.ResponseWriter, r *http.Request, id string) {
-	encode(w, http.StatusNotFound, emptySingleResponse)
+	err := handleOptionalResult(w, &ProcessGroupResponse{}, withMapping(c.asProcessGroupRecord).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/processgroups/{id}/processes/)
 func (c *server) ProcessesByProcessGroup(w http.ResponseWriter, r *http.Request, id string) {
+	encode(w, http.StatusOK, emptyListResponse)
+}
+
+// (GET /api/v1alpha1/hosts/)
+func (c *server) Hosts(w http.ResponseWriter, r *http.Request) {
+	encode(w, http.StatusOK, emptyListResponse)
+}
+
+// (GET /api/v1alpha1/hosts/{id}/)
+func (c *server) HostsByID(w http.ResponseWriter, r *http.Request, id PathID) {
+	encode(w, http.StatusNotFound, emptySingleResponse)
+}
+func (c *server) HostsBySite(w http.ResponseWriter, r *http.Request, id PathID) {
 	encode(w, http.StatusOK, emptyListResponse)
 }
 

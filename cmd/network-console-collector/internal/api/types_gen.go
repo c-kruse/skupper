@@ -179,6 +179,32 @@ type ListenerResponse struct {
 	Results *ListenerRecord `json:"results,omitempty"`
 }
 
+// ProcessGroupListResponse defines model for ProcessGroupListResponse.
+type ProcessGroupListResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results []ProcessGroupRecord `json:"results"`
+}
+
+// ProcessGroupRecord defines model for ProcessGroupRecord.
+type ProcessGroupRecord struct {
+	// Embedded struct due to allOf(#/components/schemas/baseRecord)
+	BaseRecord `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Name             string `json:"name"`
+	ProcessCount     int    `json:"processCount"`
+	ProcessGroupRole string `json:"processGroupRole"`
+}
+
+// ProcessGroupResponse defines model for ProcessGroupResponse.
+type ProcessGroupResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results *ProcessGroupRecord `json:"results,omitempty"`
+}
+
 // ProcessListResponse defines model for ProcessListResponse.
 type ProcessListResponse struct {
 	// Embedded struct due to allOf(#/components/schemas/baseResponse)
@@ -397,6 +423,12 @@ type GetListeners = ListenerListResponse
 // GetProcessByID defines model for getProcessByID.
 type GetProcessByID = ProcessResponse
 
+// GetProcessGroupByID defines model for getProcessGroupByID.
+type GetProcessGroupByID = ProcessGroupResponse
+
+// GetProcessGroups defines model for getProcessGroups.
+type GetProcessGroups = ProcessGroupListResponse
+
 // GetProcesses defines model for getProcesses.
 type GetProcesses = ProcessListResponse
 
@@ -453,6 +485,12 @@ type ServerInterface interface {
 
 	// (GET /api/v1alpha1/connectors/{id}/)
 	ConnectorByID(w http.ResponseWriter, r *http.Request, id PathID)
+
+	// (GET /api/v1alpha1/hosts/)
+	Hosts(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1alpha1/hosts/{id}/)
+	HostsByID(w http.ResponseWriter, r *http.Request, id PathID)
 
 	// (GET /api/v1alpha1/links/)
 	Links(w http.ResponseWriter, r *http.Request)
@@ -546,6 +584,9 @@ type ServerInterface interface {
 
 	// (GET /api/v1alpha1/sites/{id}/flows/)
 	FlowsBySite(w http.ResponseWriter, r *http.Request, id PathID)
+
+	// (GET /api/v1alpha1/sites/{id}/hosts/)
+	HostsBySite(w http.ResponseWriter, r *http.Request, id PathID)
 
 	// (GET /api/v1alpha1/sites/{id}/links/)
 	LinksBySite(w http.ResponseWriter, r *http.Request, id PathID)
@@ -743,6 +784,47 @@ func (siw *ServerInterfaceWrapper) ConnectorByID(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ConnectorByID(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// Hosts operation middleware
+func (siw *ServerInterfaceWrapper) Hosts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Hosts(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// HostsByID operation middleware
+func (siw *ServerInterfaceWrapper) HostsByID(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", mux.Vars(r)["id"], &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.HostsByID(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1437,6 +1519,32 @@ func (siw *ServerInterfaceWrapper) FlowsBySite(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// HostsBySite operation middleware
+func (siw *ServerInterfaceWrapper) HostsBySite(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", mux.Vars(r)["id"], &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.HostsBySite(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
 // LinksBySite operation middleware
 func (siw *ServerInterfaceWrapper) LinksBySite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -1644,6 +1752,10 @@ func HandlerWithOptions(si ServerInterface, options GorillaServerOptions) http.H
 
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/connectors/{id}/", wrapper.ConnectorByID).Methods("GET")
 
+	r.HandleFunc(options.BaseURL+"/api/v1alpha1/hosts/", wrapper.Hosts).Methods("GET")
+
+	r.HandleFunc(options.BaseURL+"/api/v1alpha1/hosts/{id}/", wrapper.HostsByID).Methods("GET")
+
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/links/", wrapper.Links).Methods("GET")
 
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/links/{id}/", wrapper.LinkByID).Methods("GET")
@@ -1705,6 +1817,8 @@ func HandlerWithOptions(si ServerInterface, options GorillaServerOptions) http.H
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/", wrapper.SiteById).Methods("GET")
 
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/flows/", wrapper.FlowsBySite).Methods("GET")
+
+	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/hosts/", wrapper.HostsBySite).Methods("GET")
 
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/links/", wrapper.LinksBySite).Methods("GET")
 

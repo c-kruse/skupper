@@ -52,6 +52,16 @@ func (r *ListenerResponse) Set(e *ListenerRecord) {
 }
 
 // Set result
+func (r *ProcessGroupListResponse) Set(e []ProcessGroupRecord) {
+	r.Results = e
+}
+
+// Set result
+func (r *ProcessGroupResponse) Set(e *ProcessGroupRecord) {
+	r.Results = e
+}
+
+// Set result
 func (r *ProcessListResponse) Set(e []ProcessRecord) {
 	r.Results = e
 }

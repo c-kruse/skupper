@@ -135,8 +135,9 @@ func (m fieldIndex[T]) MatchesFilter(e T, values []string) bool {
 		}
 		val = val.Elem()
 	}
-	switch target := val.Interface().(type) {
-	case string:
+	switch val.Kind() {
+	case reflect.String:
+		target := val.String()
 		for _, y := range values {
 			if y == "" {
 				continue
@@ -145,14 +146,14 @@ func (m fieldIndex[T]) MatchesFilter(e T, values []string) bool {
 				return true
 			}
 		}
-	case uint64:
-		return numInStringSlice(target, values)
-	case int32:
-		return numInStringSlice(target, values)
-	case int64:
-		return numInStringSlice(target, values)
-	case int:
-		return numInStringSlice(target, values)
+	case reflect.Uint64:
+		return numInStringSlice(val.Uint(), values)
+	case reflect.Int32:
+		fallthrough
+	case reflect.Int64:
+		fallthrough
+	case reflect.Int:
+		return numInStringSlice(val.Int(), values)
 	}
 	return false
 }

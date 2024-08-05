@@ -115,7 +115,7 @@ paths:
       operationId: processgroups
       responses:
         '200':
-          $ref: '#/components/responses/getAddresses'
+          $ref: '#/components/responses/getProcessGroups'
   /api/v1alpha1/processgroups/{id}/:
     get:
       tags: ["process group"]
@@ -124,7 +124,7 @@ paths:
         - $ref: '#/components/parameters/pathID'
       responses:
         '200':
-          $ref: '#/components/responses/getAddressByID'
+          $ref: '#/components/responses/getProcessGroupByID'
   /api/v1alpha1/sitepairs/:
     get:
       tags: ["flow aggregate"]
@@ -211,7 +211,7 @@ paths:
       deprecated: true
       operationId: links
       responses:
-        '410':
+        '200':
           $ref: '#/components/responses/getLinks'
   /api/v1alpha1/links/{id}/:
     get:
@@ -221,9 +221,26 @@ paths:
       parameters:
         - $ref: '#/components/parameters/pathID'
       responses:
-        '410':
+        '200':
           $ref: '#/components/responses/getLinkByID'
-
+  /api/v1alpha1/hosts/:
+    get:
+      tags: [deprecated]
+      deprecated: true
+      operationId: hosts
+      responses:
+        '410':
+          $ref: '#/components/responses/notSupported'
+  /api/v1alpha1/hosts/{id}/:
+    get:
+      tags: [deprecated]
+      deprecated: true
+      operationId: hostsByID
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '200':
+          $ref: '#/components/responses/notSupported'
 
   /api/v1alpha1/sites/{id}/processes/:
     get:
@@ -257,6 +274,16 @@ paths:
     get:
       tags: [site]
       operationId: flowsBySite
+      deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '410':
+          $ref: '#/components/responses/notSupported'
+  /api/v1alpha1/sites/{id}/hosts/:
+    get:
+      tags: [site]
+      operationId: hostsBySite
       deprecated: true
       parameters:
         - $ref: '#/components/parameters/pathID'
@@ -432,7 +459,7 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AddressListResponse'
-    getProcessGroup:
+    getProcessGroups:
       description: response with a list of process groups
       content:
         application/json:

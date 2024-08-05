@@ -29,12 +29,12 @@ type Config struct {
 func NewServer(cfg Config,
 	logger *slog.Logger,
 	recordStore store.Interface,
-	graph *collector.Graph,
+	c *collector.Collector,
 	metricsRegistry *prometheus.Registry,
 	specFS fs.FS) http.Handler {
 	router := mux.NewRouter()
 
-	server := buildServer(logger, recordStore, graph)
+	server := buildServer(logger, recordStore, c)
 
 	var middlewares []mux.MiddlewareFunc = []mux.MiddlewareFunc{
 		handlers.CompressHandler,

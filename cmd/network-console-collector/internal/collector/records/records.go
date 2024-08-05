@@ -1,4 +1,4 @@
-package collector
+package records
 
 import (
 	"time"
@@ -9,9 +9,10 @@ import (
 var _ vanflow.Record = AddressRecord{}
 
 type AddressRecord struct {
-	ID    string
-	Name  string
-	Start time.Time
+	ID       string
+	Name     string
+	Protocol string
+	Start    time.Time
 }
 
 func (r AddressRecord) Identity() string {

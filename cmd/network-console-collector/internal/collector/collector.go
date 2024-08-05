@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/graph"
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/records"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/eventsource"
 	"github.com/skupperproject/skupper/pkg/vanflow/session"
@@ -30,7 +32,6 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 		purgeQueue:    make(chan store.SourceRef, 8),
 		events:        make(chan changeEvent, 32),
 		clients:       make(map[string]*eventsource.Client),
-		Graph:         &Graph{},
 	}
 
 	c.Records = store.NewSyncMapStore(store.SyncMapStoreConfig{
@@ -56,12 +57,13 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 	// c.recordMapping[vanflow.BIFlowT{}.GetTypeMeta().String()] = c.flows
 	// c.recordMapping[vanflow.BIFlowA{}.GetTypeMeta().String()] = c.flows
 
+	c.g = graph.NewGraph(c.Records)
 	return c
 }
 
 type Collector struct {
 	Records       store.Interface
-	Graph         *Graph
+	g             *graph.Graph
 	recordMapping eventsource.RecordStoreMap
 
 	session   session.Container
@@ -178,33 +180,30 @@ func (c *Collector) Run(ctx context.Context) error {
 }
 
 func (c *Collector) handleStoreAdd(e store.Entry) {
-	if err := c.Graph.Record(e.Record); err != nil {
-		c.logger.Error("graphing error", slog.Any("error", err))
-	}
 	c.events <- addEvent{Record: e.Record}
 }
 
 func (c *Collector) handleStoreChange(p, e store.Entry) {
-	if err := c.Graph.Record(e.Record); err != nil {
-		c.logger.Error("graphing error", slog.Any("error", err))
-	}
 	c.events <- updateEvent{Prev: p.Record, Curr: e.Record}
 }
 func (c *Collector) handleStoreDelete(e store.Entry) {
-	c.Graph.Remove(e.Record)
 	c.events <- deleteEvent{Record: e.Record}
 }
 
 func (c *Collector) updateGraph(event changeEvent, stor store.Interface) {
 	if dEvent, ok := event.(deleteEvent); ok {
-		c.Graph.Remove(dEvent.Record)
+		c.g.Unindex(dEvent.Record)
 		return
 	}
 	entry, ok := stor.Get(event.ID())
 	if !ok {
 		return
 	}
-	c.Graph.Record(entry.Record)
+	c.g.Reindex(entry.Record)
+}
+
+func (c *Collector) GetNode(id string) graph.Node {
+	return c.g.Get(id)
 }
 
 func (c *Collector) runWorkQueue(ctx context.Context) func() error {
@@ -215,6 +214,7 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddress)
 	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddress)
 	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroup)
+	reactors[records.AddressRecord{}.GetTypeMeta()] = append(reactors[records.AddressRecord{}.GetTypeMeta()], c.updateGraph)
 	return func() error {
 		for {
 			select {
@@ -247,11 +247,11 @@ func ensureProcessGroup(event changeEvent, stor store.Interface) {
 		startTime = proccess.StartTime.Time
 	}
 
-	groups := stor.Index(IndexByTypeName, store.Entry{Record: ProcessGroupRecord{Name: groupName}})
+	groups := stor.Index(IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: groupName}})
 	if len(groups) > 0 {
 		return
 	}
-	stor.Add(ProcessGroupRecord{ID: uuid.New().String(), Name: groupName, Start: startTime}, store.SourceRef{})
+	stor.Add(records.ProcessGroupRecord{ID: uuid.New().String(), Name: groupName, Start: startTime}, store.SourceRef{})
 }
 
 func ensureAddress(event changeEvent, stor store.Interface) {
@@ -265,6 +265,7 @@ func ensureAddress(event changeEvent, stor store.Interface) {
 	var (
 		address   string
 		startTime time.Time
+		protocol  string = "tcp"
 	)
 	switch r := entry.Record.(type) {
 	case vanflow.ListenerRecord:
@@ -274,6 +275,9 @@ func ensureAddress(event changeEvent, stor store.Interface) {
 		if r.StartTime != nil {
 			startTime = r.StartTime.Time
 		}
+		if r.Protocol != nil {
+			protocol = *r.Protocol
+		}
 	case vanflow.ConnectorRecord:
 		if r.Address != nil {
 			address = *r.Address
@@ -281,16 +285,19 @@ func ensureAddress(event changeEvent, stor store.Interface) {
 		if r.StartTime != nil {
 			startTime = r.StartTime.Time
 		}
+		if r.Protocol != nil {
+			protocol = *r.Protocol
+		}
 	default:
 	}
 	if address == "" {
 		return
 	}
-	addresses := stor.Index(IndexByTypeName, store.Entry{Record: AddressRecord{Name: address}})
+	addresses := stor.Index(IndexByTypeName, store.Entry{Record: records.AddressRecord{Name: address}})
 	if len(addresses) > 0 {
 		return
 	}
-	stor.Add(AddressRecord{ID: uuid.New().String(), Name: address, Start: startTime}, store.SourceRef{})
+	stor.Add(records.AddressRecord{ID: uuid.New().String(), Name: address, Protocol: protocol, Start: startTime}, store.SourceRef{})
 }
 
 func (c *Collector) runSession(ctx context.Context) func() error {
@@ -394,9 +401,9 @@ func indexByTypeName(e store.Entry) []string {
 		return nil
 	}
 	switch record := e.Record.(type) {
-	case AddressRecord:
+	case records.AddressRecord:
 		return optionalSingle(record.GetTypeMeta().String(), &record.Name)
-	case ProcessGroupRecord:
+	case records.ProcessGroupRecord:
 		return optionalSingle(record.GetTypeMeta().String(), &record.Name)
 	case vanflow.SiteRecord:
 		return optionalSingle(record.GetTypeMeta().String(), record.Name)
