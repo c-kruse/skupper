@@ -210,23 +210,47 @@ func (c *Collector) Run(ctx context.Context) error {
 }
 
 func (c *Collector) handleStoreAdd(e store.Entry) {
-	c.events <- addEvent{Record: e.Record}
+	select {
+	case c.events <- addEvent{Record: e.Record}:
+	default:
+		c.logger.Error("Store event queue full")
+	}
 }
 
 func (c *Collector) handleStoreChange(p, e store.Entry) {
-	c.events <- updateEvent{Prev: p.Record, Curr: e.Record}
+
+	select {
+	case c.events <- updateEvent{Prev: p.Record, Curr: e.Record}:
+	default:
+		c.logger.Error("Store event queue full")
+	}
 }
 func (c *Collector) handleStoreDelete(e store.Entry) {
-	c.events <- deleteEvent{Record: e.Record}
+
+	select {
+	case c.events <- deleteEvent{Record: e.Record}:
+	default:
+		c.logger.Error("Store event queue full")
+	}
 }
 
 func (c *Collector) handleFlowAdd(e store.Entry) {
-	c.flowEvents <- addEvent{Record: e.Record}
+
+	select {
+	case c.flowEvents <- addEvent{Record: e.Record}:
+	default:
+		c.logger.Error("Flow event queue full")
+	}
 }
 
 func (c *Collector) handleFlowChange(p, e store.Entry) {
-	c.flowEvents <- updateEvent{Prev: p.Record, Curr: e.Record}
+	select {
+	case c.flowEvents <- updateEvent{Prev: p.Record, Curr: e.Record}:
+	default:
+		c.logger.Error("Flow event queue full")
+	}
 }
+
 func (c *Collector) handleFlowDelete(e store.Entry) {
 	c.flowEvents <- deleteEvent{Record: e.Record}
 }
@@ -282,128 +306,6 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 			}
 		}
 	}
-}
-
-func (c *Collector) flowHandler(event changeEvent) {
-	if _, ok := event.(deleteEvent); ok {
-		return
-	}
-	flowEntry, ok := c.Flows.Get(event.ID())
-	if !ok {
-		return
-	}
-	switch flow := flowEntry.Record.(type) {
-	case vanflow.BIFlowTPRecord:
-		flowCtx := &flowContext{}
-		ok := flowCtx.LoadFromFlow(c.Records, c.g, flow)
-
-		log := c.logger.With(
-			slog.String("id", flow.ID),
-			slog.String("type", "transport"),
-			slog.String("listener", flowCtx.Listener.ID),
-			slog.String("connector", flowCtx.Connector.ID),
-			slog.String("source_site", flowCtx.SourceSite.ID),
-			slog.String("source_proc", flowCtx.Source.ID),
-			slog.String("dest_site", flowCtx.DestSite.ID),
-			slog.String("dest_proc", flowCtx.Dest.ID),
-			slog.Time("begin", dref(flow.StartTime).Time),
-			slog.Time("end", dref(flow.EndTime).Time),
-		)
-		if !ok {
-			log.Info("FLOW INCOMPLETE")
-			return
-		}
-		log.Info(fmt.Sprintf("FLOW: %d - %d", dref(flow.Octets), dref(flow.OctetsReverse)))
-
-		idp := newStableIdentityProvider()
-		c.Records.Add(flowCtx.SitePair(idp), store.SourceRef{ID: "self"})
-		c.Records.Add(flowCtx.ProcPair(idp), store.SourceRef{ID: "self"})
-	default:
-		return // skip
-
-	}
-}
-
-type flowContext struct {
-	Source     vanflow.ProcessRecord
-	Listener   vanflow.ListenerRecord
-	SourceSite vanflow.SiteRecord
-
-	Dest      vanflow.ProcessRecord
-	Connector vanflow.ConnectorRecord
-	DestSite  vanflow.SiteRecord
-}
-
-func (f *flowContext) SitePair(idp idProvider) records.SitePairRecord {
-	return records.SitePairRecord{
-		ID:       idp.ID("sitepair", f.SourceSite.ID, f.DestSite.ID, dref(f.Connector.Protocol)),
-		Source:   f.SourceSite.ID,
-		Dest:     f.DestSite.ID,
-		Protocol: dref(f.Connector.Protocol),
-		Start:    time.Now(),
-	}
-}
-
-func (f *flowContext) ProcPair(idp idProvider) records.ProcPairRecord {
-	return records.ProcPairRecord{
-		ID:       idp.ID("procpair", f.SourceSite.ID, f.DestSite.ID, dref(f.Connector.Protocol)),
-		Source:   f.SourceSite.ID,
-		Dest:     f.DestSite.ID,
-		Protocol: dref(f.Connector.Protocol),
-		Start:    time.Now(),
-	}
-}
-
-func (f *flowContext) LoadFromFlow(records store.Interface, graph *graph.Graph, flow vanflow.BIFlowTPRecord) bool {
-	var (
-		listenerID  string = dref(flow.Parent)
-		connectorID string = dref(flow.ConnectorID)
-	)
-
-	ln := graph.Listener(listenerID)
-	cn := graph.Connector(connectorID)
-
-	var items int
-	if lentity, ok := ln.Get(); ok {
-		if l, ok := lentity.Record.(vanflow.ListenerRecord); ok {
-			f.Listener = l
-			items++
-		}
-	}
-	if centity, ok := cn.Get(); ok {
-		if c, ok := centity.Record.(vanflow.ConnectorRecord); ok {
-			f.Connector = c
-			items++
-		}
-	}
-	if sentry, ok := ln.Parent().Parent().Get(); ok {
-		if s, ok := sentry.Record.(vanflow.SiteRecord); ok {
-			f.SourceSite = s
-			items++
-		}
-	}
-	if dentry, ok := cn.Parent().Parent().Get(); ok {
-		if d, ok := dentry.Record.(vanflow.SiteRecord); ok {
-			f.DestSite = d
-			items++
-		}
-	}
-	if dentry, ok := cn.Target().Get(); ok {
-		if d, ok := dentry.Record.(vanflow.ProcessRecord); ok {
-			f.Dest = d
-			items++
-		}
-	}
-	sourceSiteID := ln.Parent().Parent().ID()
-	sourceProcs := records.Index(IndexByParentHost, store.Entry{Record: vanflow.ProcessRecord{Parent: &sourceSiteID, SourceHost: flow.SourceHost}})
-	if len(sourceProcs) > 0 {
-		if source, ok := sourceProcs[0].Record.(vanflow.ProcessRecord); ok {
-			f.Source = source
-			items++
-		}
-	}
-
-	return (items == 6)
 }
 
 func dref[T any](p *T) T {
@@ -481,6 +383,7 @@ func ensureSiteServerProcessHandler(idp idProvider, graph *graph.Graph) func(eve
 			role := "external"
 			stor.Add(vanflow.ProcessRecord{
 				BaseRecord: vanflow.NewBase(procID, time.Now()),
+				Parent:     &siteID,
 				Name:       &name,
 				Group:      &groupName,
 				SourceHost: destHost,

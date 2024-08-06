@@ -394,6 +394,14 @@ type TransportFlowRecord struct {
 	SourceSiteName     string  `json:"sourceSiteName"`
 }
 
+// TransportFlowResponse defines model for TransportFlowResponse.
+type TransportFlowResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results *TransportFlowRecord `json:"results,omitempty"`
+}
+
 // BaseRecord defines model for baseRecord.
 type BaseRecord struct {
 	EndTime   uint64  `json:"endTime"`
@@ -492,6 +500,9 @@ type GetSiteByID = SiteResponse
 
 // GetSites defines model for getSites.
 type GetSites = SiteListResponse
+
+// GetTransportFlowByID defines model for getTransportFlowByID.
+type GetTransportFlowByID = TransportFlowResponse
 
 // GetTransportFlows defines model for getTransportFlows.
 type GetTransportFlows = TransportFlowListResponse

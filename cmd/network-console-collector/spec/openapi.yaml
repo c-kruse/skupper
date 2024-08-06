@@ -256,7 +256,7 @@ paths:
         - $ref: '#/components/parameters/pathID'
       responses:
         '200':
-          $ref: '#/components/responses/notSupported'
+          $ref: '#/components/responses/getTransportFlowByID'
 
   /api/v1alpha1/sites/{id}/processes/:
     get:
@@ -577,6 +577,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RouterAccessResponse'
+    getTransportFlowByID:
+      description: response with a single transport flow
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TransportFlowResponse'
   schemas:
     baseResponse:
       type: object

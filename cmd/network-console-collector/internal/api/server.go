@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector"
-	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/graph"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/records"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
@@ -672,63 +671,51 @@ func (c *server) asTransportFlow(entry store.Entry) (TransportFlowRecord, bool) 
 	}
 
 	state := c.coll.FlowInfo(record.ID)
-	var protocol string
-	if c, ok := state.Connector.Get(); ok {
-		if conn, ok := c.Record.(vanflow.ConnectorRecord); ok {
-			protocol = dref(conn.Protocol)
-		}
-	}
-
 	var (
-		source     vanflow.ProcessRecord
-		sourceSite vanflow.SiteRecord
-		dest       vanflow.ProcessRecord
-		cnctr      vanflow.ConnectorRecord
-		destSite   vanflow.SiteRecord
+		dest  vanflow.ProcessRecord
+		cnctr vanflow.ConnectorRecord
 	)
 
-	source, _ = recordFromNode[vanflow.ProcessRecord](state.Source)
-	sourceSite, _ = recordFromNode[vanflow.SiteRecord](state.Source.Parent())
-	dest, _ = recordFromNode[vanflow.ProcessRecord](state.Dest)
-	destSite, _ = recordFromNode[vanflow.SiteRecord](state.Dest.Parent())
-	cnctr, _ = recordFromNode[vanflow.ConnectorRecord](state.Connector)
+	if de, ok := c.records.Get(state.DestProcID); ok {
+		if r, ok := de.Record.(vanflow.ProcessRecord); ok {
+			dest = r
+		}
+	}
+	if ce, ok := c.records.Get(state.ConnectorID); ok {
+		if r, ok := ce.Record.(vanflow.ConnectorRecord); ok {
+			cnctr = r
+		}
+	}
 	return TransportFlowRecord{
 		BaseRecord:        toBase(record.BaseRecord, nil, entry.Source.ID),
 		DestHost:          dref(dest.SourceHost),
 		DestPort:          dref(cnctr.DestPort),
-		DestProcessId:     dest.ID,
-		DestProcessName:   dref(dest.Name),
-		DestSiteId:        destSite.ID,
-		DestSiteName:      dref(destSite.Name),
+		DestProcessId:     state.DestProcID,
+		DestProcessName:   state.DestProcName,
+		DestSiteId:        state.DestSiteID,
+		DestSiteName:      state.DestSiteName,
 		Duration:          nil,
 		FlowTrace:         dref(record.Trace),
 		Latency:           dref(record.Latency),
 		LatencyReverse:    dref(record.LatencyReverse),
 		Octets:            dref(record.Octets),
 		OctetsReverse:     dref(record.OctetsReverse),
-		Protocol:          protocol,
+		Protocol:          state.Protocol,
 		SourceHost:        dref(record.SourceHost),
 		SourcePort:        dref(record.SourcePort),
-		SourceProcessId:   source.ID,
-		SourceProcessName: dref(source.Name),
-		SourceSiteId:      sourceSite.ID,
-		SourceSiteName:    dref(sourceSite.Name),
+		SourceProcessId:   state.SourceProcID,
+		SourceProcessName: state.SourceProcName,
+		SourceSiteId:      state.SourceSiteID,
+		SourceSiteName:    state.SourceSiteName,
 	}, true
-}
-
-func recordFromNode[R vanflow.Record, T graph.Node](node T) (R, bool) {
-	var r R
-	entry, ok := node.Get()
-	if !ok {
-		return r, false
-	}
-	r, ok = entry.Record.(R)
-	return r, ok
 }
 
 // (GET /api/v1alpha1/transportflows/{id}/)
 func (c *server) TransportflowByID(w http.ResponseWriter, r *http.Request, id PathID) {
-	encode(w, http.StatusOK, emptySingleResponse)
+	err := handleOptionalResult(w, &TransportFlowResponse{}, withMapping(c.asTransportFlow).ByID(c.coll.Flows, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 func (c *server) logWriteError(r *http.Request, err error) {

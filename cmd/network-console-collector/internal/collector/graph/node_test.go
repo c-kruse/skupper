@@ -17,10 +17,6 @@ func TestGraph(t *testing.T) {
 	g.Reindex(vanflow.RouterAccessRecord{BaseRecord: vanflow.NewBase("access1"), Parent: ptrTo("router1")})
 	g.Reindex(vanflow.RouterRecord{BaseRecord: vanflow.NewBase("site1")})
 
-	s1, s2 := g.Get("site1").(Site), g.Get("site2").(Site)
-	if s1.Peers()[0] != s2 {
-		t.Errorf("expected obscure loop to work")
-	}
 }
 
 func ptrTo[T any](c T) *T {

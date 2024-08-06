@@ -12,8 +12,6 @@ import (
 type Graph struct {
 	dag  *dag.DAG
 	stor store.Interface
-
-	verticies map[string]Node
 }
 
 func NewGraph(stor store.Interface) *Graph {
@@ -217,11 +215,6 @@ func (n Site) Links() []Link {
 		out = append(out, childrenByType[Link](n.dag, router.ID())...)
 	}
 	return out
-}
-
-func typeIs[T Node](n Node) bool {
-	_, ok := n.(T)
-	return ok
 }
 
 func (n Site) RouterAccess() []RouterAccess {
