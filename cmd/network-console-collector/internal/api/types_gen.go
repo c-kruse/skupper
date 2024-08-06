@@ -357,6 +357,43 @@ type SiteResponse struct {
 	Results *SiteRecord `json:"results,omitempty"`
 }
 
+// TransportFlowListResponse defines model for TransportFlowListResponse.
+type TransportFlowListResponse struct {
+	// Embedded struct due to allOf(#/components/schemas/baseResponse)
+	BaseResponse `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	Results []TransportFlowRecord `json:"results"`
+}
+
+// TransportFlowRecord defines model for TransportFlowRecord.
+type TransportFlowRecord struct {
+	// Embedded struct due to allOf(#/components/schemas/baseRecord)
+	BaseRecord `yaml:",inline"`
+	// Embedded fields due to inline allOf schema
+	DestHost           string  `json:"destHost"`
+	DestPort           string  `json:"destPort"`
+	DestProcessId      string  `json:"destProcessId"`
+	DestProcessName    string  `json:"destProcessName"`
+	DestSiteId         string  `json:"destSiteId"`
+	DestSiteName       string  `json:"destSiteName"`
+	Duration           *uint64 `json:"duration,omitempty"`
+	FlowTrace          string  `json:"flowTrace"`
+	Latency            uint64  `json:"latency"`
+	LatencyReverse     uint64  `json:"latencyReverse"`
+	Octets             uint64  `json:"octets"`
+	OctetsReverse      uint64  `json:"octetsReverse"`
+	ProcessGroupPairId string  `json:"processGroupPairId"`
+	ProcessPairId      string  `json:"processPairId"`
+	Protocol           string  `json:"protocol"`
+	SitePairId         string  `json:"sitePairId"`
+	SourceHost         string  `json:"sourceHost"`
+	SourcePort         string  `json:"sourcePort"`
+	SourceProcessId    string  `json:"sourceProcessId"`
+	SourceProcessName  string  `json:"sourceProcessName"`
+	SourceSiteId       string  `json:"sourceSiteId"`
+	SourceSiteName     string  `json:"sourceSiteName"`
+}
+
 // BaseRecord defines model for baseRecord.
 type BaseRecord struct {
 	EndTime   uint64  `json:"endTime"`
@@ -455,6 +492,9 @@ type GetSiteByID = SiteResponse
 
 // GetSites defines model for getSites.
 type GetSites = SiteListResponse
+
+// GetTransportFlows defines model for getTransportFlows.
+type GetTransportFlows = TransportFlowListResponse
 
 // NotSupported defines model for notSupported.
 type NotSupported = ErrorResponse
@@ -596,6 +636,12 @@ type ServerInterface interface {
 
 	// (GET /api/v1alpha1/sites/{id}/routers/)
 	RoutersBySite(w http.ResponseWriter, r *http.Request, id PathID)
+
+	// (GET /api/v1alpha1/transportflows/)
+	Transportflows(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1alpha1/transportflows/{id}/)
+	TransportflowByID(w http.ResponseWriter, r *http.Request, id PathID)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -1623,6 +1669,47 @@ func (siw *ServerInterfaceWrapper) RoutersBySite(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// Transportflows operation middleware
+func (siw *ServerInterfaceWrapper) Transportflows(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Transportflows(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// TransportflowByID operation middleware
+func (siw *ServerInterfaceWrapper) TransportflowByID(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id PathID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", mux.Vars(r)["id"], &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TransportflowByID(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -1825,6 +1912,10 @@ func HandlerWithOptions(si ServerInterface, options GorillaServerOptions) http.H
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/processes/", wrapper.ProcessesBySite).Methods("GET")
 
 	r.HandleFunc(options.BaseURL+"/api/v1alpha1/sites/{id}/routers/", wrapper.RoutersBySite).Methods("GET")
+
+	r.HandleFunc(options.BaseURL+"/api/v1alpha1/transportflows/", wrapper.Transportflows).Methods("GET")
+
+	r.HandleFunc(options.BaseURL+"/api/v1alpha1/transportflows/{id}/", wrapper.TransportflowByID).Methods("GET")
 
 	return r
 }

@@ -241,6 +241,22 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/notSupported'
+  /api/v1alpha1/transportflows/:
+    get:
+      tags: [biflow]
+      operationId: transportflows
+      responses:
+        '200':
+          $ref: '#/components/responses/getTransportFlows'
+  /api/v1alpha1/transportflows/{id}/:
+    get:
+      tags: [biflow]
+      operationId: transportflowByID
+      parameters:
+        - $ref: '#/components/parameters/pathID'
+      responses:
+        '200':
+          $ref: '#/components/responses/notSupported'
 
   /api/v1alpha1/sites/{id}/processes/:
     get:
@@ -489,6 +505,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RouterAccessListResponse'
+    getTransportFlows:
+      description: response with a list of transport flows
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TransportFlowListResponse'
     getSiteByID:
       description: response with a single site
       content:
@@ -777,6 +799,23 @@ components:
           properties:
             results:
               $ref: '#/components/schemas/RouterAccessRecord'
+    TransportFlowListResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          required: [results]
+          properties:
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/TransportFlowRecord'
+    TransportFlowResponse:
+      allOf:
+        - $ref: '#/components/schemas/baseResponse'
+        - type: object
+          properties:
+            results:
+              $ref: '#/components/schemas/TransportFlowRecord'
     baseRecord:
       type: object
       required:
@@ -1088,6 +1127,83 @@ components:
               format: uint64
             role:
               type: string
+    TransportFlowRecord:
+      allOf:
+        - $ref: '#/components/schemas/baseRecord'
+        - type: object
+          required:
+            - protocol
+            - sourceSiteId
+            - sourceSiteName
+            - sourceProcessId
+            - sourceProcessName
+            - destSiteId
+            - destSiteName
+            - destProcessId
+            - destProcessName
+            - flowTrace
+            - sitePairId
+            - processPairId
+            - processGroupPairId
+            - sourceHost
+            - sourcePort
+            - destHost
+            - destPort
+            - latency
+            - latencyReverse
+            - octets
+            - octetsReverse
+          properties:
+            protocol:
+              type: string
+            sourceSiteId:
+              type: string
+            sourceSiteName:
+              type: string
+            sourceProcessId:
+              type: string
+            sourceProcessName:
+              type: string
+            destSiteId:
+              type: string
+            destSiteName:
+              type: string
+            destProcessId:
+              type: string
+            destProcessName:
+              type: string
+            flowTrace:
+              type: string
+            sitePairId:
+              type: string
+            processPairId:
+              type: string
+            processGroupPairId:
+              type: string
+            sourceHost:
+              type: string
+            sourcePort:
+              type: string
+            destHost:
+              type: string
+            destPort:
+              type: string
+            latency:
+              type: integer
+              format: uint64
+            latencyReverse:
+              type: integer
+              format: uint64
+            octets:
+              type: integer
+              format: uint64
+            octetsReverse:
+              type: integer
+              format: uint64
+
+            duration:
+              type: integer
+              format: uint64
 tags:
   - name: site
     description: requests involving Site records

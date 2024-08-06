@@ -82,7 +82,7 @@ func (c *server) ProcessesBySite(w http.ResponseWriter, r *http.Request, id stri
 	entries := index(c.records, collector.IndexByTypeParent, exemplar)
 	results := make([]ProcessRecord, len(entries))
 	for i := range entries {
-		results[i], _ = toProcessRecord(entries[i])
+		results[i], _ = c.asProcessRecord(entries[i])
 	}
 
 	if err := handleResultSet(w, r, &ProcessListResponse{}, results); err != nil {
@@ -97,15 +97,12 @@ func (c *server) FlowsBySite(w http.ResponseWriter, r *http.Request, id string) 
 
 // (GET /api/v1alpha1/sites/{id}/links/)
 func (c *server) LinksBySite(w http.ResponseWriter, r *http.Request, id string) {
-	var linkEntries []store.Entry
-	siteNode, ok := c.coll.GetNode(id).(graph.Site)
-	if ok {
-		linkNodes := siteNode.Links()
-		linkEntries = make([]store.Entry, 0, len(linkNodes))
-		for _, ln := range linkNodes {
-			if le, ok := ln.Get(); ok {
-				linkEntries = append(linkEntries, le)
-			}
+	siteNode := c.coll.Graph().Site(id)
+	linkNodes := siteNode.Links()
+	linkEntries := make([]store.Entry, 0, len(linkNodes))
+	for _, ln := range linkNodes {
+		if le, ok := ln.Get(); ok {
+			linkEntries = append(linkEntries, le)
 		}
 	}
 	results := make([]LinkRecord, 0, len(linkEntries))
@@ -122,12 +119,56 @@ func (c *server) LinksBySite(w http.ResponseWriter, r *http.Request, id string) 
 
 // (GET /api/v1alpha1/sitepairs/)
 func (c *server) Sitepairs(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	entries := listByType[records.SitePairRecord](c.records)
+	results := make([]FlowAggregateRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asSitePairs(entries[i])
+	}
+	if err := handleResultSet(w, r, &FlowAggregateListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+
+func (c *server) asSitePairs(entry store.Entry) (FlowAggregateRecord, bool) {
+	record, ok := entry.Record.(records.SitePairRecord)
+	if !ok {
+		return FlowAggregateRecord{}, false
+	}
+	var (
+		sourceName string
+		destName   string
+	)
+	if ss, ok := c.coll.Graph().Site(record.Source).Get(); ok {
+		if sr, ok := ss.Record.(vanflow.SiteRecord); ok {
+			sourceName = dref(sr.Name)
+		}
+	}
+	if ds, ok := c.coll.Graph().Site(record.Dest).Get(); ok {
+		if dr, ok := ds.Record.(vanflow.SiteRecord); ok {
+			destName = dref(dr.Name)
+		}
+	}
+	return FlowAggregateRecord{
+		BaseRecord: BaseRecord{
+			Identity:  record.ID,
+			StartTime: uint64(record.Start.UnixMicro()),
+		},
+		PairType:        FlowAggregatePairTypeSITE,
+		Protocol:        record.Protocol,
+		SourceId:        record.Source,
+		SourceName:      sourceName,
+		DestinationId:   record.Dest,
+		DestinationName: destName,
+		RecordCount:     record.Count,
+	}, true
 }
 
 // (GET /api/v1alpha1/sitepairs/{id}/)
 func (c *server) SitepairByID(w http.ResponseWriter, r *http.Request, id string) {
-	encode(w, http.StatusNotFound, emptySingleResponse)
+	err := handleOptionalResult(w, &FlowAggregateResponse{}, withMapping(c.asSitePairs).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routers/)
@@ -238,9 +279,8 @@ func (c *server) asConnectorRecord(in store.Entry) (ConnectorRecord, bool) {
 		addressID  string
 		targetName string
 	)
-	if cn, ok := c.coll.GetNode(record.ID).(graph.Connector); ok {
-		addressID = cn.Address().ID()
-	}
+	cn := c.coll.Graph().Connector(record.ID)
+	addressID = cn.Address().ID()
 	if record.ProcessID != nil {
 		p, ok := c.records.Get(*record.ProcessID)
 		if ok {
@@ -288,14 +328,9 @@ func (c *server) asLinkRecord(in store.Entry) (r LinkRecord, ok bool) {
 	if link.Status == nil || *link.Status != "up" || link.Peer == nil {
 		return r, false
 	}
-	var (
-		sourceSiteID string
-		destSiteID   string
-	)
-	if link, ok := c.coll.GetNode(link.ID).(graph.Link); ok {
-		sourceSiteID = link.Parent().Parent().ID()
-		destSiteID = link.Peer().Parent().Parent().ID()
-	}
+	linkNode := c.coll.Graph().Link(link.ID)
+	sourceSiteID := linkNode.Parent().Parent().ID()
+	destSiteID := linkNode.Peer().Parent().Parent().ID()
 	return LinkRecord{
 		BaseRecord:        toBase(link.BaseRecord, link.Parent, in.Source.ID),
 		Name:              dref(link.Name),
@@ -314,12 +349,22 @@ func (c *server) LinkByID(w http.ResponseWriter, r *http.Request, id string) {
 
 // (GET /api/v1alpha1/routeraccess/)
 func (c *server) Routeraccess(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	entries := listByType[vanflow.RouterAccessRecord](c.records)
+	results := make([]RouterAccessRecord, len(entries))
+	for i := range entries {
+		results[i], _ = toRouterAccessRecord(entries[i])
+	}
+	if err := handleResultSet(w, r, &RouterAccessListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 // (GET /api/v1alpha1/routeraccess/{id}/)
 func (c *server) RouteraccessByID(w http.ResponseWriter, r *http.Request, id string) {
-	encode(w, http.StatusNotFound, emptySingleResponse)
+	err := handleOptionalResult(w, &RouterAccessResponse{}, withMapping(toRouterAccessRecord).ByID(c.records, id))
+	if err != nil {
+		c.logWriteError(r, err)
+	}
 }
 
 func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
@@ -331,7 +376,8 @@ func (c *server) asAddress(entry store.Entry) (AddressRecord, bool) {
 		listenerCt  int
 		connectorCt int
 	)
-	addressNode := c.coll.GetNode(record.ID).(graph.Address)
+
+	addressNode := c.coll.Graph().Address(record.ID)
 
 	listenerCt = len(addressNode.Listeners())
 	connectorCt = len(addressNode.Connectors())
@@ -361,11 +407,9 @@ func (c *server) asRouterLink(entry store.Entry) (RouterLinkRecord, bool) {
 	if link.Status != nil && *link.Status == string(OperStatusTypeUp) {
 		status = OperStatusTypeUp
 	}
-	n := c.coll.GetNode(link.ID)
-	sourceSiteID = n.Parent().Parent().ID()
-	if linkNode, ok := n.(graph.Link); ok {
-		destSiteID = linkNode.Peer().Parent().Parent().ID()
-	}
+	linkNode := c.coll.Graph().Link(link.ID)
+	sourceSiteID = linkNode.Parent().Parent().ID()
+	destSiteID = linkNode.Peer().Parent().Parent().ID()
 	return RouterLinkRecord{
 		BaseRecord:        toBase(link.BaseRecord, nil, entry.Source.ID),
 		LinkCost:          dref(link.LinkCost),
@@ -437,15 +481,14 @@ func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
 			processGroupID = &gid
 		}
 	}
-	if node, ok := c.coll.GetNode(process.ID).(graph.Process); ok {
-		for _, cNode := range node.Connectors() {
-			if addressEntry, ok := cNode.Address().Get(); ok {
-				address, ok := addressEntry.Record.(records.AddressRecord)
-				if !ok {
-					continue
-				}
-				addresses = append(addresses, fmt.Sprintf("%s@%s@%s", address.Name, address.ID, "tcp"))
+	node := c.coll.Graph().Process(process.ID)
+	for _, cNode := range node.Connectors() {
+		if addressEntry, ok := cNode.Address().Get(); ok {
+			address, ok := addressEntry.Record.(records.AddressRecord)
+			if !ok {
+				continue
 			}
+			addresses = append(addresses, fmt.Sprintf("%s@%s@%s", address.Name, address.ID, "tcp"))
 		}
 	}
 	if len(addresses) > 0 {
@@ -487,7 +530,47 @@ func (c *server) ConnectorByProcess(w http.ResponseWriter, r *http.Request, id s
 
 // (GET /api/v1alpha1/processpairs/)
 func (c *server) Processpairs(w http.ResponseWriter, r *http.Request) {
-	encode(w, http.StatusOK, emptyListResponse)
+	entries := listByType[records.ProcPairRecord](c.records)
+	results := make([]FlowAggregateRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asProcessPair(entries[i])
+	}
+	if err := handleResultSet(w, r, &FlowAggregateListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+func (c *server) asProcessPair(entry store.Entry) (FlowAggregateRecord, bool) {
+	record, ok := entry.Record.(records.ProcPairRecord)
+	if !ok {
+		return FlowAggregateRecord{}, false
+	}
+	var (
+		sourceName string
+		destName   string
+	)
+	if ss, ok := c.coll.Graph().Process(record.Source).Get(); ok {
+		if sr, ok := ss.Record.(vanflow.ProcessRecord); ok {
+			sourceName = dref(sr.Name)
+		}
+	}
+	if ds, ok := c.coll.Graph().Process(record.Dest).Get(); ok {
+		if dr, ok := ds.Record.(vanflow.ProcessRecord); ok {
+			destName = dref(dr.Name)
+		}
+	}
+	return FlowAggregateRecord{
+		BaseRecord: BaseRecord{
+			Identity:  record.ID,
+			StartTime: uint64(record.Start.UnixMicro()),
+		},
+		PairType:        FlowAggregatePairTypePROCESS,
+		Protocol:        record.Protocol,
+		SourceId:        record.Source,
+		SourceName:      sourceName,
+		DestinationId:   record.Dest,
+		DestinationName: destName,
+		RecordCount:     record.Count,
+	}, true
 }
 
 // (GET /api/v1alpha1/processpairs/{id}/)
@@ -568,6 +651,84 @@ func (c *server) HostsByID(w http.ResponseWriter, r *http.Request, id PathID) {
 }
 func (c *server) HostsBySite(w http.ResponseWriter, r *http.Request, id PathID) {
 	encode(w, http.StatusOK, emptyListResponse)
+}
+
+// (GET /api/v1alpha1/transportflows/)
+func (c *server) Transportflows(w http.ResponseWriter, r *http.Request) {
+	entries := listByType[vanflow.BIFlowTPRecord](c.coll.Flows)
+	results := make([]TransportFlowRecord, len(entries))
+	for i := range entries {
+		results[i], _ = c.asTransportFlow(entries[i])
+	}
+	if err := handleResultSet(w, r, &TransportFlowListResponse{}, results); err != nil {
+		c.logWriteError(r, err)
+	}
+}
+
+func (c *server) asTransportFlow(entry store.Entry) (TransportFlowRecord, bool) {
+	record, ok := entry.Record.(vanflow.BIFlowTPRecord)
+	if !ok {
+		return TransportFlowRecord{}, false
+	}
+
+	state := c.coll.FlowInfo(record.ID)
+	var protocol string
+	if c, ok := state.Connector.Get(); ok {
+		if conn, ok := c.Record.(vanflow.ConnectorRecord); ok {
+			protocol = dref(conn.Protocol)
+		}
+	}
+
+	var (
+		source     vanflow.ProcessRecord
+		sourceSite vanflow.SiteRecord
+		dest       vanflow.ProcessRecord
+		cnctr      vanflow.ConnectorRecord
+		destSite   vanflow.SiteRecord
+	)
+
+	source, _ = recordFromNode[vanflow.ProcessRecord](state.Source)
+	sourceSite, _ = recordFromNode[vanflow.SiteRecord](state.Source.Parent())
+	dest, _ = recordFromNode[vanflow.ProcessRecord](state.Dest)
+	destSite, _ = recordFromNode[vanflow.SiteRecord](state.Dest.Parent())
+	cnctr, _ = recordFromNode[vanflow.ConnectorRecord](state.Connector)
+	return TransportFlowRecord{
+		BaseRecord:        toBase(record.BaseRecord, nil, entry.Source.ID),
+		DestHost:          dref(dest.SourceHost),
+		DestPort:          dref(cnctr.DestPort),
+		DestProcessId:     dest.ID,
+		DestProcessName:   dref(dest.Name),
+		DestSiteId:        destSite.ID,
+		DestSiteName:      dref(destSite.Name),
+		Duration:          nil,
+		FlowTrace:         dref(record.Trace),
+		Latency:           dref(record.Latency),
+		LatencyReverse:    dref(record.LatencyReverse),
+		Octets:            dref(record.Octets),
+		OctetsReverse:     dref(record.OctetsReverse),
+		Protocol:          protocol,
+		SourceHost:        dref(record.SourceHost),
+		SourcePort:        dref(record.SourcePort),
+		SourceProcessId:   source.ID,
+		SourceProcessName: dref(source.Name),
+		SourceSiteId:      sourceSite.ID,
+		SourceSiteName:    dref(sourceSite.Name),
+	}, true
+}
+
+func recordFromNode[R vanflow.Record, T graph.Node](node T) (R, bool) {
+	var r R
+	entry, ok := node.Get()
+	if !ok {
+		return r, false
+	}
+	r, ok = entry.Record.(R)
+	return r, ok
+}
+
+// (GET /api/v1alpha1/transportflows/{id}/)
+func (c *server) TransportflowByID(w http.ResponseWriter, r *http.Request, id PathID) {
+	encode(w, http.StatusOK, emptySingleResponse)
 }
 
 func (c *server) logWriteError(r *http.Request, err error) {

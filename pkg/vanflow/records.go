@@ -21,6 +21,8 @@ func init() {
 	encoding.MustRegisterRecord(13, HostRecord{})
 	encoding.MustRegisterRecord(14, LogRecord{})
 	encoding.MustRegisterRecord(15, RouterAccessRecord{})
+	encoding.MustRegisterRecord(16, BIFlowTPRecord{})
+	encoding.MustRegisterRecord(17, BIFlowAppRecord{})
 }
 
 type SiteRecord struct {
@@ -235,6 +237,7 @@ func (r LogRecord) GetTypeMeta() TypeMeta {
 type RouterAccessRecord struct {
 	BaseRecord
 	Parent    *string `vflow:"2"`
+	Name      *string `vflow:"30"`
 	LinkCount *uint64 `vflow:"52"`
 	Role      *string `vflow:"54"`
 }
@@ -243,5 +246,44 @@ func (r RouterAccessRecord) GetTypeMeta() TypeMeta {
 	return TypeMeta{
 		APIVersion: apiVersion,
 		Type:       "RouterAccessRecord",
+	}
+}
+
+type BIFlowTPRecord struct {
+	BaseRecord
+	Parent      *string `vflow:"2"`
+	ConnectorID *string `vflow:"60"`
+	Trace       *string `vflow:"31"`
+
+	SourceHost *string `vflow:"14"`
+	SourcePort *string `vflow:"17"`
+	Octets     *uint64 `vflow:"23"`
+	Latency    *uint64 `vflow:"24"`
+
+	OctetsReverse  *uint64 `vflow:"58"`
+	LatencyReverse *uint64 `vflow:"61"`
+	ProxyHost      *string `vflow:"62"`
+	ProxyPort      *string `vflow:"63"`
+
+	ErrorListener  *string `vflow:"64"`
+	ErrorConnector *string `vflow:"65"`
+}
+
+func (r BIFlowTPRecord) GetTypeMeta() TypeMeta {
+	return TypeMeta{
+		APIVersion: apiVersion,
+		Type:       "BIFlowTPRecord",
+	}
+}
+
+type BIFlowAppRecord struct {
+	BaseRecord
+	Parent *string `vflow:"2"`
+}
+
+func (r BIFlowAppRecord) GetTypeMeta() TypeMeta {
+	return TypeMeta{
+		APIVersion: apiVersion,
+		Type:       "BIFlowAppRecord",
 	}
 }

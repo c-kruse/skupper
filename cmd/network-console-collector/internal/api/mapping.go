@@ -5,19 +5,16 @@ import (
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
 
-func toProcessRecord(in store.Entry) (ProcessRecord, bool) {
-	process, ok := in.Record.(vanflow.ProcessRecord)
+func toRouterAccessRecord(in store.Entry) (RouterAccessRecord, bool) {
+	record, ok := in.Record.(vanflow.RouterAccessRecord)
 	if !ok {
-		return ProcessRecord{}, false
+		return RouterAccessRecord{}, false
 	}
-	return ProcessRecord{
-		BaseRecord:  toBase(process.BaseRecord, process.Parent, in.Source.ID),
-		Name:        process.Name,
-		GroupName:   process.Group,
-		ProcessRole: process.Mode,
-		ImageName:   process.ImageName,
-		Image:       process.ImageVersion,
-		SourceHost:  process.SourceHost,
+	return RouterAccessRecord{
+		BaseRecord: toBase(record.BaseRecord, record.Parent, in.Source.ID),
+		Name:       dref(record.Name),
+		Role:       dref(record.Role),
+		LinkCount:  dref(record.LinkCount),
 	}, true
 }
 

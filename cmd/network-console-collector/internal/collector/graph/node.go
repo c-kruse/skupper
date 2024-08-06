@@ -23,12 +23,41 @@ func NewGraph(stor store.Interface) *Graph {
 	}
 }
 
-func (g *Graph) Get(id string) Node {
-	v, err := g.dag.GetVertex(id)
+func (g *Graph) Site(id string) Site {
+	return vertexByType[Site](g.dag, id)
+}
+func (g *Graph) Process(id string) Process {
+	return vertexByType[Process](g.dag, id)
+}
+func (g *Graph) Link(id string) Link {
+	return vertexByType[Link](g.dag, id)
+}
+func (g *Graph) RouterAccess(id string) RouterAccess {
+	return vertexByType[RouterAccess](g.dag, id)
+}
+func (g *Graph) Connector(id string) Connector {
+	return vertexByType[Connector](g.dag, id)
+}
+func (g *Graph) Listener(id string) Listener {
+	return vertexByType[Listener](g.dag, id)
+}
+func (g *Graph) Address(id string) Address {
+	return vertexByType[Address](g.dag, id)
+}
+func (g *Graph) ConnectorTarget(id string) ConnectorTarget {
+	return vertexByType[ConnectorTarget](g.dag, id)
+}
+
+func vertexByType[T Node](dag *dag.DAG, id string) T {
+	var out T
+	v, err := dag.GetVertex(id)
 	if err != nil {
-		return Unknown{}
+		return out
 	}
-	return v.(Node)
+	if vtx, ok := v.(T); ok {
+		out = vtx
+	}
+	return out
 }
 
 func (g *Graph) Unindex(in vanflow.Record) {
@@ -79,14 +108,22 @@ func (g *Graph) Reindex(in vanflow.Record) {
 		}
 		g.ensureParents(id, edges)
 	case vanflow.ProcessRecord:
-		g.dag.AddVertex(Process{g.newBase(id)})
+		processVtx := Process{g.newBase(id)}
+		g.dag.AddVertex(processVtx)
 		var edges []Node
 		if record.Parent != nil {
 			edges = append(edges, Site{g.newBase(*record.Parent)})
 		}
 		g.ensureParents(id, edges)
+
+		if siteID, sourceHost := record.Parent, record.SourceHost; siteID != nil && sourceHost != nil {
+			ctID := ConnectorTargetID(*siteID, *sourceHost)
+			g.dag.AddVertex(ConnectorTarget{g.newBase(ctID)})
+			g.ensureParents(ctID, []Node{processVtx})
+		}
 	case vanflow.ConnectorRecord:
-		g.dag.AddVertex(Connector{g.newBase(id)})
+		connectorVtx := Connector{g.newBase(id)}
+		g.dag.AddVertex(connectorVtx)
 		var edges []Node
 		if record.Parent != nil {
 			edges = append(edges, Router{g.newBase(*record.Parent)})
@@ -96,6 +133,11 @@ func (g *Graph) Reindex(in vanflow.Record) {
 		}
 		if record.ProcessID != nil {
 			edges = append(edges, Process{g.newBase(*record.ProcessID)})
+		} else if record.DestHost != nil && record.Parent != nil {
+			snode := vertexByType[Router](g.dag, *record.Parent).Parent()
+			if snode.IsKnown() {
+				edges = append(edges, ConnectorTarget{g.newBase(ConnectorTargetID(snode.ID(), *record.DestHost))})
+			}
 		}
 		g.ensureParents(id, edges)
 	case records.AddressRecord:
@@ -137,9 +179,8 @@ func (g *Graph) newBase(id string) baseNode {
 
 type Node interface {
 	ID() string
+	IsKnown() bool
 	Get() (store.Entry, bool)
-
-	Parent() Node
 }
 
 type baseNode struct {
@@ -151,6 +192,9 @@ type baseNode struct {
 func (n baseNode) ID() string {
 	return n.identity
 }
+func (n baseNode) IsKnown() bool {
+	return n.identity != ""
+}
 
 func (b baseNode) Get() (entry store.Entry, found bool) {
 	if b.identity == "" {
@@ -159,18 +203,8 @@ func (b baseNode) Get() (entry store.Entry, found bool) {
 	return b.stor.Get(b.identity)
 }
 
-type Unknown struct{ baseNode }
-
-func (u Unknown) Parent() Node {
-	return u
-}
-
 type Site struct {
 	baseNode
-}
-
-func (n Site) Parent() Node {
-	return Unknown{}
 }
 
 func (n Site) Routers() []Router {
@@ -230,7 +264,7 @@ type Router struct {
 	baseNode
 }
 
-func (n Router) Parent() Node            { return parentOfType[Site](n.dag, n.identity) }
+func (n Router) Parent() Site            { return parentOfType[Site](n.dag, n.identity) }
 func (n Router) Listeners() []Listener   { return childrenByType[Listener](n.dag, n.identity) }
 func (n Router) Connectors() []Connector { return childrenByType[Connector](n.dag, n.identity) }
 
@@ -238,9 +272,9 @@ type Link struct {
 	baseNode
 }
 
-func (n Link) Parent() Node { return parentOfType[Router](n.dag, n.identity) }
+func (n Link) Parent() Router { return parentOfType[Router](n.dag, n.identity) }
 
-func (n Link) Peer() Node {
+func (n Link) Peer() RouterAccess {
 	return parentOfType[RouterAccess](n.dag, n.identity)
 }
 
@@ -248,7 +282,7 @@ type RouterAccess struct {
 	baseNode
 }
 
-func (n RouterAccess) Parent() Node { return parentOfType[Router](n.dag, n.identity) }
+func (n RouterAccess) Parent() Router { return parentOfType[Router](n.dag, n.identity) }
 
 func (n RouterAccess) Peers() []Link { return childrenByType[Link](n.dag, n.identity) }
 
@@ -256,28 +290,32 @@ type Listener struct {
 	baseNode
 }
 
-func (n Listener) Parent() Node  { return parentOfType[Router](n.dag, n.identity) }
-func (n Listener) Address() Node { return nil }
+func (n Listener) Parent() Router { return parentOfType[Router](n.dag, n.identity) }
+func (n Listener) Address() Node  { return nil }
 
 type Connector struct {
 	baseNode
 }
 
-func (n Connector) Parent() Node { return parentOfType[Router](n.dag, n.identity) }
+func (n Connector) Parent() Router { return parentOfType[Router](n.dag, n.identity) }
 
 func (n Connector) Address() Address {
-	if addr, ok := parentOfType[RoutingKey](n.dag, n.identity).Parent().(Address); ok {
-		return addr
-	}
-	return Address{}
+	return parentOfType[RoutingKey](n.dag, n.identity).Parent()
 }
-func (n Connector) Target() Node { return nil }
+
+func (n Connector) Target() Process {
+	target := parentOfType[Process](n.dag, n.identity)
+	if target.IsKnown() {
+		return target
+	}
+	return parentOfType[ConnectorTarget](n.dag, n.identity).Process()
+}
 
 type Process struct {
 	baseNode
 }
 
-func (n Process) Parent() Node            { return parentOfType[Site](n.dag, n.identity) }
+func (n Process) Parent() Site            { return parentOfType[Site](n.dag, n.identity) }
 func (n Process) Addresses() []Address    { return nil }
 func (n Process) Connectors() []Connector { return childrenByType[Connector](n.dag, n.identity) }
 
@@ -289,12 +327,22 @@ type RoutingKey struct {
 	baseNode
 }
 
-func (n RoutingKey) Parent() Node { return parentOfType[Address](n.dag, n.identity) }
+func (n RoutingKey) Parent() Address { return parentOfType[Address](n.dag, n.identity) }
+
+func ConnectorTargetID(site, host string) string {
+	return fmt.Sprintf("%s:%s", site, host)
+}
+
+type ConnectorTarget struct {
+	baseNode
+}
+
+func (n ConnectorTarget) Parent() Connector { return parentOfType[Connector](n.dag, n.identity) }
+func (n ConnectorTarget) Process() Process  { return parentOfType[Process](n.dag, n.identity) }
 
 type Address struct {
 	baseNode
 }
 
-func (n Address) Parent() Node            { return Unknown{} }
 func (n Address) Connectors() []Connector { return childrenByType[Connector](n.dag, n.identity) }
 func (n Address) Listeners() []Listener   { return childrenByType[Listener](n.dag, n.identity) }

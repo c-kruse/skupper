@@ -42,3 +42,41 @@ func (r ProcessGroupRecord) GetTypeMeta() vanflow.TypeMeta {
 		APIVersion: "v1alpha1",
 	}
 }
+
+type SitePairRecord struct {
+	ID       string
+	Protocol string
+	Source   string
+	Dest     string
+	Start    time.Time
+	Count    uint64
+}
+
+func (r SitePairRecord) Identity() string {
+	return r.ID
+}
+func (r SitePairRecord) GetTypeMeta() vanflow.TypeMeta {
+	return vanflow.TypeMeta{
+		Type:       "SitePairRecord",
+		APIVersion: "v1alpha1",
+	}
+}
+
+type ProcPairRecord struct {
+	ID       string
+	Start    time.Time
+	Source   string
+	Dest     string
+	Protocol string
+	Count    uint64
+}
+
+func (r ProcPairRecord) Identity() string {
+	return r.ID
+}
+func (r ProcPairRecord) GetTypeMeta() vanflow.TypeMeta {
+	return vanflow.TypeMeta{
+		Type:       "ProcPairRecord",
+		APIVersion: "v1alpha1",
+	}
+}

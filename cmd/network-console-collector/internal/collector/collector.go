@@ -1,14 +1,19 @@
 package collector
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
+	"hash/fnv"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/graph"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/records"
 	"github.com/skupperproject/skupper/pkg/vanflow"
@@ -18,7 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
+func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.Registry) *Collector {
 	sessionCtr := factory.Create()
 
 	discovery := eventsource.NewDiscovery(sessionCtr, eventsource.DiscoveryOptions{})
@@ -26,11 +31,13 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 	c := &Collector{
 		logger:        logger,
 		session:       sessionCtr,
+		registry:      reg,
 		discovery:     discovery,
 		sourceRef:     store.SourceRef{Version: "v1alpha1", ID: "collector"},
 		recordMapping: make(eventsource.RecordStoreMap),
 		purgeQueue:    make(chan store.SourceRef, 8),
 		events:        make(chan changeEvent, 32),
+		flowEvents:    make(chan changeEvent, 128),
 		clients:       make(map[string]*eventsource.Client),
 	}
 
@@ -51,19 +58,35 @@ func New(logger *slog.Logger, factory session.ContainerFactory) *Collector {
 		},
 	})
 
+	c.Flows = store.NewSyncMapStore(store.SyncMapStoreConfig{
+		Handlers: store.EventHandlerFuncs{
+			OnAdd:    c.handleFlowAdd,
+			OnChange: c.handleFlowChange,
+			OnDelete: c.handleFlowDelete,
+		},
+		Indexers: map[string]store.Indexer{
+			store.SourceIndex: store.SourceIndexer,
+			store.TypeIndex:   store.TypeIndexer,
+			IndexByTypeParent: indexByTypeParent,
+		},
+	})
+
 	for _, record := range recordTypes {
 		c.recordMapping[record.GetTypeMeta().String()] = c.Records
 	}
-	// c.recordMapping[vanflow.BIFlowT{}.GetTypeMeta().String()] = c.flows
+	c.recordMapping[vanflow.BIFlowTPRecord{}.GetTypeMeta().String()] = c.Flows
 	// c.recordMapping[vanflow.BIFlowA{}.GetTypeMeta().String()] = c.flows
 
 	c.g = graph.NewGraph(c.Records)
+	c.flowManager = newFlowManager(logger, c.g, c.registry, c.Flows, c.Records)
 	return c
 }
 
 type Collector struct {
 	Records       store.Interface
+	Flows         store.Interface
 	g             *graph.Graph
+	registry      *prometheus.Registry
 	recordMapping eventsource.RecordStoreMap
 
 	session   session.Container
@@ -75,8 +98,11 @@ type Collector struct {
 	mu      sync.Mutex
 	clients map[string]*eventsource.Client
 
+	flowManager *flowManager
+
 	purgeQueue chan store.SourceRef
 	events     chan changeEvent
+	flowEvents chan changeEvent
 }
 
 type changeEvent interface {
@@ -136,6 +162,9 @@ func (c *Collector) discoveryHandler(ctx context.Context) func(eventsource.Info)
 		if source.Type == "CONTROLLER" {
 			client.Listen(ctx, eventsource.FromSourceAddressHeartbeats())
 		}
+		if source.Type == "ROUTER" {
+			client.Listen(ctx, eventsource.FromSourceAddressFlows())
+		}
 
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -190,6 +219,17 @@ func (c *Collector) handleStoreDelete(e store.Entry) {
 	c.events <- deleteEvent{Record: e.Record}
 }
 
+func (c *Collector) handleFlowAdd(e store.Entry) {
+	c.flowEvents <- addEvent{Record: e.Record}
+}
+
+func (c *Collector) handleFlowChange(p, e store.Entry) {
+	c.flowEvents <- updateEvent{Prev: p.Record, Curr: e.Record}
+}
+func (c *Collector) handleFlowDelete(e store.Entry) {
+	c.flowEvents <- deleteEvent{Record: e.Record}
+}
+
 func (c *Collector) updateGraph(event changeEvent, stor store.Interface) {
 	if dEvent, ok := event.(deleteEvent); ok {
 		c.g.Unindex(dEvent.Record)
@@ -202,8 +242,12 @@ func (c *Collector) updateGraph(event changeEvent, stor store.Interface) {
 	c.g.Reindex(entry.Record)
 }
 
-func (c *Collector) GetNode(id string) graph.Node {
-	return c.g.Get(id)
+func (c *Collector) Graph() *graph.Graph {
+	return c.g
+}
+
+func (c *Collector) FlowInfo(id string) FlowState {
+	return c.flowManager.get(id)
 }
 
 func (c *Collector) runWorkQueue(ctx context.Context) func() error {
@@ -211,15 +255,22 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 	for _, r := range recordTypes {
 		reactors[r.GetTypeMeta()] = append(reactors[r.GetTypeMeta()], c.updateGraph)
 	}
-	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddress)
-	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddress)
-	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroup)
+
+	idp := newStableIdentityProvider()
 	reactors[records.AddressRecord{}.GetTypeMeta()] = append(reactors[records.AddressRecord{}.GetTypeMeta()], c.updateGraph)
+	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddressHandler(idp), ensureSiteServerProcessHandler(idp, c.g))
+	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddressHandler(idp))
+	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroupHandler(idp), ensureSiteServerProcessHandler(idp, c.g))
+
+	reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()] = append(reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()], logFlow)
+
 	return func() error {
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
+			case event := <-c.flowEvents:
+				c.flowManager.processEvent(event)
 			case event := <-c.events:
 				for _, reactor := range reactors[event.GetTypeMeta()] {
 					reactor(event, c.Records)
@@ -229,75 +280,262 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 	}
 }
 
-func ensureProcessGroup(event changeEvent, stor store.Interface) {
+func (c *Collector) flowHandler(event changeEvent) {
 	if _, ok := event.(deleteEvent); ok {
 		return
 	}
-	entry, ok := stor.Get(event.ID())
+	flowEntry, ok := c.Flows.Get(event.ID())
 	if !ok {
 		return
 	}
-	proccess := entry.Record.(vanflow.ProcessRecord)
-	if proccess.Group == nil {
-		return
-	}
-	groupName := *proccess.Group
-	startTime := time.Now()
-	if proccess.StartTime != nil {
-		startTime = proccess.StartTime.Time
-	}
+	switch flow := flowEntry.Record.(type) {
+	case vanflow.BIFlowTPRecord:
+		flowCtx := &flowContext{}
+		ok := flowCtx.LoadFromFlow(c.Records, c.g, flow)
 
-	groups := stor.Index(IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: groupName}})
-	if len(groups) > 0 {
-		return
+		log := c.logger.With(
+			slog.String("id", flow.ID),
+			slog.String("type", "transport"),
+			slog.String("listener", flowCtx.Listener.ID),
+			slog.String("connector", flowCtx.Connector.ID),
+			slog.String("source_site", flowCtx.SourceSite.ID),
+			slog.String("source_proc", flowCtx.Source.ID),
+			slog.String("dest_site", flowCtx.DestSite.ID),
+			slog.String("dest_proc", flowCtx.Dest.ID),
+			slog.Time("begin", dref(flow.StartTime).Time),
+			slog.Time("end", dref(flow.EndTime).Time),
+		)
+		if !ok {
+			log.Info("FLOW INCOMPLETE")
+			return
+		}
+		log.Info(fmt.Sprintf("FLOW: %d - %d", dref(flow.Octets), dref(flow.OctetsReverse)))
+
+		idp := newStableIdentityProvider()
+		c.Records.Add(flowCtx.SitePair(idp), store.SourceRef{ID: "self"})
+		c.Records.Add(flowCtx.ProcPair(idp), store.SourceRef{ID: "self"})
+	default:
+		return // skip
+
 	}
-	stor.Add(records.ProcessGroupRecord{ID: uuid.New().String(), Name: groupName, Start: startTime}, store.SourceRef{})
 }
 
-func ensureAddress(event changeEvent, stor store.Interface) {
-	if _, ok := event.(deleteEvent); ok {
-		return
+type flowContext struct {
+	Source     vanflow.ProcessRecord
+	Listener   vanflow.ListenerRecord
+	SourceSite vanflow.SiteRecord
+
+	Dest      vanflow.ProcessRecord
+	Connector vanflow.ConnectorRecord
+	DestSite  vanflow.SiteRecord
+}
+
+func (f *flowContext) SitePair(idp idProvider) records.SitePairRecord {
+	return records.SitePairRecord{
+		ID:       idp.ID("sitepair", f.SourceSite.ID, f.DestSite.ID, dref(f.Connector.Protocol)),
+		Source:   f.SourceSite.ID,
+		Dest:     f.DestSite.ID,
+		Protocol: dref(f.Connector.Protocol),
+		Start:    time.Now(),
 	}
-	entry, ok := stor.Get(event.ID())
-	if !ok {
-		return
+}
+
+func (f *flowContext) ProcPair(idp idProvider) records.ProcPairRecord {
+	return records.ProcPairRecord{
+		ID:       idp.ID("procpair", f.SourceSite.ID, f.DestSite.ID, dref(f.Connector.Protocol)),
+		Source:   f.SourceSite.ID,
+		Dest:     f.DestSite.ID,
+		Protocol: dref(f.Connector.Protocol),
+		Start:    time.Now(),
 	}
+}
+
+func (f *flowContext) LoadFromFlow(records store.Interface, graph *graph.Graph, flow vanflow.BIFlowTPRecord) bool {
 	var (
-		address   string
-		startTime time.Time
-		protocol  string = "tcp"
+		listenerID  string = dref(flow.Parent)
+		connectorID string = dref(flow.ConnectorID)
 	)
-	switch r := entry.Record.(type) {
-	case vanflow.ListenerRecord:
-		if r.Address != nil {
-			address = *r.Address
+
+	ln := graph.Listener(listenerID)
+	cn := graph.Connector(connectorID)
+
+	var items int
+	if lentity, ok := ln.Get(); ok {
+		if l, ok := lentity.Record.(vanflow.ListenerRecord); ok {
+			f.Listener = l
+			items++
 		}
-		if r.StartTime != nil {
-			startTime = r.StartTime.Time
-		}
-		if r.Protocol != nil {
-			protocol = *r.Protocol
-		}
-	case vanflow.ConnectorRecord:
-		if r.Address != nil {
-			address = *r.Address
-		}
-		if r.StartTime != nil {
-			startTime = r.StartTime.Time
-		}
-		if r.Protocol != nil {
-			protocol = *r.Protocol
-		}
-	default:
 	}
-	if address == "" {
-		return
+	if centity, ok := cn.Get(); ok {
+		if c, ok := centity.Record.(vanflow.ConnectorRecord); ok {
+			f.Connector = c
+			items++
+		}
 	}
-	addresses := stor.Index(IndexByTypeName, store.Entry{Record: records.AddressRecord{Name: address}})
-	if len(addresses) > 0 {
-		return
+	if sentry, ok := ln.Parent().Parent().Get(); ok {
+		if s, ok := sentry.Record.(vanflow.SiteRecord); ok {
+			f.SourceSite = s
+			items++
+		}
 	}
-	stor.Add(records.AddressRecord{ID: uuid.New().String(), Name: address, Protocol: protocol, Start: startTime}, store.SourceRef{})
+	if dentry, ok := cn.Parent().Parent().Get(); ok {
+		if d, ok := dentry.Record.(vanflow.SiteRecord); ok {
+			f.DestSite = d
+			items++
+		}
+	}
+	if dentry, ok := cn.Target().Get(); ok {
+		if d, ok := dentry.Record.(vanflow.ProcessRecord); ok {
+			f.Dest = d
+			items++
+		}
+	}
+	sourceSiteID := ln.Parent().Parent().ID()
+	sourceProcs := records.Index(IndexByParentHost, store.Entry{Record: vanflow.ProcessRecord{Parent: &sourceSiteID, SourceHost: flow.SourceHost}})
+	if len(sourceProcs) > 0 {
+		if source, ok := sourceProcs[0].Record.(vanflow.ProcessRecord); ok {
+			f.Source = source
+			items++
+		}
+	}
+
+	return (items == 6)
+}
+
+func dref[T any](p *T) T {
+	var t T
+	if p != nil {
+		return *p
+	}
+	return t
+}
+
+func logFlow(e changeEvent, stor store.Interface) {
+}
+
+type idProvider interface {
+	ID(prefix string, part string, parts ...string) string
+}
+
+func ensureProcessGroupHandler(idp idProvider) func(event changeEvent, stor store.Interface) {
+	return func(event changeEvent, stor store.Interface) {
+		if _, ok := event.(deleteEvent); ok {
+			return
+		}
+		entry, ok := stor.Get(event.ID())
+		if !ok {
+			return
+		}
+		proccess := entry.Record.(vanflow.ProcessRecord)
+		if proccess.Group == nil {
+			return
+		}
+		groupName := *proccess.Group
+		startTime := time.Now()
+		if proccess.StartTime != nil {
+			startTime = proccess.StartTime.Time
+		}
+
+		groups := stor.Index(IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: groupName}})
+		if len(groups) > 0 {
+			return
+		}
+		id := idp.ID("pg", groupName)
+		stor.Add(records.ProcessGroupRecord{ID: id, Name: groupName, Start: startTime}, store.SourceRef{})
+	}
+}
+
+func ensureSiteServerProcessHandler(idp idProvider, graph *graph.Graph) func(event changeEvent, stor store.Interface) {
+	return func(event changeEvent, stor store.Interface) {
+		if _, ok := event.(deleteEvent); ok {
+			return
+		}
+		entry, ok := stor.Get(event.ID())
+		if !ok {
+			return
+		}
+		switch record := entry.Record.(type) {
+		case vanflow.ProcessRecord:
+			sourceHost := record.SourceHost
+			siteID := record.Parent
+			if sourceHost == nil || siteID == nil || entry.Source.ID == "self" {
+				slog.Info("skip checking Site proc", slog.Any("id", record.ID))
+				return
+			}
+			stor.Delete(idp.ID("siteproc", *sourceHost, *siteID))
+		case vanflow.ConnectorRecord:
+			processID := record.ProcessID
+			destHost := record.DestHost
+			siteID := graph.Connector(record.ID).Parent().Parent().ID()
+			if destHost == nil || siteID == "" || (processID != nil && *processID != "") {
+				return
+			}
+
+			procID := idp.ID("siteproc", *destHost, siteID)
+			name := fmt.Sprintf("site-server-%s-%s", *destHost, shortSite(siteID))
+			groupName := fmt.Sprintf("site-servers-%s", shortSite(siteID))
+			role := "external"
+			stor.Add(vanflow.ProcessRecord{
+				BaseRecord: vanflow.NewBase(procID, time.Now()),
+				Name:       &name,
+				Group:      &groupName,
+				SourceHost: destHost,
+				Mode:       &role,
+			}, store.SourceRef{ID: "self"})
+		}
+	}
+}
+
+func shortSite(s string) string {
+	return strings.Split(s, "-")[0]
+}
+func ensureAddressHandler(idp idProvider) func(event changeEvent, stor store.Interface) {
+	return func(event changeEvent, stor store.Interface) {
+		if _, ok := event.(deleteEvent); ok {
+			return
+		}
+		entry, ok := stor.Get(event.ID())
+		if !ok {
+			return
+		}
+		var (
+			address   string
+			startTime time.Time
+			protocol  string = "tcp"
+		)
+		switch r := entry.Record.(type) {
+		case vanflow.ListenerRecord:
+			if r.Address != nil {
+				address = *r.Address
+			}
+			if r.StartTime != nil {
+				startTime = r.StartTime.Time
+			}
+			if r.Protocol != nil {
+				protocol = *r.Protocol
+			}
+		case vanflow.ConnectorRecord:
+			if r.Address != nil {
+				address = *r.Address
+			}
+			if r.StartTime != nil {
+				startTime = r.StartTime.Time
+			}
+			if r.Protocol != nil {
+				protocol = *r.Protocol
+			}
+		default:
+		}
+		if address == "" {
+			return
+		}
+		addresses := stor.Index(IndexByTypeName, store.Entry{Record: records.AddressRecord{Name: address}})
+		if len(addresses) > 0 {
+			return
+		}
+		addressID := idp.ID("adr", address, protocol)
+		stor.Add(records.AddressRecord{ID: addressID, Name: address, Protocol: protocol, Start: startTime}, store.SourceRef{})
+	}
 }
 
 func (c *Collector) runSession(ctx context.Context) func() error {
@@ -516,4 +754,33 @@ func sourceRef(source eventsource.Info) store.SourceRef {
 		Version: fmt.Sprint(source.Version),
 		ID:      source.ID,
 	}
+}
+
+type hashIDer struct {
+	mu   sync.Mutex
+	hash hash.Hash
+	buff []byte
+}
+
+func newStableIdentityProvider() idProvider {
+	h := fnv.New64()
+	return &hashIDer{
+		hash: h,
+		buff: make([]byte, 0, h.Size()),
+	}
+}
+
+func (c *hashIDer) ID(prefix string, part string, parts ...string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hash.Reset()
+	c.hash.Write([]byte(prefix))
+	c.hash.Write([]byte(part))
+	for _, p := range parts {
+		c.hash.Write([]byte(p))
+	}
+	sum := c.hash.Sum(c.buff)
+	out := bytes.NewBuffer([]byte(prefix + "-"))
+	hex.NewEncoder(out).Write(sum)
+	return out.String()
 }

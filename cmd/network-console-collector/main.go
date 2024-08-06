@@ -36,7 +36,7 @@ func run(cfg Config) error {
 	}
 
 	reg := prometheus.NewRegistry()
-	collector := collector.New(logger.With(slog.String("component", "collector")), session.NewContainerFactory(cfg.RouterURL, sessionConfig))
+	collector := collector.New(logger.With(slog.String("component", "collector")), session.NewContainerFactory(cfg.RouterURL, sessionConfig), reg)
 
 	specContent, err := getSpecContent()
 	if err != nil {

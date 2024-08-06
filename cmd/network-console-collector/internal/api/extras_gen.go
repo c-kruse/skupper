@@ -110,3 +110,8 @@ func (r *SiteListResponse) Set(e []SiteRecord) {
 func (r *SiteResponse) Set(e *SiteRecord) {
 	r.Results = e
 }
+
+// Set result
+func (r *TransportFlowListResponse) Set(e []TransportFlowRecord) {
+	r.Results = e
+}
