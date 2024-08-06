@@ -37,7 +37,7 @@ func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.
 		recordMapping: make(eventsource.RecordStoreMap),
 		purgeQueue:    make(chan store.SourceRef, 8),
 		events:        make(chan changeEvent, 32),
-		flowEvents:    make(chan changeEvent, 128),
+		flowEvents:    make(chan changeEvent, 1024),
 		clients:       make(map[string]*eventsource.Client),
 	}
 
@@ -205,6 +205,7 @@ func (c *Collector) Run(ctx context.Context) error {
 	g.Go(c.runWorkQueue(ctx))
 	g.Go(c.runDiscovery(ctx))
 	g.Go(c.runRecordCleanup(ctx))
+	g.Go(c.flowManager.runFlowPairManager(ctx))
 	return g.Wait()
 }
 
@@ -265,6 +266,9 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 	reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()] = append(reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()], logFlow)
 
 	return func() error {
+		defer func() {
+			c.logger.Info("queue worker shutdown complete")
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -540,6 +544,9 @@ func ensureAddressHandler(idp idProvider) func(event changeEvent, stor store.Int
 
 func (c *Collector) runSession(ctx context.Context) func() error {
 	return func() error {
+		defer func() {
+			c.logger.Info("session shutdown complete")
+		}()
 		sessionErrors := make(chan error, 1)
 		c.session.OnSessionError(func(err error) {
 			sessionErrors <- err
@@ -566,6 +573,9 @@ func (c *Collector) runSession(ctx context.Context) func() error {
 
 func (c *Collector) runDiscovery(ctx context.Context) func() error {
 	return func() error {
+		defer func() {
+			c.logger.Info("discovery shutdown complete")
+		}()
 		return c.discovery.Run(ctx, eventsource.DiscoveryHandlers{
 			Discovered: c.discoveryHandler(ctx),
 			Forgotten:  c.handleForgotten,
@@ -575,6 +585,9 @@ func (c *Collector) runDiscovery(ctx context.Context) func() error {
 
 func (c *Collector) runRecordCleanup(ctx context.Context) func() error {
 	return func() error {
+		defer func() {
+			c.logger.Info("record cleanup worker shutdown complete")
+		}()
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		terminatedExemplar := store.Entry{

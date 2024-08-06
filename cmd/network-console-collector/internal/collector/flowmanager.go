@@ -1,9 +1,9 @@
 package collector
 
 import (
+	"context"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector/graph"
@@ -84,11 +84,16 @@ var flowMetricLables = []string{"source_site_id", "dest_site_id", "source_site_n
 
 func newFlowManager(log *slog.Logger, graph *graph.Graph, reg *prometheus.Registry, flows, records store.Interface) *flowManager {
 	manager := &flowManager{
-		logger:     log,
-		graph:      graph,
-		flows:      flows,
-		records:    records,
-		flowStates: make(map[string]*FlowState),
+		logger:          log,
+		graph:           graph,
+		flows:           flows,
+		records:         records,
+		flowStates:      make(map[string]*FlowState),
+		idp:             newStableIdentityProvider(),
+		sitePairs:       make(map[pair]pairState),
+		procPairs:       make(map[pair]pairState),
+		refreshSitePair: make(chan pair, 16),
+		refreshProcPair: make(chan pair, 16),
 
 		flowsCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "skupper",
@@ -116,13 +121,125 @@ type flowManager struct {
 	flows   store.Interface
 	records store.Interface
 	graph   *graph.Graph
+	idp     idProvider
 
 	mu         sync.RWMutex
 	flowStates map[string]*FlowState
 
+	pairMu          sync.Mutex
+	sitePairs       map[pair]pairState
+	refreshSitePair chan pair
+	procPairs       map[pair]pairState
+	refreshProcPair chan pair
+
 	flowsCounter             *prometheus.CounterVec
 	flowBytesSentCounter     *prometheus.CounterVec
 	flowBytesReceivedCounter *prometheus.CounterVec
+}
+
+type pair struct {
+	Source   string
+	Dest     string
+	Protocol string
+}
+
+type pairState struct {
+	Count int
+	Dirty bool
+}
+
+func (m *flowManager) runFlowPairManager(ctx context.Context) func() error {
+	return func() error {
+		defer func() {
+			m.logger.Info("flow pair manager shutdown complete")
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case p := <-m.refreshSitePair:
+				func() {
+					m.pairMu.Lock()
+					defer m.pairMu.Unlock()
+					if pairState, ok := m.sitePairs[p]; ok && pairState.Dirty {
+						id := m.idp.ID("sitepair", p.Source, p.Dest, p.Protocol)
+						entry, ok := m.records.Get(id)
+						if !ok {
+							record := records.SitePairRecord{
+								ID:       id,
+								Source:   p.Source,
+								Dest:     p.Dest,
+								Protocol: p.Protocol,
+								Count:    uint64(pairState.Count),
+							}
+							m.records.Add(record, store.SourceRef{ID: "self"})
+							return
+						}
+						if record, ok := entry.Record.(records.SitePairRecord); ok {
+							record.Count++
+							m.records.Update(record)
+						}
+
+					}
+				}()
+			case p := <-m.refreshProcPair:
+				func() {
+					m.pairMu.Lock()
+					defer m.pairMu.Unlock()
+					if pairState, ok := m.procPairs[p]; ok && pairState.Dirty {
+						id := m.idp.ID("processpair", p.Source, p.Dest, p.Protocol)
+						entry, ok := m.records.Get(id)
+						if !ok {
+							record := records.ProcPairRecord{
+								ID:       id,
+								Source:   p.Source,
+								Dest:     p.Dest,
+								Protocol: p.Protocol,
+								Count:    uint64(pairState.Count),
+							}
+							m.records.Add(record, store.SourceRef{ID: "self"})
+							return
+						}
+
+						if record, ok := entry.Record.(records.ProcPairRecord); ok {
+							record.Count++
+							m.records.Update(record)
+						}
+
+					}
+				}()
+			}
+		}
+	}
+
+}
+func (m *flowManager) incrementProcessPairs(state FlowState) {
+	m.pairMu.Lock()
+	defer m.pairMu.Unlock()
+	var protocol string
+	if c, ok := state.Connector.Get(); ok {
+		if conn, ok := c.Record.(vanflow.ConnectorRecord); ok {
+			protocol = dref(conn.Protocol)
+		}
+	}
+	sitePair := pair{Source: state.Source.Parent().ID(), Dest: state.Dest.Parent().ID(), Protocol: protocol}
+	procPair := pair{Source: state.Source.ID(), Dest: state.Dest.ID(), Protocol: protocol}
+	ps := m.sitePairs[sitePair]
+	ps.Dirty = true
+	ps.Count++
+	m.sitePairs[sitePair] = ps
+	ps = m.procPairs[procPair]
+	ps.Dirty = true
+	ps.Count++
+	m.procPairs[procPair] = ps
+	select {
+	case m.refreshSitePair <- sitePair:
+	default:
+	}
+	select {
+	case m.refreshProcPair <- procPair:
+	default:
+	}
 }
 
 func (m *flowManager) get(id string) FlowState {
@@ -162,39 +279,6 @@ func (m *flowManager) processEvent(event changeEvent) {
 			log.Info("PENDING FLOW")
 			return
 		}
-		idp := newStableIdentityProvider()
-		var protocol string
-		if c, ok := state.Connector.Get(); ok {
-			if conn, ok := c.Record.(vanflow.ConnectorRecord); ok {
-				protocol = dref(conn.Protocol)
-			}
-		}
-		sitePairID := idp.ID("sitepair", state.Source.Parent().ID(), state.Dest.Parent().ID(), protocol)
-		sitePair, ok := m.records.Get(sitePairID)
-		if !ok {
-			sitePairRecord := records.SitePairRecord{
-				ID:       sitePairID,
-				Source:   state.Source.Parent().ID(),
-				Dest:     state.Dest.Parent().ID(),
-				Protocol: protocol,
-				Start:    time.Now(),
-			}
-			m.records.Add(sitePairRecord, store.SourceRef{ID: "self"})
-			sitePair, _ = m.records.Get(sitePairID)
-		}
-		procPairID := idp.ID("processpair", state.Source.ID(), state.Dest.ID(), protocol)
-		procPair, ok := m.records.Get(procPairID)
-		if !ok {
-			procPairRecord := records.ProcPairRecord{
-				ID:       procPairID,
-				Source:   state.Source.ID(),
-				Dest:     state.Dest.ID(),
-				Protocol: protocol,
-				Start:    time.Now(),
-			}
-			m.records.Add(procPairRecord, store.SourceRef{ID: "self"})
-			procPair, _ = m.records.Get(procPairID)
-		}
 
 		var (
 			prevOctets    uint64
@@ -211,20 +295,15 @@ func (m *flowManager) processEvent(event changeEvent) {
 		if !alreadyQualified {
 			prevOctets, prevOctetsRev = 0, 0
 			m.flowsCounter.With(labels).Inc()
-			spr := sitePair.Record.(records.SitePairRecord)
-			spr.Count++
-			ppr := procPair.Record.(records.ProcPairRecord)
-			ppr.Count++
-			m.records.Update(spr)
-			m.records.Update(ppr)
+			m.incrementProcessPairs(*state)
 		}
 		sentInc := float64(dref(record.Octets) - prevOctets)
 		reveivedInc := float64(dref(record.OctetsReverse) - prevOctetsRev)
 		m.flowBytesSentCounter.With(labels).Add(sentInc)
 		m.flowBytesReceivedCounter.With(labels).Add(reveivedInc)
 		log.Info("FLOW",
-			slog.Uint64("bytes_out", dref(record.Octets)),
-			slog.Uint64("bytes_in", dref(record.OctetsReverse)),
+			slog.Float64("bytes_out", sentInc),
+			slog.Float64("bytes_in", reveivedInc),
 		)
 
 	default:

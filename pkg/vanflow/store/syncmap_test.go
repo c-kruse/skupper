@@ -3,12 +3,14 @@ package store
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/skupperproject/skupper/pkg/vanflow"
+	"gotest.tools/assert"
 )
 
 func TestSyncMapStoreDelete(t *testing.T) {
@@ -180,6 +182,40 @@ func TestSyncMapStorePatch(t *testing.T) {
 		t.Errorf("entries from OnChange handler do not match expected: %s", cmp.Diff(updateEvents, expectedChanges, ignoreLastUpdateAndOrder...))
 	}
 }
+
+func TestSyncMapHandlerCycle(t *testing.T) {
+	source := SourceRef{ID: "test", Version: "0"}
+
+	var stor Interface
+	var mu sync.Mutex
+	var cycle int
+	changeCycle := func(_, e Entry) { // Not a suggestion. do not do this.
+		mu.Lock()
+		cycle++
+		mu.Unlock()
+		if cycle >= 100 {
+			return
+		}
+		r := e.Record.(vanflow.LogRecord)
+		line := *r.SourceLine
+		line++
+		r.SourceLine = &line
+		stor.Update(r)
+	}
+	stor = NewSyncMapStore(SyncMapStoreConfig{Handlers: EventHandlerFuncs{
+		OnAdd:    func(e Entry) { changeCycle(e, e) },
+		OnChange: changeCycle,
+		OnDelete: func(Entry) { t.Errorf("unexpected call to OnDelete") },
+	}})
+
+	r0 := vanflow.LogRecord{BaseRecord: vanflow.NewBase("1"), LogText: ptrTo("testI"), SourceLine: ptrTo(uint64(0))}
+
+	stor.Patch(r0, source) // no change
+
+	endC := cycle
+	assert.Equal(t, endC, 100)
+}
+
 func TestSyncMapStoreIndex(t *testing.T) {
 	stor := NewSyncMapStore(SyncMapStoreConfig{})
 
