@@ -283,11 +283,9 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 
 	idp := newStableIdentityProvider()
 	reactors[records.AddressRecord{}.GetTypeMeta()] = append(reactors[records.AddressRecord{}.GetTypeMeta()], c.updateGraph)
-	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddressHandler(idp), ensureSiteServerProcessHandler(idp, c.g))
+	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddressHandler(idp), ensureSiteServerProcessHandler(idp, c.g), c.flowManager.handleCacheInvalidatingEvent)
 	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddressHandler(idp))
-	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroupHandler(idp), ensureSiteServerProcessHandler(idp, c.g))
-
-	reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()] = append(reactors[vanflow.BIFlowTPRecord{}.GetTypeMeta()], logFlow)
+	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroupHandler(idp), ensureSiteServerProcessHandler(idp, c.g), c.flowManager.handleCacheInvalidatingEvent)
 
 	return func() error {
 		defer func() {
@@ -314,9 +312,6 @@ func dref[T any](p *T) T {
 		return *p
 	}
 	return t
-}
-
-func logFlow(e changeEvent, stor store.Interface) {
 }
 
 type idProvider interface {

@@ -246,6 +246,13 @@ func (m *flowManager) get(id string) FlowState {
 	return state
 }
 
+func (m *flowManager) handleCacheInvalidatingEvent(event changeEvent, stor store.Interface) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.connectorsCache, event.ID())
+	delete(m.processesCache, event.ID())
+}
+
 func (m *flowManager) processEvent(event changeEvent) {
 	if _, ok := event.(deleteEvent); ok {
 		//todo(ck) decrement aggregate counts?
