@@ -308,9 +308,19 @@ type Process struct {
 	baseNode
 }
 
-func (n Process) Parent() Site            { return parentOfType[Site](n.dag, n.identity) }
-func (n Process) Addresses() []Address    { return nil }
-func (n Process) Connectors() []Connector { return childrenByType[Connector](n.dag, n.identity) }
+func (n Process) Parent() Site         { return parentOfType[Site](n.dag, n.identity) }
+func (n Process) Addresses() []Address { return nil }
+func (n Process) Connectors() []Connector {
+	connectors := childrenByType[Connector](n.dag, n.identity)
+	for _, target := range childrenByType[ConnectorTarget](n.dag, n.identity) {
+		for _, cn := range target.Connectors() {
+			if cn.IsKnown() {
+				connectors = append(connectors, cn)
+			}
+		}
+	}
+	return connectors
+}
 
 func RoutingKeyID(address, protocol string) string {
 	return fmt.Sprintf("%s:%s", protocol, address)
@@ -330,8 +340,10 @@ type ConnectorTarget struct {
 	baseNode
 }
 
-func (n ConnectorTarget) Parent() Connector { return parentOfType[Connector](n.dag, n.identity) }
-func (n ConnectorTarget) Process() Process  { return parentOfType[Process](n.dag, n.identity) }
+func (n ConnectorTarget) Connectors() []Connector {
+	return childrenByType[Connector](n.dag, n.identity)
+}
+func (n ConnectorTarget) Process() Process { return parentOfType[Process](n.dag, n.identity) }
 
 type Address struct {
 	baseNode
