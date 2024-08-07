@@ -79,6 +79,8 @@ func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.
 
 	c.g = graph.NewGraph(c.Records)
 	c.flowManager = newFlowManager(logger, c.g, c.registry, c.Flows, c.Records)
+	c.processManager = newProcessManager(c.logger, c.Records, c.g, newStableIdentityProvider())
+	c.addressManager = newAddressManager(c.logger, c.Records)
 	return c
 }
 
@@ -98,7 +100,9 @@ type Collector struct {
 	mu      sync.Mutex
 	clients map[string]*eventsource.Client
 
-	flowManager *flowManager
+	flowManager    *flowManager
+	processManager *processManager
+	addressManager *addressManager
 
 	purgeQueue chan store.SourceRef
 	events     chan changeEvent
@@ -205,7 +209,9 @@ func (c *Collector) Run(ctx context.Context) error {
 	g.Go(c.runWorkQueue(ctx))
 	g.Go(c.runDiscovery(ctx))
 	g.Go(c.runRecordCleanup(ctx))
-	g.Go(c.flowManager.runFlowPairManager(ctx))
+	g.Go(c.flowManager.run(ctx))
+	g.Go(c.processManager.run(ctx))
+	g.Go(c.addressManager.run(ctx))
 	return g.Wait()
 }
 
@@ -255,7 +261,7 @@ func (c *Collector) handleFlowDelete(e store.Entry) {
 	c.flowEvents <- deleteEvent{Record: e.Record}
 }
 
-func (c *Collector) updateGraph(event changeEvent, stor store.Interface) {
+func (c *Collector) updateGraph(event changeEvent, stor readonly) {
 	if dEvent, ok := event.(deleteEvent); ok {
 		c.g.Unindex(dEvent.Record)
 		return
@@ -275,17 +281,23 @@ func (c *Collector) FlowInfo(id string) FlowState {
 	return c.flowManager.get(id)
 }
 
+type readonly interface {
+	Get(id string) (store.Entry, bool)
+	List() []store.Entry
+	Index(index string, exemplar store.Entry) []store.Entry
+	IndexValues(index string) []string
+}
+
 func (c *Collector) runWorkQueue(ctx context.Context) func() error {
-	reactors := map[vanflow.TypeMeta][]func(event changeEvent, stor store.Interface){}
+	reactors := map[vanflow.TypeMeta][]func(event changeEvent, stor readonly){}
 	for _, r := range recordTypes {
 		reactors[r.GetTypeMeta()] = append(reactors[r.GetTypeMeta()], c.updateGraph)
 	}
 
-	idp := newStableIdentityProvider()
 	reactors[records.AddressRecord{}.GetTypeMeta()] = append(reactors[records.AddressRecord{}.GetTypeMeta()], c.updateGraph)
-	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], ensureAddressHandler(idp), ensureSiteServerProcessHandler(idp, c.g), c.flowManager.handleCacheInvalidatingEvent)
-	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], ensureAddressHandler(idp))
-	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], ensureProcessGroupHandler(idp), ensureSiteServerProcessHandler(idp, c.g), c.flowManager.handleCacheInvalidatingEvent)
+	reactors[vanflow.ConnectorRecord{}.GetTypeMeta()] = append(reactors[vanflow.ConnectorRecord{}.GetTypeMeta()], c.addressManager.handleChangeEvent, c.processManager.handleChangeEvent, c.flowManager.handleCacheInvalidatingEvent)
+	reactors[vanflow.ListenerRecord{}.GetTypeMeta()] = append(reactors[vanflow.ListenerRecord{}.GetTypeMeta()], c.addressManager.handleChangeEvent)
+	reactors[vanflow.ProcessRecord{}.GetTypeMeta()] = append(reactors[vanflow.ProcessRecord{}.GetTypeMeta()], c.processManager.handleChangeEvent, c.flowManager.handleCacheInvalidatingEvent)
 
 	return func() error {
 		defer func() {
@@ -318,126 +330,8 @@ type idProvider interface {
 	ID(prefix string, part string, parts ...string) string
 }
 
-func ensureProcessGroupHandler(idp idProvider) func(event changeEvent, stor store.Interface) {
-	return func(event changeEvent, stor store.Interface) {
-		if _, ok := event.(deleteEvent); ok {
-			return
-		}
-		entry, ok := stor.Get(event.ID())
-		if !ok {
-			return
-		}
-		proccess := entry.Record.(vanflow.ProcessRecord)
-		if proccess.Group == nil {
-			return
-		}
-		groupName := *proccess.Group
-		startTime := time.Now()
-		if proccess.StartTime != nil {
-			startTime = proccess.StartTime.Time
-		}
-
-		groups := stor.Index(IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: groupName}})
-		if len(groups) > 0 {
-			return
-		}
-		id := idp.ID("pg", groupName)
-		stor.Add(records.ProcessGroupRecord{ID: id, Name: groupName, Start: startTime}, store.SourceRef{})
-	}
-}
-
-func ensureSiteServerProcessHandler(idp idProvider, graph *graph.Graph) func(event changeEvent, stor store.Interface) {
-	return func(event changeEvent, stor store.Interface) {
-		if _, ok := event.(deleteEvent); ok {
-			return
-		}
-		entry, ok := stor.Get(event.ID())
-		if !ok {
-			return
-		}
-		switch record := entry.Record.(type) {
-		case vanflow.ProcessRecord:
-			sourceHost := record.SourceHost
-			siteID := record.Parent
-			if sourceHost == nil || siteID == nil || entry.Source.ID == "self" {
-				slog.Info("skip checking Site proc", slog.Any("id", record.ID))
-				return
-			}
-			stor.Delete(idp.ID("siteproc", *sourceHost, *siteID))
-		case vanflow.ConnectorRecord:
-			processID := record.ProcessID
-			destHost := record.DestHost
-			siteID := graph.Connector(record.ID).Parent().Parent().ID()
-			if destHost == nil || siteID == "" || (processID != nil && *processID != "") {
-				return
-			}
-
-			procID := idp.ID("siteproc", *destHost, siteID)
-			name := fmt.Sprintf("site-server-%s-%s", *destHost, shortSite(siteID))
-			groupName := fmt.Sprintf("site-servers-%s", shortSite(siteID))
-			role := "external"
-			stor.Add(vanflow.ProcessRecord{
-				BaseRecord: vanflow.NewBase(procID, time.Now()),
-				Parent:     &siteID,
-				Name:       &name,
-				Group:      &groupName,
-				SourceHost: destHost,
-				Mode:       &role,
-			}, store.SourceRef{ID: "self"})
-		}
-	}
-}
-
 func shortSite(s string) string {
 	return strings.Split(s, "-")[0]
-}
-func ensureAddressHandler(idp idProvider) func(event changeEvent, stor store.Interface) {
-	return func(event changeEvent, stor store.Interface) {
-		if _, ok := event.(deleteEvent); ok {
-			return
-		}
-		entry, ok := stor.Get(event.ID())
-		if !ok {
-			return
-		}
-		var (
-			address   string
-			startTime time.Time
-			protocol  string = "tcp"
-		)
-		switch r := entry.Record.(type) {
-		case vanflow.ListenerRecord:
-			if r.Address != nil {
-				address = *r.Address
-			}
-			if r.StartTime != nil {
-				startTime = r.StartTime.Time
-			}
-			if r.Protocol != nil {
-				protocol = *r.Protocol
-			}
-		case vanflow.ConnectorRecord:
-			if r.Address != nil {
-				address = *r.Address
-			}
-			if r.StartTime != nil {
-				startTime = r.StartTime.Time
-			}
-			if r.Protocol != nil {
-				protocol = *r.Protocol
-			}
-		default:
-		}
-		if address == "" {
-			return
-		}
-		addresses := stor.Index(IndexByTypeName, store.Entry{Record: records.AddressRecord{Name: address}})
-		if len(addresses) > 0 {
-			return
-		}
-		addressID := idp.ID("adr", address, protocol)
-		stor.Add(records.AddressRecord{ID: addressID, Name: address, Protocol: protocol, Start: startTime}, store.SourceRef{})
-	}
 }
 
 func (c *Collector) runSession(ctx context.Context) func() error {

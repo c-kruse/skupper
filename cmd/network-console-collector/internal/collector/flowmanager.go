@@ -149,7 +149,7 @@ type pairState struct {
 	Dirty bool
 }
 
-func (m *flowManager) runFlowPairManager(ctx context.Context) func() error {
+func (m *flowManager) run(ctx context.Context) func() error {
 	return func() error {
 		defer func() {
 			m.logger.Info("flow pair manager shutdown complete")
@@ -246,7 +246,7 @@ func (m *flowManager) get(id string) FlowState {
 	return state
 }
 
-func (m *flowManager) handleCacheInvalidatingEvent(event changeEvent, stor store.Interface) {
+func (m *flowManager) handleCacheInvalidatingEvent(event changeEvent, _ readonly) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.connectorsCache, event.ID())
