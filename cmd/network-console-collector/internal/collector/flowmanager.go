@@ -68,6 +68,17 @@ func (s FlowState) labels() prometheus.Labels {
 	}
 }
 
+func (s FlowState) legacyLables() prometheus.Labels {
+	return map[string]string{
+		"sourceSite":    s.SourceSiteName + "@_@" + s.SourceSiteID,
+		"destSite":      s.DestSiteName + "@_@" + s.DestSiteID,
+		"address":       s.Address,
+		"protocol":      s.Protocol,
+		"sourceProcess": s.SourceProcName,
+		"destProcess":   s.DestProcName,
+	}
+}
+
 var flowMetricLables = []string{"source_site_id", "dest_site_id", "source_site_name", "dest_site_name", "routing_key", "protocol", "source_process", "dest_process"}
 
 func newFlowManager(log *slog.Logger, graph *graph.Graph, reg *prometheus.Registry, flows, records store.Interface) *flowManager {
@@ -103,6 +114,32 @@ func newFlowManager(log *slog.Logger, graph *graph.Graph, reg *prometheus.Regist
 			Subsystem: "flow",
 			Name:      "received_bytes_total",
 		}, flowMetricLables),
+		legacyFlows: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "flows_total",
+				Help: "Total Flows",
+			},
+			[]string{"sourceSite", "destSite", "address", "protocol", "direction", "sourceProcess", "destProcess"}),
+		legacyOctets: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "octets_total",
+				Help: "Total Octets",
+			},
+			[]string{"sourceSite", "destSite", "address", "protocol", "direction", "sourceProcess", "destProcess"}),
+		legacyActiveFlows: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "active_flows",
+				Help: "Number of flows that are currently active, partitioned by source and destination",
+			},
+			[]string{"sourceSite", "destSite", "address", "protocol", "direction", "sourceProcess", "destProcess"}),
+		legacyFlowLatency: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "flow_latency_microseconds",
+				Help: "The measure latency for the direction of flow",
+				//                 1ms,  2 ms, 5ms,  10ms,  100ms,  1s,      10s
+				Buckets: []float64{1000, 2000, 5000, 10000, 100000, 1000000, 10000000},
+			},
+			[]string{"sourceSite", "destSite", "address", "protocol", "direction", "sourceProcess", "destProcess"}),
 	}
 
 	reg.MustRegister(
@@ -110,6 +147,10 @@ func newFlowManager(log *slog.Logger, graph *graph.Graph, reg *prometheus.Regist
 		manager.flowClosedCounter,
 		manager.flowBytesSentCounter,
 		manager.flowBytesReceivedCounter,
+		manager.legacyFlows,
+		manager.legacyOctets,
+		manager.legacyActiveFlows,
+		manager.legacyFlowLatency,
 	)
 	return manager
 }
@@ -136,6 +177,11 @@ type flowManager struct {
 	flowClosedCounter        *prometheus.CounterVec
 	flowBytesSentCounter     *prometheus.CounterVec
 	flowBytesReceivedCounter *prometheus.CounterVec
+
+	legacyFlows       *prometheus.CounterVec
+	legacyOctets      *prometheus.CounterVec
+	legacyActiveFlows *prometheus.GaugeVec
+	legacyFlowLatency *prometheus.HistogramVec
 }
 
 type pair struct {
@@ -294,22 +340,45 @@ func (m *flowManager) processEvent(event changeEvent) {
 
 		}
 		labels := state.labels()
+		legacyLabels := state.legacyLables()
 		if !alreadyQualified {
 			prevOctets, prevOctetsRev = 0, 0
 			previouslyActive = true
 			m.flowOpenedCounter.With(labels).Inc()
+			{
+				legacyLabels["direction"] = "outgoing"
+				m.legacyFlows.With(legacyLabels).Inc()
+				m.legacyActiveFlows.With(legacyLabels).Inc()
+				m.legacyFlowLatency.With(legacyLabels).Observe(float64(dref(record.Latency)))
+				legacyLabels["direction"] = "incoming"
+				m.legacyFlows.With(legacyLabels).Inc()
+				m.legacyActiveFlows.With(legacyLabels).Inc()
+				m.legacyFlowLatency.With(legacyLabels).Observe(float64(dref(record.LatencyReverse)))
+			}
 			m.incrementProcessPairs(*state)
 		}
 		if !state.Active && previouslyActive {
 			m.flowClosedCounter.With(labels).Inc()
+			{
+				legacyLabels["direction"] = "incoming"
+				m.legacyActiveFlows.With(legacyLabels).Add(-1)
+				legacyLabels["direction"] = "outgoing"
+				m.legacyActiveFlows.With(legacyLabels).Add(-1)
+			}
 		}
 		sentInc := float64(dref(record.Octets) - prevOctets)
-		reveivedInc := float64(dref(record.OctetsReverse) - prevOctetsRev)
+		receivedInc := float64(dref(record.OctetsReverse) - prevOctetsRev)
 		m.flowBytesSentCounter.With(labels).Add(sentInc)
-		m.flowBytesReceivedCounter.With(labels).Add(reveivedInc)
+		m.flowBytesReceivedCounter.With(labels).Add(receivedInc)
+		{
+			legacyLabels["direction"] = "outgoing"
+			m.legacyOctets.With(legacyLabels).Add(sentInc)
+			legacyLabels["direction"] = "incoming"
+			m.legacyOctets.With(legacyLabels).Add(receivedInc)
+		}
 		log.Info("FLOW",
 			slog.Float64("bytes_out", sentInc),
-			slog.Float64("bytes_in", reveivedInc),
+			slog.Float64("bytes_in", receivedInc),
 		)
 
 	default:

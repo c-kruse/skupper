@@ -472,6 +472,7 @@ func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
 	var pAddresses *[]string
 	var addresses []string
 	var processGroupID *string
+	var siteName *string
 	binding := "unbound"
 	if process.Group != nil {
 		groups := c.records.Index(collector.IndexByTypeName, store.Entry{Record: records.ProcessGroupRecord{Name: dref(process.Group)}})
@@ -490,6 +491,11 @@ func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
 			addresses = append(addresses, fmt.Sprintf("%s@%s@%s", address.Name, address.ID, "tcp"))
 		}
 	}
+	if se, ok := node.Parent().Get(); ok {
+		site, _ := se.Record.(vanflow.SiteRecord)
+		siteName = site.Name
+
+	}
 	if len(addresses) > 0 {
 		pAddresses = &addresses
 		binding = "bound"
@@ -498,6 +504,7 @@ func (c *server) asProcessRecord(entry store.Entry) (ProcessRecord, bool) {
 	return ProcessRecord{
 		BaseRecord:     toBase(process.BaseRecord, process.Parent, entry.Source.ID),
 		Name:           process.Name,
+		ParentName:     siteName,
 		GroupName:      process.Group,
 		GroupIdentity:  processGroupID,
 		ProcessRole:    process.Mode,

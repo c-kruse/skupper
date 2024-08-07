@@ -43,7 +43,7 @@ func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.
 			Namespace: "skupper",
 			Subsystem: "internal",
 			Name:      "flow_processing_seconds",
-			Buckets:   []float64{0.001, 0.002, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+			Buckets:   []float64{0.0005, 0.001, 0.002, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		}, []string{"type"}),
 	}
 	reg.MustRegister(c.eventProcessingTime)
