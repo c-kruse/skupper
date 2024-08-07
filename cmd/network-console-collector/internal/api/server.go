@@ -546,29 +546,51 @@ func (c *server) asProcessPair(entry store.Entry) (FlowAggregateRecord, bool) {
 	var (
 		sourceName string
 		destName   string
+
+		sourceSiteID   string
+		sourceSiteName string
+		destSiteID     string
+		destSiteName   string
 	)
-	if ss, ok := c.coll.Graph().Process(record.Source).Get(); ok {
+	sourceNode := c.coll.Graph().Process(record.Source)
+	if ss, ok := sourceNode.Get(); ok {
 		if sr, ok := ss.Record.(vanflow.ProcessRecord); ok {
 			sourceName = dref(sr.Name)
 		}
 	}
-	if ds, ok := c.coll.Graph().Process(record.Dest).Get(); ok {
+	destNode := c.coll.Graph().Process(record.Dest)
+	if ds, ok := destNode.Get(); ok {
 		if dr, ok := ds.Record.(vanflow.ProcessRecord); ok {
 			destName = dref(dr.Name)
 		}
 	}
+	if ssite, ok := sourceNode.Parent().Get(); ok {
+		if ssr, ok := ssite.Record.(vanflow.SiteRecord); ok {
+			sourceSiteName, sourceSiteID = dref(ssr.Name), ssr.ID
+		}
+	}
+	if dsite, ok := destNode.Parent().Get(); ok {
+		if dsr, ok := dsite.Record.(vanflow.SiteRecord); ok {
+			destSiteName, destSiteID = dref(dsr.Name), dsr.ID
+		}
+	}
+
 	return FlowAggregateRecord{
 		BaseRecord: BaseRecord{
 			Identity:  record.ID,
 			StartTime: uint64(record.Start.UnixMicro()),
 		},
-		PairType:        FlowAggregatePairTypePROCESS,
-		Protocol:        record.Protocol,
-		SourceId:        record.Source,
-		SourceName:      sourceName,
-		DestinationId:   record.Dest,
-		DestinationName: destName,
-		RecordCount:     record.Count,
+		PairType:            FlowAggregatePairTypePROCESS,
+		Protocol:            record.Protocol,
+		SourceId:            record.Source,
+		SourceSiteId:        &sourceSiteID,
+		SourceSiteName:      &sourceSiteName,
+		SourceName:          sourceName,
+		DestinationId:       record.Dest,
+		DestinationName:     destName,
+		DestinationSiteId:   &destSiteID,
+		DestinationSiteName: &destSiteName,
+		RecordCount:         record.Count,
 	}, true
 }
 
