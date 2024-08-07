@@ -39,7 +39,14 @@ func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.
 		events:        make(chan changeEvent, 32),
 		flowEvents:    make(chan changeEvent, 1024),
 		clients:       make(map[string]*eventsource.Client),
+		eventProcessingTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "skupper",
+			Subsystem: "internal",
+			Name:      "flow_processing_seconds",
+			Buckets:   []float64{0.001, 0.002, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		}, []string{"type"}),
 	}
+	reg.MustRegister(c.eventProcessingTime)
 
 	c.Records = store.NewSyncMapStore(store.SyncMapStoreConfig{
 		Handlers: store.EventHandlerFuncs{
@@ -107,6 +114,8 @@ type Collector struct {
 	purgeQueue chan store.SourceRef
 	events     chan changeEvent
 	flowEvents chan changeEvent
+
+	eventProcessingTime *prometheus.HistogramVec
 }
 
 type changeEvent interface {
@@ -308,11 +317,16 @@ func (c *Collector) runWorkQueue(ctx context.Context) func() error {
 			case <-ctx.Done():
 				return nil
 			case event := <-c.flowEvents:
+				start := time.Now()
 				c.flowManager.processEvent(event)
+				c.eventProcessingTime.WithLabelValues(event.GetTypeMeta().String()).Observe(time.Since(start).Seconds())
 			case event := <-c.events:
-				for _, reactor := range reactors[event.GetTypeMeta()] {
+				start := time.Now()
+				typ := event.GetTypeMeta()
+				for _, reactor := range reactors[typ] {
 					reactor(event, c.Records)
 				}
+				c.eventProcessingTime.WithLabelValues(typ.String()).Observe(time.Since(start).Seconds())
 			}
 		}
 	}

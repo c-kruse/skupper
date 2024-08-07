@@ -16,6 +16,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/collector"
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
+	htMetrics "github.com/slok/go-http-metrics/metrics/prometheus"
+	"github.com/slok/go-http-metrics/middleware"
+	"github.com/slok/go-http-metrics/middleware/std"
 )
 
 type Config struct {
@@ -39,6 +42,7 @@ func NewServer(cfg Config,
 	var middlewares []mux.MiddlewareFunc = []mux.MiddlewareFunc{
 		handlers.CompressHandler,
 	}
+
 	var proxyMiddlewares []mux.MiddlewareFunc
 
 	if cfg.CORSAllowAll { // do not use CORS handler with proxy handlers: the upstream service should handle this
@@ -81,7 +85,10 @@ func addRoutes(router *mux.Router,
 	stdRouter.StrictSlash(true)
 	stdRouter.Handle("/metrics", handleMetrics(metricsRegistry))
 	stdRouter.PathPrefix("/swagger").Handler(http.StripPrefix("/swagger/", handleSwagger(specFS)))
-	HandlerWithOptions(server, GorillaServerOptions{BaseRouter: stdRouter})
+	HandlerWithOptions(server, GorillaServerOptions{
+		BaseRouter:  stdRouter,
+		Middlewares: []MiddlewareFunc{middlewareRecordHTTPMetrics(metricsRegistry)},
+	})
 
 	if !enableConsole {
 		return
@@ -134,4 +141,13 @@ func handleNoContent() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func middlewareRecordHTTPMetrics(reg *prometheus.Registry) MiddlewareFunc {
+	metricsMw := middleware.New(
+		middleware.Config{
+			Recorder: htMetrics.NewRecorder(htMetrics.Config{Registry: reg}),
+		})
+
+	return std.HandlerProvider("", metricsMw)
 }
