@@ -68,14 +68,26 @@ func (s FlowState) labels() prometheus.Labels {
 	}
 }
 
-func (s FlowState) legacyLables() prometheus.Labels {
+func (s FlowState) legacyLablesOut() prometheus.Labels {
 	return map[string]string{
+		"direction":     "outgoing",
 		"sourceSite":    s.SourceSiteName + "@_@" + s.SourceSiteID,
 		"destSite":      s.DestSiteName + "@_@" + s.DestSiteID,
 		"address":       s.Address,
 		"protocol":      s.Protocol,
 		"sourceProcess": s.SourceProcName,
 		"destProcess":   s.DestProcName,
+	}
+}
+func (s FlowState) legacyLablesIn() prometheus.Labels {
+	return map[string]string{
+		"direction":     "incoming",
+		"destSite":      s.SourceSiteName + "@_@" + s.SourceSiteID,
+		"sourceSite":    s.DestSiteName + "@_@" + s.DestSiteID,
+		"address":       s.Address,
+		"protocol":      s.Protocol,
+		"destProcess":   s.SourceProcName,
+		"sourceProcess": s.DestProcName,
 	}
 }
 
@@ -340,30 +352,27 @@ func (m *flowManager) processEvent(event changeEvent) {
 
 		}
 		labels := state.labels()
-		legacyLabels := state.legacyLables()
+		legacyLabelsOut := state.legacyLablesOut()
+		legacyLabelsIn := state.legacyLablesIn()
 		if !alreadyQualified {
 			prevOctets, prevOctetsRev = 0, 0
 			previouslyActive = true
 			m.flowOpenedCounter.With(labels).Inc()
 			{
-				legacyLabels["direction"] = "outgoing"
-				m.legacyFlows.With(legacyLabels).Inc()
-				m.legacyActiveFlows.With(legacyLabels).Inc()
-				m.legacyFlowLatency.With(legacyLabels).Observe(float64(dref(record.Latency)))
-				legacyLabels["direction"] = "incoming"
-				m.legacyFlows.With(legacyLabels).Inc()
-				m.legacyActiveFlows.With(legacyLabels).Inc()
-				m.legacyFlowLatency.With(legacyLabels).Observe(float64(dref(record.LatencyReverse)))
+				m.legacyFlows.With(legacyLabelsOut).Inc()
+				m.legacyActiveFlows.With(legacyLabelsOut).Inc()
+				m.legacyFlowLatency.With(legacyLabelsOut).Observe(float64(dref(record.Latency)))
+				m.legacyFlows.With(legacyLabelsIn).Inc()
+				m.legacyActiveFlows.With(legacyLabelsIn).Inc()
+				m.legacyFlowLatency.With(legacyLabelsIn).Observe(float64(dref(record.LatencyReverse)))
 			}
 			m.incrementProcessPairs(*state)
 		}
 		if !state.Active && previouslyActive {
 			m.flowClosedCounter.With(labels).Inc()
 			{
-				legacyLabels["direction"] = "incoming"
-				m.legacyActiveFlows.With(legacyLabels).Add(-1)
-				legacyLabels["direction"] = "outgoing"
-				m.legacyActiveFlows.With(legacyLabels).Add(-1)
+				m.legacyActiveFlows.With(legacyLabelsOut).Add(-1)
+				m.legacyActiveFlows.With(legacyLabelsIn).Add(-1)
 			}
 		}
 		sentInc := float64(dref(record.Octets) - prevOctets)
@@ -371,10 +380,8 @@ func (m *flowManager) processEvent(event changeEvent) {
 		m.flowBytesSentCounter.With(labels).Add(sentInc)
 		m.flowBytesReceivedCounter.With(labels).Add(receivedInc)
 		{
-			legacyLabels["direction"] = "outgoing"
-			m.legacyOctets.With(legacyLabels).Add(sentInc)
-			legacyLabels["direction"] = "incoming"
-			m.legacyOctets.With(legacyLabels).Add(receivedInc)
+			m.legacyOctets.With(legacyLabelsOut).Add(sentInc)
+			m.legacyOctets.With(legacyLabelsIn).Add(receivedInc)
 		}
 		log.Info("FLOW",
 			slog.Float64("bytes_out", sentInc),
