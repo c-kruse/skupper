@@ -19,8 +19,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/skupperproject/skupper/pkg/qdr"
 
+	_ "github.com/skupperproject/skupper/cmd/network-console-collector/docs"
+
 	"github.com/skupperproject/skupper/pkg/certs"
 	"github.com/skupperproject/skupper/pkg/version"
+	"github.com/swaggo/http-swagger/v2"
 )
 
 func run(cfg Config) error {
@@ -49,6 +52,7 @@ func run(cfg Config) error {
 
 	var mux = mux.NewRouter().StrictSlash(true)
 
+	mux.PathPrefix("/swagger").Handler(httpSwagger.Handler())
 	var api = mux.PathPrefix("/api").Subrouter()
 	api.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -337,6 +341,17 @@ func run(cfg Config) error {
 	return nil
 }
 
+// @title           Skupper Network Console HTTP API
+// @version         0.0.1
+// @description     The Skupper network console collector exposes a read only
+// HTTP API. This API is used by the network console frontend to display
+// information about a skupper netwrok.
+
+// @contact.name   Skupper
+// @contact.url    https://skupper.io
+
+// @license.name  Apache 2.0
+// @license.url   http://www.apache.org/licenses/LICENSE-2.0.html
 func main() {
 	var cfg Config
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)

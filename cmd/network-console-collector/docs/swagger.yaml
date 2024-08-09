@@ -1,0 +1,95 @@
+definitions:
+  models.ListResponse-models_SiteRecord:
+    properties:
+      count:
+        type: integer
+      results:
+        items:
+          $ref: '#/definitions/models.SiteRecord'
+        type: array
+      timeRangeCount:
+        type: integer
+    type: object
+  models.SiteRecord:
+    properties:
+      endTime:
+        type: integer
+      identity:
+        type: string
+      l:
+        description: Matrix of literal/ptr, default/omitempty, optional/required default/nullable
+        type: string
+      ln:
+        type: string
+        x-nullable: true
+      lo:
+        type: string
+      lon:
+        type: string
+        x-nullable: true
+      lonr:
+        type: string
+        x-nullable: true
+      lor:
+        type: string
+      lr:
+        type: string
+      lrn:
+        type: string
+        x-nullable: true
+      p:
+        type: string
+      parent:
+        type: string
+      pn:
+        type: string
+        x-nullable: true
+      po:
+        type: string
+      pon:
+        type: string
+        x-nullable: true
+      ponr:
+        type: string
+        x-nullable: true
+      por:
+        type: string
+      pr:
+        type: string
+      prn:
+        type: string
+        x-nullable: true
+      source:
+        type: string
+      startTime:
+        type: integer
+    required:
+    - identity
+    - lonr
+    - lor
+    - lr
+    - lrn
+    - ponr
+    - por
+    - pr
+    - prn
+    type: object
+info:
+  contact:
+    name: Skupper
+    url: https://skupper.io
+  description: The Skupper network console collector exposes a read only
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  title: Skupper Network Console HTTP API
+  version: 0.0.1
+paths:
+  /api/v1alpha1/sites/:
+    get:
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.ListResponse-models_SiteRecord'
+swagger: "2.0"

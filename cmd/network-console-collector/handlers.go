@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/skupperproject/skupper/cmd/network-console-collector/models"
 	"github.com/skupperproject/skupper/pkg/flow"
 )
 
@@ -19,14 +21,28 @@ func (c *Controller) eventsourceHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// GetSites godoc
+// @Success      200  {object}  models.ListResponse[models.SiteRecord]
+// @Router       /api/v1alpha1/sites/ [get]
 func (c *Controller) siteHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	c.FlowCollector.Request <- flow.ApiRequest{RecordType: flow.Site, Request: r}
-	response := <-c.FlowCollector.Response
-	w.WriteHeader(response.Status)
-	if response.Body != nil {
-		fmt.Fprintf(w, "%s", *response.Body)
-	}
+	var empty string
+	json.NewEncoder(w).Encode(models.ListResponse[models.SiteRecord]{
+		Results: []models.SiteRecord{
+			{BaseRecord: models.BaseRecord{ID: "all unset"}},
+			{
+				BaseRecord: models.BaseRecord{ID: "all empty string"},
+				P:          &empty,
+				PR:         &empty,
+				PN:         &empty,
+				PRN:        &empty,
+				PO:         &empty,
+				PON:        &empty,
+				POR:        &empty,
+				PONR:       &empty,
+			},
+		},
+	})
 }
 
 func (c *Controller) hostHandler(w http.ResponseWriter, r *http.Request) {
