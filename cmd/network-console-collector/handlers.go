@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/oapi-codegen/nullable"
 	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/api"
 	"github.com/skupperproject/skupper/pkg/flow"
 )
@@ -36,8 +37,16 @@ func (c *Controller) siteHandler(w http.ResponseWriter, r *http.Request) {
 					Identity: "all empty",
 				},
 				Optional:        &empty,
-				OptionalNilable: &empty,
-				RequiredNilable: &empty,
+				OptionalNilable: nullable.NewNullableWithValue(empty),
+				RequiredNilable: nullable.NewNullableWithValue(empty),
+			},
+			{
+				BaseRecord: api.BaseRecord{
+					Identity: "explicit nils",
+				},
+				Optional:        &empty,
+				OptionalNilable: nullable.NewNullNullable[string](),
+				RequiredNilable: nullable.NewNullNullable[string](),
 			},
 		},
 	})

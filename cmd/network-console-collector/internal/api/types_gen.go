@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/oapi-codegen/nullable"
 )
 
 // SiteListResponse defines model for SiteListResponse.
@@ -23,10 +24,10 @@ type SiteRecord struct {
 	// Embedded struct due to allOf(#/components/schemas/baseRecord)
 	BaseRecord `yaml:",inline"`
 	// Embedded fields due to inline allOf schema
-	Optional        *string `json:"optional,omitempty"`
-	OptionalNilable *string `json:"optionalNilable"`
-	Required        string  `json:"required"`
-	RequiredNilable *string `json:"requiredNilable"`
+	Optional        *string                   `json:"optional,omitempty"`
+	OptionalNilable nullable.Nullable[string] `json:"optionalNilable,omitempty"`
+	Required        string                    `json:"required"`
+	RequiredNilable nullable.Nullable[string] `json:"requiredNilable"`
 }
 
 // BaseRecord defines model for baseRecord.
