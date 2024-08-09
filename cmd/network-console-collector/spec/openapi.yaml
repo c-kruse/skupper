@@ -1,0 +1,95 @@
+openapi: 3.0.0
+info:
+  contact:
+    url: https://skupper.io/
+  description: >-
+    The Skupper network console collector exposes a read only HTTP API. This
+    API is used by the network console frontend to display information about a
+    skupper netwrok.
+  title: Skupper Network Console HTTP API.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+  version: 0.0.1
+
+paths:
+  /api/v1alpha1/sites/:
+    get:
+      tags: [site]
+      operationId: sites
+      responses:
+        '200':
+          $ref: '#/components/responses/getSites'
+components:
+  responses:
+    getSites:
+      description: response with a list of sites
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SiteListResponse'
+  schemas:
+    listResponse:
+      type: object
+      required:
+        - count
+        - timeRangeCount
+      properties:
+        count:
+          type: integer
+          format: int64
+          default: 0
+          minimum: 0
+          description: todo
+        timeRangeCount:
+          type: integer
+          format: int64
+          default: 0
+          minimum: 0
+          description: todo
+    baseRecord:
+        type: object
+        required:
+          - identity
+          - startTime
+          - endTime
+        properties:
+          identity:
+            type: string
+          parent:
+            type: string
+          startTime:
+            type: integer
+            format: uint64
+          endTime:
+            type: integer
+            format: uint64
+    SiteListResponse:
+      allOf:
+        - $ref: '#/components/schemas/listResponse'
+        - type: object
+          required: [results]
+          properties:
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/SiteRecord'
+    SiteRecord:
+      allOf:
+        - $ref: '#/components/schemas/baseRecord'
+        - type: object
+          description: matrix of required/non-required, nullable/not
+          required:
+            - required
+            - requiredNilable
+          properties:
+            required:
+              type: string
+            requiredNilable:
+              type: string
+              nullable: true
+            optional:
+              type: string
+            optionalNilable:
+              type: string
+              nullable: true

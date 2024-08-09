@@ -48,6 +48,11 @@ func run(cfg Config) error {
 	c.FlowCollector.Collector.PrometheusUrl = promURL
 
 	var mux = mux.NewRouter().StrictSlash(true)
+	specfs, err := getSpecContent()
+	if err != nil {
+		panic(err)
+	}
+	mux.PathPrefix("/swagger/").Handler(http.StripPrefix("/swagger/", http.FileServerFS(specfs)))
 
 	var api = mux.PathPrefix("/api").Subrouter()
 	api.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

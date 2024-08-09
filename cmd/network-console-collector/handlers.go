@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/skupperproject/skupper/cmd/network-console-collector/internal/api"
 	"github.com/skupperproject/skupper/pkg/flow"
 )
 
@@ -21,12 +23,24 @@ func (c *Controller) eventsourceHandler(w http.ResponseWriter, r *http.Request) 
 
 func (c *Controller) siteHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	c.FlowCollector.Request <- flow.ApiRequest{RecordType: flow.Site, Request: r}
-	response := <-c.FlowCollector.Response
-	w.WriteHeader(response.Status)
-	if response.Body != nil {
-		fmt.Fprintf(w, "%s", *response.Body)
-	}
+	var empty string
+	json.NewEncoder(w).Encode(api.SiteListResponse{
+		Results: []api.SiteRecord{
+			{
+				BaseRecord: api.BaseRecord{
+					Identity: "all unset",
+				},
+			},
+			{
+				BaseRecord: api.BaseRecord{
+					Identity: "all empty",
+				},
+				Optional:        &empty,
+				OptionalNilable: &empty,
+				RequiredNilable: &empty,
+			},
+		},
+	})
 }
 
 func (c *Controller) hostHandler(w http.ResponseWriter, r *http.Request) {
