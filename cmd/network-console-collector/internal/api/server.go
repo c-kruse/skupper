@@ -782,7 +782,6 @@ func handleResultSet[R any, T SetResponse[[]R]](w http.ResponseWriter, r *http.R
 	response.Set(x)
 	response.SetCount(b.Count)
 	response.SetStatus(b.Status)
-	response.SetTotalCount(b.TotalCount)
 	response.SetTimeRangeCount(b.TimeRangeCount)
 	if err := encode(w, http.StatusOK, response); err != nil {
 		return fmt.Errorf("response write error: %s", err)

@@ -15,16 +15,14 @@ import (
 
 func filterAndOrderResults[T any](r *http.Request, results []T) ([]T, BaseResponse) {
 	var (
-		out        []T = results
-		problems   []string
-		isCopy     bool
-		totalCount int64 = int64(len(results))
-		resposne   BaseResponse
+		out      []T = results
+		problems []string
+		isCopy   bool
+		resposne BaseResponse
 	)
 
 	qp := getQueryParams(r)
 
-	resposne.TotalCount = &totalCount // pre-filter result count
 	filterFields := make(map[string]fieldIndex[T], len(qp.FilterFields))
 	for path := range qp.FilterFields {
 		m, err := indexerForField[T](path)
