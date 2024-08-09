@@ -319,16 +319,3 @@ func (m *processManager) ensureGroup(name string, add bool) {
 		m.checkGroup <- name
 	}
 }
-
-type stringSet map[string]struct{}
-
-func (s stringSet) Put(e string) {
-	s[e] = struct{}{}
-}
-func (s stringSet) Copy() stringSet {
-	cp := stringSet{}
-	for key := range s {
-		cp[key] = struct{}{}
-	}
-	return cp
-}
