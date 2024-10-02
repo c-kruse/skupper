@@ -1336,66 +1336,13 @@ components:
         - $ref: '#/components/schemas/baseRecord'
         - type: object
           required:
-            - active
-            - connectionId
-            - sourceSiteId
-            - sourceSiteName
-            - destSiteId
-            - destSiteName
-            - sourceProcessId
-            - sourceProcessName
-            - destProcessId
-            - destProcessName
-            - duration
-            - processPairId
-            - processGroupPairId
-            - sitePairId
+            - connection
             - protocol
-            - routingKey
-            - listenerId
-            - connectorId
             - method
             - result
           properties:
-            connectionId:
-              type: string
-            active:
-              type: boolean
-            duration:
-              type: integer
-              format: uint64
-              nullable: true
-            processPairId:
-              type: string
-              nullable: true
-            processGroupPairId:
-              type: string
-              nullable: true
-            sitePairId:
-              type: string
-              nullable: true
-            sourceSiteId:
-              type: string
-            sourceSiteName:
-              type: string
-            destSiteId:
-              type: string
-            destSiteName:
-              type: string
-            sourceProcessId:
-              type: string
-            sourceProcessName:
-              type: string
-            destProcessId:
-              type: string
-            destProcessName:
-              type: string
-            listenerId:
-              type: string
-            connectorId:
-              type: string
-            routingKey:
-              type: string
+            connection:
+              $ref: '#/components/schemas/ConnectionRecord'
             protocol:
               type: string
               example: tcp

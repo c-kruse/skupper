@@ -141,8 +141,8 @@ func defaultConnection(id string) api.ConnectionRecord {
 	}
 }
 
-func NewRequestSliceProvider() func([]store.Entry) []api.RequestRecord {
-	provider := NewRequestProvider()
+func NewRequestSliceProvider(stor store.Interface) func([]store.Entry) []api.RequestRecord {
+	provider := NewRequestProvider(stor)
 	return func(entries []store.Entry) []api.RequestRecord {
 		results := make([]api.RequestRecord, 0, len(entries))
 		for _, e := range entries {
@@ -157,48 +157,46 @@ func NewRequestSliceProvider() func([]store.Entry) []api.RequestRecord {
 		return results
 	}
 }
-func NewRequestProvider() func(collector.RequestRecord) (api.RequestRecord, bool) {
-	return func(conn collector.RequestRecord) (api.RequestRecord, bool) {
-		out := defaultRequest(conn.ID)
+func NewRequestProvider(stor store.Interface) func(collector.RequestRecord) (api.RequestRecord, bool) {
+	connProvider := NewConnectionsProvider(stor)
+	memo := make(map[string]api.ConnectionRecord)
+	connectionByID := func(id string) api.ConnectionRecord {
+		if cr, ok := memo[id]; ok {
+			return cr
+		}
+		cr := defaultConnection(id)
+		e, ok := stor.Get(id)
+		if !ok {
+			return cr
+		}
+		cr, _ = connProvider(e.Record.(collector.ConnectionRecord))
+		memo[id] = cr
+		return cr
+	}
 
-		record, ok := conn.GetFlow()
+	return func(req collector.RequestRecord) (api.RequestRecord, bool) {
+		out := defaultRequest(req.ID, req.TransportID)
+
+		record, ok := req.GetFlow()
 
 		if !ok {
 			return out, false
 		}
 
 		out.StartTime, out.EndTime = vanflowTimes(record.BaseRecord)
+		out.Protocol = req.Protocol
 		setOpt(&out.Method, record.Method)
 		setOpt(&out.Result, record.Result)
 
-		if record.EndTime != nil && record.StartTime != nil && record.EndTime.After(record.StartTime.Time) {
-			out.Active = false
-			if record.EndTime != nil && record.StartTime != nil {
-				duration := uint64(record.EndTime.Sub(record.StartTime.Time) / time.Microsecond)
-				out.Duration = &duration
-			}
-		}
-
-		out.ConnectionId = conn.TransportID
-		out.Protocol = conn.Protocol
-		out.RoutingKey = conn.RoutingKey
-		out.SourceProcessId = conn.Source.ID
-		out.SourceProcessName = conn.Source.Name
-		out.SourceSiteId = conn.SourceSite.ID
-		out.SourceSiteName = conn.SourceSite.Name
-		out.DestProcessId = conn.Dest.ID
-		out.DestProcessName = conn.Dest.Name
-		out.DestSiteId = conn.DestSite.ID
-		out.DestSiteName = conn.DestSite.Name
-		out.ListenerId = conn.Listener.ID
+		out.Connection = connectionByID(req.TransportID)
 
 		return out, true
 	}
 }
 
-func defaultRequest(id string) api.RequestRecord {
+func defaultRequest(id, conn string) api.RequestRecord {
 	return api.RequestRecord{
-		Identity: id,
-		Active:   true,
+		Identity:   id,
+		Connection: defaultConnection(conn),
 	}
 }

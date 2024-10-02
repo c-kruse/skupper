@@ -397,32 +397,16 @@ type RequestListResponse struct {
 
 // RequestRecord defines model for RequestRecord.
 type RequestRecord struct {
-	Active          bool    `json:"active"`
-	ConnectionId    string  `json:"connectionId"`
-	ConnectorId     string  `json:"connectorId"`
-	DestProcessId   string  `json:"destProcessId"`
-	DestProcessName string  `json:"destProcessName"`
-	DestSiteId      string  `json:"destSiteId"`
-	DestSiteName    string  `json:"destSiteName"`
-	Duration        *uint64 `json:"duration"`
+	Connection ConnectionRecord `json:"connection"`
 
 	// EndTime The end time in microseconds of the record in Unix timestamp format.
 	EndTime uint64 `json:"endTime"`
 
 	// Identity The unique identifier for the record.
-	Identity           string  `json:"identity"`
-	ListenerId         string  `json:"listenerId"`
-	Method             string  `json:"method"`
-	ProcessGroupPairId *string `json:"processGroupPairId"`
-	ProcessPairId      *string `json:"processPairId"`
-	Protocol           string  `json:"protocol"`
-	Result             string  `json:"result"`
-	RoutingKey         string  `json:"routingKey"`
-	SitePairId         *string `json:"sitePairId"`
-	SourceProcessId    string  `json:"sourceProcessId"`
-	SourceProcessName  string  `json:"sourceProcessName"`
-	SourceSiteId       string  `json:"sourceSiteId"`
-	SourceSiteName     string  `json:"sourceSiteName"`
+	Identity string `json:"identity"`
+	Method   string `json:"method"`
+	Protocol string `json:"protocol"`
+	Result   string `json:"result"`
 
 	// StartTime The creation time in microseconds of the record in Unix timestamp format. The value 0 means that the record is not terminated
 	StartTime uint64 `json:"startTime"`
