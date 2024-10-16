@@ -20,6 +20,7 @@ readonly HELM=${HELM:-helm}
 readonly DOCKER=${DOCKER:-docker}
 
 readonly CLUSTER="${CLUSTER:-skupper-dev}"
+readonly SUBNET_BYTE="${SUBNET_BYTE:-200}"
 readonly KUBECONFIG="${KUBECONFIG:-$HOME/.kube/kind-config-$CLUSTER}"
 readonly CONTROLLER_IMAGE_REPO="${CONTROLLER_IMAGE_REPO:-quay.io/skupper/controller}"
 readonly CONFIG_SYNC_IMAGE_REPO="${CONFIG_SYNC_IMAGE_REPO:-quay.io/skupper/config-sync}"
@@ -85,8 +86,8 @@ helm::install() {
 }
 
 metallb::l2::config() {
-		start_ip=$(echo "$1" | cut -f1-2 -d'.').200.0
-		end_ip=$(echo "$1" | cut -f1-2 -d'.').200.32
+		start_ip=$(echo "$1" | cut -f1-2 -d'.')."${SUBNET_BYTE}".0
+		end_ip=$(echo "$1" | cut -f1-2 -d'.')."${SUBNET_BYTE}".32
 		cat << EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
