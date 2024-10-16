@@ -43,10 +43,6 @@ build-manifest:
 build-doc-generator:
 	GOOS=${GOOS} GOARCH=${GOARCH} go build -ldflags="${LDFLAGS}"  -o generate-doc ./internal/cmd/generate-doc
 
-docker-build-test-image:
-	${DOCKER} buildx build --platform ${PLATFORMS} -t ${TEST_IMAGE} -f Dockerfile.ci-test .
-	${DOCKER} buildx build --load -t ${TEST_IMAGE} -f Dockerfile.ci-test .
-
 docker-build: docker-build-test-image docker-build-bootstrap docker-build-network-console-collector
 	${DOCKER} buildx build --platform ${PLATFORMS} -t ${CONTROLLER_IMAGE} -f Dockerfile.controller .
 	${DOCKER} buildx build --load  -t ${CONTROLLER_IMAGE} -f Dockerfile.controller .
@@ -86,56 +82,9 @@ force-generate-client:
 vet:
 	go vet ./...
 
-cmd-test:
-	go test -v -count=1 ./cmd/...
-
-pkg-test:
-	go test -v -count=1 ./pkg/...
-
-internal-test:
-	go test -v -count=1 ./internal/...
-
 .PHONY: test
 test:
-	go test -v -count=1 ./pkg/... ./internal/... ./cmd/...
+	go test -v -race -count=1 ./...
 
 clean:
 	rm -rf skupper controller release config-sync manifest bootstrap network-console-collector ${TEST_BINARIES_FOLDER}
-
-package: release/windows.zip release/darwin.zip release/linux.tgz release/s390x.tgz release/arm64.tgz
-
-release/linux.tgz: release/linux/skupper
-	tar -czf release/linux.tgz -C release/linux/ skupper
-
-release/linux/skupper: cmd/skupper/skupper.go
-	GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/linux/skupper ./cmd/skupper
-
-release/windows/skupper: cmd/skupper/skupper.go
-	GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/windows/skupper ./cmd/skupper
-
-release/windows.zip: release/windows/skupper
-	zip -j release/windows.zip release/windows/skupper
-
-release/darwin/skupper: cmd/skupper/skupper.go
-	GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/darwin/skupper ./cmd/skupper
-
-release/darwin.zip: release/darwin/skupper
-	zip -j release/darwin.zip release/darwin/skupper
-
-generate-manifest: build-manifest
-	./manifest
-
-generate-doc: build-doc-generator
-	./generate-doc ./doc/cli
-
-release/s390x/skupper: cmd/skupper/skupper.go
-	GOOS=linux GOARCH=s390x go build -ldflags="${LDFLAGS}" -o release/s390x/skupper ./cmd/skupper
-
-release/s390x.tgz: release/s390x/skupper
-	tar -czf release/s390x.tgz release/s390x/skupper
-
-release/arm64/skupper: cmd/skupper/skupper.go
-	GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o release/arm64/skupper ./cmd/skupper
-
-release/arm64.tgz: release/arm64/skupper
-	tar -czf release/arm64.tgz release/arm64/skupper
