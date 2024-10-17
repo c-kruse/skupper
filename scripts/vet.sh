@@ -156,7 +156,7 @@ cleanup() {
 		rm -rf site_vet_resources.yaml
 }
 usage() {
-    echo "Use: vet2.sh [-n <namespace>] "
+    echo "Use: vet.sh [-n <namespace>] "
     echo "     -n The target namespace of the site to vet"
     echo "     -c The kubeconfig file to use"
     exit 1
@@ -182,6 +182,9 @@ main() {
     parse_opts "$@"
 
 	await_site
+	echo "= site pod info:"
+	kubectl::do get pods -l application=skupper-router \
+			-o=jsonpath='{range .items[*]}{"pod: "}{ .metadata.name}{range .status.containerStatuses[*]}{ "\n image: "}{ .image }{" "}{.imageID}{", "}{end}{"\n"}{end}'
 	add_vet_resources
     do_bootstrap
 	cleanup

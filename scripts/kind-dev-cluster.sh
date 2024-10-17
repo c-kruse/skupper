@@ -28,10 +28,12 @@ readonly ROUTER_IMAGE_REPO="${ROUTER_IMAGE_REPO:-quay.io/skupper/skupper-router}
 readonly CONTROLLER_IMAGE_TAG="${CONTROLLER_IMAGE_TAG:-v2-latest}"
 readonly CONFIG_SYNC_IMAGE_TAG="${CONFIG_SYNC_IMAGE_TAG:-v2-latest}"
 readonly ROUTER_IMAGE_TAG="${ROUTER_IMAGE_TAG:-main}"
-readonly SKIP_CLUSTER_CREATION="${SKIP_CLUSTER_CREATION:-false}"
-readonly IMAGE_LOAD_STRATEGY="${IMAGE_LOAD_STRATEGY:-none}"
 
 readonly DEBUG=${DEBUG:=false}
+readonly SKIP_CLUSTER_CREATION="${SKIP_CLUSTER_CREATION:-false}"
+readonly IMAGE_LOAD_STRATEGY="${IMAGE_LOAD_STRATEGY:-none}"
+readonly IMAGE_ARCHIVE_PATH="${IMAGE_ARCHIVE_PATH:-./images}"
+
 
 KIND_LOG_LEVEL="1"
 if [ "${DEBUG}" = "true" ]; then
@@ -174,8 +176,10 @@ docker)
 
 archive)
 		echo "[dev-env] copying archived images to cluster..."
-		for archive in "${IMAGE_ARCHIVE_PATH}"/*.gz; do
-				kind::imageload::archive "$archive"
+		for archive in "${IMAGE_ARCHIVE_PATH}"/*.{tar,tgz,tar.gz}; do
+				if [ -f "$archive" ]; then
+						kind::imageload::archive "$archive"
+				fi
 		done
     ;;
   *)
