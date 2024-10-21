@@ -134,16 +134,10 @@ commands:
       - run:
           name: load docker images
           command: |
-            gunzip -c /tmp/images/service-controller.gz | docker import - 0.0.0.0:5000/service-controller
-            gunzip -c /tmp/images/service-controller.gz | docker load
-            gunzip -c /tmp/images/controller-podman.gz | docker import - 0.0.0.0:5000/controller-podman
-            gunzip -c /tmp/images/controller-podman.gz | docker load
-            gunzip -c /tmp/images/config-sync.gz | docker import - 0.0.0.0:5000/config-sync
-            gunzip -c /tmp/images/config-sync.gz | docker load
-            gunzip -c /tmp/images/flow-collector.gz | docker import - 0.0.0.0:5000/flow-collector
-            gunzip -c /tmp/images/flow-collector.gz | docker load
-            gunzip -c /tmp/images/test-image.gz | docker import - 0.0.0.0:5000/skupper-tests
-            gunzip -c /tmp/images/test-image.gz | docker load
+            for archive in /tmp/images/*.tar
+            do
+              docker load "$archive"
+            done
       - run:
           name: push to local registry
           command: |
@@ -482,23 +476,9 @@ jobs:
       - docker/install-docker
       - checkout
       - run: docker buildx create --use --name skupper-buildx --bootstrap
-      - run: make -e docker-build
-      - run:
-          name: persisting images to workspace
-          command: |
-            mkdir /tmp/images
-            docker tag quay.io/skupper/service-controller 0.0.0.0:5000/service-controller
-            docker save 0.0.0.0:5000/service-controller | gzip > /tmp/images/service-controller.gz
-            docker tag quay.io/skupper/controller-podman 0.0.0.0:5000/controller-podman
-            docker save 0.0.0.0:5000/controller-podman | gzip > /tmp/images/controller-podman.gz
-            docker tag quay.io/skupper/config-sync 0.0.0.0:5000/config-sync
-            docker save 0.0.0.0:5000/config-sync | gzip > /tmp/images/config-sync.gz
-            docker tag quay.io/skupper/flow-collector 0.0.0.0:5000/flow-collector
-            docker save 0.0.0.0:5000/flow-collector | gzip > /tmp/images/flow-collector.gz
-            docker tag quay.io/skupper/skupper-tests 0.0.0.0:5000/skupper-tests
-            docker save 0.0.0.0:5000/skupper-tests | gzip > /tmp/images/test-image.gz
+      - run: make exp-multiarch-oci REGISTRY=0.0.0.0:5000
       - persist_to_workspace:
-          root: /tmp
+          root: ./
           paths:
             - images/
 

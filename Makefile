@@ -14,6 +14,41 @@ GOARCH ?= amd64
 
 all: generate-client build-cmd build-get build-config-sync build-controllers build-tests build-manifest
 
+### experimental begin
+###
+
+REGISTRY := quay.io/skupper
+TAG := exp-latest
+
+images:
+	mkdir -p images;
+
+
+DOCKERFILE_TARGETS = $(wildcard Dockerfile.*)
+
+exp-docker-build: $(patsubst Dockerfile.%,exp-docker-build-%,$(DOCKERFILE_TARGETS))
+exp-multiarch-oci: $(patsubst Dockerfile.%,exp-multiarch-oci-%,$(DOCKERFILE_TARGETS))
+exp-multiarch-push: $(patsubst Dockerfile.%,exp-multiarch-push-%,$(DOCKERFILE_TARGETS))
+
+exp-docker-build-%: Dockerfile.%
+	${DOCKER} build -t "${REGISTRY}/$*:${TAG}" -f $< .
+
+exp-multiarch-oci-%: Dockerfile.% images
+	${DOCKER} buildx build \
+		"--output=type=oci,dest=$(shell pwd)/images/$*.tar" \
+		-t "${REGISTRY}/$*:${TAG}" \
+		--platform ${PLATFORMS} \
+		-f $< .
+
+exp-multiarch-push-%: Dockerfile.%
+	${DOCKER} buildx build \
+	--push \
+	-t "${REGISTRY}/$*:${TAG}" \
+	--platform ${PLATFORMS} \
+	-f $< .
+
+### experimental end
+###
 build-tests:
 	mkdir -p ${TEST_BINARIES_FOLDER}
 	GOOS=${GOOS} GOARCH=${GOARCH} go test -c -tags=job -v ./test/integration/examples/tcp_echo/job -o ${TEST_BINARIES_FOLDER}/tcp_echo_test
