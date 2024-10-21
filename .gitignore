@@ -28,3 +28,6 @@
 
 # Generated files
 manifest.json
+
+# oci image archives
+/images
