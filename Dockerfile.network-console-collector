@@ -11,25 +11,47 @@ RUN go mod download
 
 COPY . .
 
+ENV CGO_ENABLED=0
 RUN make GOOS=$TARGETOS GOARCH=$TARGETARCH build-network-console-collector
 
-FROM --platform=$BUILDPLATFORM node:18.18.2 AS console-builder
+# Use the Node.js base image for building the console application
+FROM --platform=$BUILDPLATFORM docker.io/node:20-alpine AS console-builder
 
+# Set the working directory for the console application
 WORKDIR /skupper-console/
+
+# Download and extract the console application tarball
 ADD https://github.com/skupperproject/skupper-console/archive/v2.tar.gz .
 RUN tar -zxf v2.tar.gz
-WORKDIR ./skupper-console-2
-RUN yarn install && yarn build
+
+# Set the working directory for installation
+WORKDIR /js/src/app
+
+# Copy package.json and yarn.lock to leverage caching
+RUN cp /skupper-console/skupper-console-2/package.json .
+RUN cp /skupper-console/skupper-console-2/yarn.lock .
+
+# Enable pnpm through corepack
+RUN corepack enable pnpm
+
+# Set environment variables for husky and cypress
+ENV HUSKY=0
+
+# Install dependencies without optional ones, leveraging cache
+RUN pnpm install --no-optional --prefer-offline
+
+# Copy the source code from the extracted console application
+RUN cp -r /skupper-console/skupper-console-2/. .
+
+# Build the console application
+RUN pnpm build
 
 FROM --platform=$TARGETPLATFORM registry.access.redhat.com/ubi9-minimal
 
-# Create user and group and switch to user's context
-RUN microdnf -y install shadow-utils \
-&& microdnf clean all
 RUN useradd --uid 10000 runner
 USER 10000
 
 WORKDIR /app
 COPY --from=builder /go/src/app/network-console-collector .
-COPY --from=console-builder /skupper-console/skupper-console-2/build/ console
+COPY --from=console-builder /js/src/app/build/ console
 ENTRYPOINT ["/app/network-console-collector"]
