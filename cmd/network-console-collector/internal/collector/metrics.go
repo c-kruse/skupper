@@ -1,6 +1,8 @@
 package collector
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 type metrics struct {
 	flowOpenedCounter        *prometheus.CounterVec
@@ -8,6 +10,13 @@ type metrics struct {
 	flowBytesSentCounter     *prometheus.CounterVec
 	flowBytesReceivedCounter *prometheus.CounterVec
 	requestsCounter          *prometheus.CounterVec
+
+	siteInfo          *prometheus.GaugeVec
+	routerInfo        *prometheus.GaugeVec
+	siteLinkInfo      *prometheus.GaugeVec
+	siteListenerInfo  *prometheus.GaugeVec
+	siteConnectorInfo *prometheus.GaugeVec
+	siteLinkErrors    *prometheus.CounterVec
 
 	internal metricsInternal
 }
@@ -48,6 +57,38 @@ func register(reg *prometheus.Registry) metrics {
 			Name:      "requests_total",
 			Help:      "Counter incremented for each request handled through the skupper network",
 		}, appFlowMetricLables),
+
+		siteInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Name:      "site_info",
+			Help:      "Metadata about the active sites that make up the application network",
+		}, siteInfoMetricLabels),
+		routerInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Name:      "routers_total",
+			Help:      "Number of active routers participating in the application network",
+		}, routerInfoMetricLabels),
+		siteListenerInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Name:      "site_listeners_total",
+			Help:      "Number of listeners configured in the application network",
+		}, siteIDMetricLabels),
+		siteConnectorInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Name:      "site_connectors_total",
+			Help:      "Number of connectors configured in the application network",
+		}, siteIDMetricLabels),
+		siteLinkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Name:      "site_links_total",
+			Help:      "Number of router links configured in the application network",
+		}, linkInfoMetricLabels),
+		siteLinkErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "skupper",
+			Name:      "site_link_errors_total",
+			Help:      "Count of link connection errors across the application network",
+		}, linkErrorMetricLablels),
+
 		internal: metricsInternal{
 			flowLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 				Namespace: "skupper",
@@ -123,7 +164,26 @@ var (
 		"source_process_name",
 		"dest_process_name",
 	}
-	appFlowMetricLables = append(flowMetricLabels, "method", "code")
+	appFlowMetricLables  = append(flowMetricLabels, "method", "code")
+	siteInfoMetricLabels = []string{
+		"site_id",
+		"name",
+		"version",
+	}
+	routerInfoMetricLabels = []string{
+		"site_id",
+		"mode",
+	}
+	linkInfoMetricLabels = []string{
+		"site_id",
+		"role",
+		"status",
+	}
+	linkErrorMetricLablels = []string{
+		"site_id",
+		"role",
+	}
+	siteIDMetricLabels = []string{"site_id"}
 )
 
 type labelSet struct {
