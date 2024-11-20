@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: public-gw
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: public-lb
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: public-nodeport
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: public-contour
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: public-nginx
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: public-lb
+  namespace: public-lb
+spec:
+  linkAccess: loadbalancer
+
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: public-gw
+  namespace: public-gw
+spec:
+  linkAccess: gateway
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: public-nodeport
+  namespace: public-nodeport
+spec:
+  linkAccess: nodeport
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: public-contour
+  namespace: public-contour
+spec:
+  linkAccess: contour-http-proxy
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: public-nginx
+  namespace: public-nginx
+spec:
+  linkAccess: ingress-nginx

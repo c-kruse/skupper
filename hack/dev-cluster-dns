@@ -1,0 +1,95 @@
+#! /usr/bin/env bash
+
+# dev-cluster-dns: configures local dns services for a skupper development cluster
+#
+# This is probably a bad idea.
+#
+# * Gathers skupper router and grant server ingress points from a local single-node cluster.
+# * Starts a container running dnsmasq configured for the test domain.
+# * Attempts to configure the domain with systemd-resolved to use the dnsmasq
+# container
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+if [ "${DEBUG:-false}" = "true" ]; then
+  set -x
+fi
+if [[ $# -lt 2 ]] ; then
+    echo "Usage: $0 <cluster name> <docker network name>"
+    exit 0
+fi
+readonly CLUSTER="$1"
+readonly NETWORK="$2"
+readonly DOMAIN="${CLUSTER}.testing"
+readonly KUBECONFIG="${KUBECONFIG:-$HOME/.kube/skupperdev-config-$CLUSTER}"
+readonly DOCKER="${DOCKER:-docker}"
+readonly KUBECTL="${KUBECTL:-kubectl}"
+node=$("${KUBECTL}" get nodes --kubeconfig="${KUBECONFIG}" --no-headers -ocustom-columns=:metadata.name | head  -n1)
+network_ip=$("${DOCKER}" network inspect -f '{{.IPAM.Config}}' "${NETWORK}" | awk '/.*/ { print $2 }')
+interface=$(ip -br -4 a | grep "${network_ip}" | awk '{print $1}')
+node_ip=$("${DOCKER}" inspect "$node" | jq -r ".[].NetworkSettings.Networks.\"$NETWORK\".IPAddress")
+
+kube_get_ingress_svc="$KUBECTL --kubeconfig=${KUBECONFIG} get svc -n ingress-nginx ingress-nginx-controller"
+kube_gateway_svc="$KUBECTL --kubeconfig=${KUBECONFIG} get svc -n skupper envoy-skupper"
+
+timeout 10s \
+		bash -c \
+		"until ${kube_get_ingress_svc} --output=jsonpath='{.status.loadBalancer}' | grep ingress; do : ; done"
+timeout 10s \
+		bash -c \
+		"until ${kube_gateway_svc} --output=jsonpath='{.status.loadBalancer}' | grep ingress; do : ; done"
+
+nginx_ip=$(bash -c "$kube_get_ingress_svc -ojsonpath='{.status.loadBalancer.ingress[0].ip}'")
+gateway_ip=$(bash -c "$kube_gateway_svc -ojsonpath='{.status.loadBalancer.ingress[0].ip}'")
+
+echo "= Starting dnsmasq"
+echo "= Node Address: ${node_ip}"
+echo "= Nginx Ingress Address: ${nginx_ip}"
+echo "= Gateway Address: ${gateway_ip}"
+
+
+extra_flags="--rm"
+if [ "${DEBUG:-false}" = "true" ]; then
+  extra_flags=""
+fi
+"${DOCKER}" pull docker.io/alpine:latest
+dns_container_id=$("${DOCKER}" run -it -d  \
+		"$extra_flags" \
+		-p 53/udp docker.io/alpine:latest \
+		sh -c "apk add dnsmasq \
+		&& dnsmasq -d -z --expand-hosts --log-queries \
+		--local=/${DOMAIN}/ \
+		--domain=${DOMAIN} \
+		--address=/${DOMAIN}/${node_ip} \
+		--address=/nginx-ingress.${DOMAIN}/${nginx_ip} \
+		--address=/gateway.${DOMAIN}/${gateway_ip}")
+
+until [ "$($DOCKER inspect -f "{{.State.Running}}" "$dns_container_id")" == "true" ]; do
+    sleep 0.1;
+done;
+
+port=$($DOCKER port "$dns_container_id"  | awk -F ":" '{print $2; exit}')
+name=$($DOCKER inspect -f '{{.Name}}' "$dns_container_id")
+
+echo "= Waiting for dnsmasq container ${name} on ${port}"
+until dig "x.$DOMAIN" @127.0.0.1 -p "$port" +noall +answer; do
+		sleep 1;
+done;
+
+
+echo "= dnsmasq container $name is configured listening on port $port"
+
+read -p "Update systemd-resolved configuration to use dns? [y/N] " -n 1 -r apply_resolver_config
+echo
+if [[ $apply_resolver_config =~ ^[Yy]$ ]]
+then
+	echo "= Updating local resolver configuration"
+	set -x
+	sudo resolvectl domain "$interface" ~"$DOMAIN"
+	sudo resolvectl dns "$interface" "127.0.0.1:$port"
+	set +x
+	echo "= Done"
+	echo "= To rollback run 'sudo resolvectl revert $interface'"
+fi
