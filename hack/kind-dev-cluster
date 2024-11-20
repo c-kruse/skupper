@@ -1,0 +1,223 @@
+#! /usr/bin/env bash
+
+usage () {
+	cat << EOF
+Usage: $0 [options...]
+ -i, --images		When set, sync skupper images to the cluster and exit
+ -s, --skip-creation When set, will not stomp the existing dev cluster
+ -h, --help			print usage
+ -v, --verbose		verbose logging
+ --values			An additional values.yaml file for the skupper helm chart
+
+
+Starts a new kind cluster with the following dependencies installed
+* metallb as a load balancer with a kind/docker-friendly L2 configuration
+* The contourproject gateway provisioner
+* ingress-nginx controller with ssl passthrough enabled
+
+Installs a cluster scoped skupper controller with images loaded from the enviornment.
+
+Environment Variables:
+ CLUSTER the name of the development cluster: will be used as minikube profile.
+ SUBNET network subnet number. The "kind" docker network gets divided into
+	subnets with a netmask of /28. Selects the Nth from last subnet for metallb
+	to announce.
+ IMAGE_LOAD_STRATEGY: How to load container images to the cluster.
+	One of none, docker, archive [default docker]
+ IMAGE_ARCHIVE_PATH: when IMAGE_LOAD_STRATEGY is archive, where to look for
+	image archives. Defaults ./oci-archives
+EOF
+}
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly KIND=${KIND:-kind}
+readonly KUBECTL=${KUBECTL:-kubectl}
+readonly HELM=${HELM:-helm}
+readonly DOCKER=${DOCKER:-docker}
+readonly PYTHON=${PYTHON:-python}
+
+readonly CLUSTER="${CLUSTER:-skupper-dev}"
+readonly SUBNET="${SUBNET:-1}"
+readonly KUBECONFIG="${KUBECONFIG:-$HOME/.kube/skupperdev-config-$CLUSTER}"
+readonly CONTROLLER_IMAGE_REPO="${CONTROLLER_IMAGE_REPO:-quay.io/skupper/controller}"
+readonly CONFIG_SYNC_IMAGE_REPO="${CONFIG_SYNC_IMAGE_REPO:-quay.io/skupper/config-sync}"
+readonly ROUTER_IMAGE_REPO="${ROUTER_IMAGE_REPO:-quay.io/skupper/skupper-router}"
+readonly CONTROLLER_IMAGE_TAG="${CONTROLLER_IMAGE_TAG:-v2-latest}"
+readonly CONFIG_SYNC_IMAGE_TAG="${CONFIG_SYNC_IMAGE_TAG:-v2-latest}"
+readonly ROUTER_IMAGE_TAG="${ROUTER_IMAGE_TAG:-main}"
+
+DEBUG=${DEBUG:=false}
+SKIP_CLUSTER_CREATION="${SKIP_CLUSTER_CREATION:-false}"
+DO_RELOAD="${DO_RELOAD:-false}"
+IMAGE_LOAD_STRATEGY="${IMAGE_LOAD_STRATEGY:-docker}"
+IMAGE_ARCHIVE_PATH="${IMAGE_ARCHIVE_PATH:-./oci-archives}"
+SKUPPER_CHART_VALUES=""
+
+export KUBECONFIG
+
+source "$(dirname "$(realpath "$0")")/dev-cluster-common.sh"
+
+
+KIND_LOG_LEVEL="1"
+
+kind::cluster::list() {
+    ${KIND} get clusters
+}
+
+kind::cluster::create() {
+    ${KIND} create cluster \
+		--verbosity="${KIND_LOG_LEVEL}" \
+		--kubeconfig="${KUBECONFIG}" \
+        --name "${CLUSTER}"
+}
+
+kind::cluster::delete() {
+    ${KIND} delete cluster \
+        --name "${CLUSTER}"
+}
+
+kind::imageload::docker() {
+		${KIND} load docker-image --name="${CLUSTER}" \
+				"${CONTROLLER_IMAGE_REPO}:${CONTROLLER_IMAGE_TAG}" \
+				"${CONFIG_SYNC_IMAGE_REPO}:${CONFIG_SYNC_IMAGE_TAG}" \
+				"${ROUTER_IMAGE_REPO}:${ROUTER_IMAGE_TAG}"
+}
+kind::imageload::archive() {
+		${KIND} load image-archive --name="${CLUSTER}" "$@"
+}
+
+imageload () {
+	case "$IMAGE_LOAD_STRATEGY" in
+	docker)
+			echo "[dev-env] copying docker images to cluster..."
+			kind::imageload::docker
+	    ;;
+	
+	archive)
+			echo "[dev-env] copying archived images to cluster..."
+			for archive in "${IMAGE_ARCHIVE_PATH}"/*.{tar,tgz,tar.gz}; do
+					if [ -f "$archive" ]; then
+							kind::imageload::archive "$archive"
+					fi
+			done
+	    ;;
+	  *)
+	    ;;
+	esac
+}
+
+main () {
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+			-h|--help)
+				usage
+				exit;
+				;;
+			-i|--images)
+				DO_RELOAD="true"
+				shift;;
+			-v|--verbose)
+				DEBUG="true"
+				shift;;
+			-s|--skip-creation)
+				SKIP_CLUSTER_CREATION="true"
+				shift;;
+			--values)
+				SKUPPER_CHART_VALUES="$2"
+				shift
+				shift
+				;;
+			*)
+				echo "Unknown argument $1"
+				usage
+				exit 1
+				;;
+		esac
+	done
+
+	if [ "${DEBUG}" = "true" ]; then
+	  set -x
+	  KIND_LOG_LEVEL="6"
+	fi
+	if [ "${DO_RELOAD}" = "true" ]; then
+		imageload
+		echo "[dev-env] images reloaded..."
+		exit
+	fi
+
+	if [ "${SKIP_CLUSTER_CREATION}" = "false" ]; then
+			if kind::cluster::list | grep "${CLUSTER}"; then
+					kind::cluster::delete
+			fi
+			kind::cluster::create
+	fi
+	
+	
+	kubectl::do get nodes -owide
+	
+	imageload
+	
+	kind_ip=$(docker::network::ip kind)
+	kind_subnet=$(docker::network::subnet kind)
+	
+	echo "[dev-env] installing dependencies..."
+	
+	helm::do repo add metallb https://metallb.github.io/metallb
+	helm::install metallb metallb/metallb \
+			--namespace metallb-system --create-namespace \
+			--set speaker.ignoreExcludeLB=true \
+			--version 0.14.*
+	
+	
+	
+	kubectl::apply <(metallb::l2::config "$kind_subnet" "$SUBNET")
+	
+	kubectl::apply https://raw.githubusercontent.com/projectcontour/contour/release-1.30/examples/render/contour-gateway-provisioner.yaml
+	kubectl::apply <(contour::gatewayclass::config)
+	
+	# nginx ingress
+	helm::install ingress-nginx ingress-nginx \
+	  --repo https://kubernetes.github.io/ingress-nginx \
+	  --namespace ingress-nginx --create-namespace \
+	  --set controller.extraArgs.enable-ssl-passthrough=true
+	
+	echo "[dev-env] installing skupper controller.."
+	
+	extra_args=()
+	if [ -f "$SKUPPER_CHART_VALUES" ]; then
+		extra_args=("--values" "$SKUPPER_CHART_VALUES")
+	fi
+	helm::install skupper-controller oci://quay.io/ckruse/skupper-charts/skupper \
+			--namespace skupper --create-namespace  \
+			--version 0.2.0-devel \
+			--values <(skupper::default::config "${CLUSTER}.testing") \
+			"${extra_args[@]}"
+
+	
+	interface=$(ip -br -4 a | grep "${kind_ip}" | awk '{print $1}')
+	cat <<EOF
+
+Kind dev cluster setup complete.
+
+To use access types other than type loadbalancer configure local dns.
+
+Bridge interface: ${interface}
+Domain: ${CLUSTER}.testing
+
+Addresses:
+		*.nginx-ingress.${CLUSTER}.testing: IP of the ingress-nginx-controller service in the ingress-nginx namespace
+		*.gateway.${CLUSTER}.testing: IP of the envoy-skupper service in the skupper namespace
+		*.${CLUSTER}.testing: IP of the kind node - ${DOCKER} inspect ${CLUSTER}-control-plane | grep IPAddress
+
+For systemd-resolved systems try hack-dns.sh
+
+dev-cluster-dns ${CLUSTER} kind
+EOF
+
+}
+main "$@"
+
+
