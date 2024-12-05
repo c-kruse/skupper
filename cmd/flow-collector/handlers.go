@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/skupperproject/skupper/pkg/flow"
 )
@@ -225,4 +230,80 @@ func (c *Controller) promqueryrangeHandler(w http.ResponseWriter, r *http.Reques
 	if _, err := io.Copy(w, proxyResp.Body); err != nil {
 		log.Printf("COLLECTOR: rangequery proxy response write error: %s", err.Error())
 	}
+}
+
+func noAuth(h http.HandlerFunc) http.HandlerFunc {
+	return h
+}
+
+// basicAuthHandler handles basic auth for multiple users.
+// map[sha256(username)]sha256(password)
+// Attempts to validate requests in constant time.
+type basicAuthHandler map[[32]byte][32]byte
+
+// newBasicAuthHandler initializes a basicAuthHandler from the supplied
+// directory.
+func newBasicAuthHandler(root string) (basicAuthHandler, error) {
+	users := make(basicAuthHandler)
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return users, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		filename := entry.Name()
+		if strings.HasPrefix(filename, ".") { // skip hidden files
+			continue
+		}
+		path := filepath.Join(root, filename)
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("could not open %s: %s", path, err)
+		}
+		defer f.Close()
+
+		usernameSum := sha256.Sum256([]byte(filename))
+		hash := sha256.New()
+		written, err := io.Copy(hash, io.LimitReader(f, 1024))
+		if err != nil {
+			return nil, fmt.Errorf("could not read contents %s: %s", path, err)
+		}
+		if written < 8 {
+			log.Printf("COLLECTOR: Ignoring auth user %q. Contents too short", path)
+			continue
+		}
+
+		var sum [32]byte
+		copy(sum[:], hash.Sum(nil))
+		users[usernameSum] = sum
+	}
+	return users, nil
+}
+
+func (h basicAuthHandler) HandlerFunc(next http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, ok := r.BasicAuth()
+
+		if ok && h.check(user, password) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", "Basic realm=skupper")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	})
+}
+
+func (h basicAuthHandler) check(user, password string) bool {
+	givenUser, givenPassword := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(password))
+	for matchUser, matchPassword := range h {
+		match := subtle.ConstantTimeCompare(matchUser[:], givenUser[:])
+		match &= subtle.ConstantTimeCompare(matchPassword[:], givenPassword[:])
+		if match == 1 {
+			return true
+		}
+	}
+	return false
 }
