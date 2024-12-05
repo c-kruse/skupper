@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/skupperproject/skupper/pkg/flow"
 )
@@ -225,4 +230,79 @@ func (c *Controller) promqueryrangeHandler(w http.ResponseWriter, r *http.Reques
 	if _, err := io.Copy(w, proxyResp.Body); err != nil {
 		log.Printf("COLLECTOR: rangequery proxy response write error: %s", err.Error())
 	}
+}
+
+func noAuth(h http.HandlerFunc) http.HandlerFunc {
+	return h
+}
+
+// basicAuthHandler handles basic auth for multiple users.
+// map[username]sha256(username + ":" + password)
+// Attempts to validate requests in constant time.
+type basicAuthHandler map[string][32]byte
+
+// newBasicAuthHandler initializes a basicAuthHandler from the supplied
+// directory.
+func newBasicAuthHandler(root string) (basicAuthHandler, error) {
+	users := make(basicAuthHandler)
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return users, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		filename := entry.Name()
+		if strings.HasPrefix(filename, ".") { // skip hidden files
+			continue
+		}
+		path := filepath.Join(root, filename)
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("could not open %s: %s", path, err)
+		}
+		defer f.Close()
+
+		checksum := sha256.New()
+		checksum.Write([]byte(filename + ":"))
+		written, err := io.Copy(checksum, io.LimitReader(f, 1024))
+		if err != nil {
+			return nil, fmt.Errorf("could not read contents %s: %s", path, err)
+		}
+		if written < 8 {
+			log.Printf("COLLECTOR: Ignoring auth user %q. Contents too short", path)
+			continue
+		}
+
+		var sum [32]byte
+		copy(sum[:], checksum.Sum(nil))
+		users[filename] = sum
+	}
+	return users, nil
+}
+
+func (h basicAuthHandler) HandlerFunc(next http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, ok := r.BasicAuth()
+
+		if ok && h.check(user, password) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", "Basic realm=skupper")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	})
+}
+
+func (h basicAuthHandler) check(user, password string) bool {
+	given := sha256.Sum256([]byte(user + ":" + password))
+	for _, required := range h {
+		match := subtle.ConstantTimeCompare(required[:], given[:])
+		if match == 1 {
+			return true
+		}
+	}
+	return false
 }
