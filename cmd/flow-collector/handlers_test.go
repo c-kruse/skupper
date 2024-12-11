@@ -1,12 +1,14 @@
 package main
 
 import (
-	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/skupperproject/skupper/pkg/utils"
 )
 
 func TestBasic(t *testing.T) {
@@ -15,23 +17,26 @@ func TestBasic(t *testing.T) {
 		"admin":     "p@ssword!",
 	}
 	tmpDir := t.TempDir()
+	userCreate := func(usr, pwd string) {
+		userFile, err := os.Create(filepath.Join(tmpDir, usr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer userFile.Close()
+		userFile.Write([]byte(pwd))
+	}
 	for usr, pwd := range configuredUsers {
-		func() {
-			userFile, err := os.Create(filepath.Join(tmpDir, usr))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer userFile.Close()
-			userFile.Write([]byte(pwd))
-		}()
+		userCreate(usr, pwd)
 	}
 
-	BasicAuth, err := newBasicAuthHandler(tmpDir)
+	done := make(chan struct{})
+	defer close(done)
+	handlerUnderTest, err := newBasicAuthHandler(tmpDir, done)
 	if err != nil {
 		t.Fatal("unexpected error", err)
 	}
 
-	tstSrv := httptest.NewTLSServer(BasicAuth.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	tstSrv := httptest.NewTLSServer(handlerUnderTest.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Write([]byte("OK"))
 	}))
 	defer tstSrv.Close()
@@ -66,6 +71,22 @@ func TestBasic(t *testing.T) {
 		req.SetBasicAuth(usr, pwd)
 		assertStatusCode(200, req)
 	}
+
+	userDNE, _ := http.NewRequest(http.MethodGet, tstSrv.URL, nil)
+	userDNE.SetBasicAuth("newuser", configuredUsers["password"])
+	assertStatusCode(401, userDNE)
+
+	userCreate("newuser", "password")
+	handlerUnderTest.OnCreate("")
+	utils.Retry(time.Millisecond*2, 500, func() (bool, error) {
+		req, _ := http.NewRequest(http.MethodGet, tstSrv.URL, nil)
+		req.SetBasicAuth("newuser", "password")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode == 200, nil
+	})
 }
 
 func FuzzBasic(f *testing.F) {
@@ -73,8 +94,8 @@ func FuzzBasic(f *testing.F) {
 		tUser     = "skupper"
 		tPassword = "P@ssword!"
 	)
-	basic := basicAuthHandler{
-		sha256.Sum256([]byte(tUser + ":" + tPassword)),
+	basic := &basicAuthHandler{
+		users: map[string]string{tUser: tPassword},
 	}
 	f.Add(tUser, tPassword)
 	f.Add(tPassword, tUser)

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
@@ -10,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 
 	"github.com/skupperproject/skupper/pkg/flow"
+	"github.com/skupperproject/skupper/pkg/fs"
 )
 
 func (c *Controller) eventsourceHandler(w http.ResponseWriter, r *http.Request) {
@@ -236,57 +236,36 @@ func noAuth(h http.HandlerFunc) http.HandlerFunc {
 	return h
 }
 
+var authUserFileExpr = regexp.MustCompile(`^[a-zA-Z0-9].*$`)
+
 // basicAuthHandler handles basic auth for multiple users.
-// []sha256(username + ":" + password)
-// Attempts to validate requests in constant time.
-type basicAuthHandler [][32]byte
+type basicAuthHandler struct {
+	root  string
+	mu    sync.RWMutex
+	users map[string]string
+}
 
 // newBasicAuthHandler initializes a basicAuthHandler from the supplied
 // directory.
-func newBasicAuthHandler(root string) (basicAuthHandler, error) {
-	var basicUsers basicAuthHandler
+func newBasicAuthHandler(root string, stop <-chan struct{}) (*basicAuthHandler, error) {
+	basicUsers := &basicAuthHandler{root: root}
+	if err := basicUsers.reload(); err != nil {
+		return basicUsers, err
+	}
 
-	// Restrict usernames to files begining with an alphanumeric character
-	// Omits hidden files
-	var fileRexp = regexp.MustCompile(`^[a-zA-Z0-9].*$`)
-
-	entries, err := os.ReadDir(root)
+	watcher, err := fs.NewWatcher()
 	if err != nil {
 		return basicUsers, err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		username := entry.Name()
+	watcher.Start(stop)
 
-		if !fileRexp.MatchString(username) {
-			continue
-		}
-		path := filepath.Join(root, username)
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, fmt.Errorf("could not open %s: %s", path, err)
-		}
-		defer f.Close()
-
-		hashWriter := sha256.New()
-		hashWriter.Write([]byte(username))
-		hashWriter.Write([]byte(":"))
-
-		fileReader := io.LimitReader(f, 1024)
-		if _, err := io.Copy(hashWriter, fileReader); err != nil {
-			return nil, fmt.Errorf("could not read contents %s: %s", path, err)
-		}
-
-		var sum [32]byte
-		copy(sum[:], hashWriter.Sum(nil))
-		basicUsers = append(basicUsers, sum)
-	}
+	// Restrict usernames to files begining with an alphanumeric character
+	// Omits hidden files
+	watcher.Add(root, basicUsers, authUserFileExpr)
 	return basicUsers, nil
 }
 
-func (h basicAuthHandler) HandlerFunc(next http.HandlerFunc) http.HandlerFunc {
+func (h *basicAuthHandler) HandlerFunc(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, password, ok := r.BasicAuth()
 
@@ -299,11 +278,59 @@ func (h basicAuthHandler) HandlerFunc(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-func (h basicAuthHandler) check(user, password string) bool {
-	given := sha256.Sum256([]byte(user + ":" + password))
-	for _, required := range h {
-		match := subtle.ConstantTimeCompare(required[:], given[:])
-		if match == 1 {
+func (h *basicAuthHandler) OnCreate(f string) {
+	if err := h.reload(); err != nil {
+		log.Printf("COLLECTOR: auth handler reload error: %s\n", err.Error())
+	}
+}
+func (h *basicAuthHandler) OnUpdate(f string) {
+	h.OnCreate(f)
+}
+func (h *basicAuthHandler) OnRemove(f string) {
+	h.OnCreate(f)
+}
+
+func (h *basicAuthHandler) reload() error {
+	users := make(map[string]string)
+
+	entries, err := os.ReadDir(h.root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		username := entry.Name()
+
+		if !authUserFileExpr.MatchString(username) {
+			continue
+		}
+		path := filepath.Join(h.root, username)
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("could not open %s: %s", path, err)
+		}
+		defer f.Close()
+
+		passwdBytes, err := io.ReadAll(io.LimitReader(f, 1024))
+		if err != nil {
+			return fmt.Errorf("could not read contents %s: %s", path, err)
+		}
+
+		users[username] = string(passwdBytes)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.users = users
+	return nil
+}
+
+func (h *basicAuthHandler) check(user, given string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for username, required := range h.users {
+		if username == user && given == required {
 			return true
 		}
 	}

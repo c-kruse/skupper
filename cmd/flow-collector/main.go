@@ -170,13 +170,13 @@ func internalLogout(w http.ResponseWriter, r *http.Request, validNonces map[stri
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 }
 
-func configureAuth() error {
+func configureAuth(stop <-chan struct{}) error {
 	root := os.Getenv("FLOW_USERS")
 	if root == "" {
 		return nil
 	}
 	log.Printf("COLLECTOR: Configuring basic auth handler from %q \n", root)
-	basic, err := newBasicAuthHandler(root)
+	basic, err := newBasicAuthHandler(root, stop)
 	if err != nil {
 		return err
 	}
@@ -272,7 +272,7 @@ func main() {
 		}
 	}
 
-	if err := configureAuth(); err != nil {
+	if err := configureAuth(stopCh); err != nil {
 		log.Fatalf("unrecoverable error setting up authentication: %s", err)
 	}
 
