@@ -28,6 +28,15 @@ commands:
       - run: curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
       - run: sudo chmod +x kubectl
       - run: sudo mv kubectl /usr/local/bin
+  kind-install:
+    description: Install kind
+    steps:
+      - run: curl -Lo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+      - run: chmod +x kind
+      - run: sudo mv kind /usr/local/bin
+      - run: curl -Lo cloudprovider.tgz https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.6.0/cloud-provider-kind_0.6.0_linux_amd64.tar.gz
+      - run: tar xzf cloudprovider.tgz
+      - run: sudo mv cloud-provider-kind /usr/local/bin
   operator-sdk-install:
     description: Install operator-sdk
     steps:
@@ -166,6 +175,10 @@ workflows:
       - build-oci-images:
           image_tag: v2-dev
           <<: *run_for_all_branches
+      - e2e:
+          <<: *run_for_all_branches
+          requires:
+            - build-oci-images
       - publish-oci-images:
           <<: *run_for_v2_branch
           <<: *v2_release_requires
@@ -224,6 +237,75 @@ jobs:
       - store_artifacts:
           path: /tmp/artifacts
           destination: test-artifacts
+  e2e:
+    executor: local_cluster_test_executor
+    steps:
+      - checkout
+      - kubectl-install
+      - kind-install
+      - attach_workspace:
+          at: .
+      - run:
+          name: Cloud Provider Kind
+          background: true
+          command: cloud-provider-kind
+      - run:
+          name: Cluster East
+          command: |
+            set -x
+            KUBECONFIG=~/kc.east ./scripts/kind-dev-cluster \
+              --images ociarchive
+      - run:
+          name: Cluster West
+          command: |
+            set -x
+            KUBECONFIG=~/kc.west ./scripts/kind-dev-cluster \
+              --images ociarchive
+      - run:
+          name: Initalize Sites
+          command: |
+            set -x
+            kubectl apply \
+              --kubeconfig=~/kc.east \
+              -f ./cmd/controller/example/connector.yaml
+            kubectl create \
+              --kubeconfig=~/kc.east \
+              deployment backend --image quay.io/skupper/hello-world-backend
+            kubectl apply \
+              --kubeconfig=~/kc.west \
+              -f ./cmd/controller/example/listener.yaml
+            kubectl create \
+              --kubeconfig=~/kc.west \
+              deployment frontend --image quay.io/skupper/hello-world-frontend
+            skupper=./dist/linux-amd64/skupper
+            $skupper site create east \
+              --kubeconfig=~/kc.east \
+              --enable-link-access
+            $skupper site create west \
+              --kubeconfig=~/kc.west
+            kubectl wait --for=condition=ready \
+              --kubeconfig=~/kc.east \
+              site/east
+            kubectl wait --for=condition=ready \
+              --kubeconfig=~/kc.west \
+              site/west
+
+            $skupper token issue \
+              --kubeconfig=~/kc.east \
+              accesstoken.east.yaml
+            $skupper token redeem \
+              --kubeconfig=~/kc.west \
+              accesstoken.east.yaml
+            kubectl wait --for=condition=ready \
+              --kubeconfig=~/kc.east \
+              connector/backend
+
+            # assets that backend listener in west is attached to
+            # the connector in east
+            kubectl wait listener/backend \
+              --kubeconfig=~/kc.west \
+              --for=jsonpath='{.status.matchingConnectorCount}=1'
+
 
   generate-manifest:
     executor:
