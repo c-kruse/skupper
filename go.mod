@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/Azure/go-amqp v1.0.5
-	github.com/briandowns/spinner v1.23.0
+	github.com/briandowns/spinner v1.23.2
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/go-openapi/runtime v0.24.1
