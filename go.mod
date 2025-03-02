@@ -33,7 +33,7 @@ require (
 	k8s.io/api v0.20.0
 	k8s.io/apimachinery v0.20.0
 	k8s.io/client-go v0.20.0
-	sigs.k8s.io/yaml v1.2.0
+	sigs.k8s.io/yaml v1.4.0
 )
 
 replace github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
