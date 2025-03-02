@@ -25,7 +25,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/crypto v0.23.0
 	golang.org/x/sync v0.7.0
-	golang.org/x/sys v0.20.0
+	golang.org/x/sys v0.30.0
 	golang.org/x/text v0.15.0
 	golang.org/x/time v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
