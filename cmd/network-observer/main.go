@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/skupperproject/skupper/cmd/network-observer/internal/api"
+	"github.com/skupperproject/skupper/cmd/network-observer/internal/cmd"
 	"github.com/skupperproject/skupper/cmd/network-observer/internal/collector"
 	"github.com/skupperproject/skupper/cmd/network-observer/internal/flowlog"
 	"github.com/skupperproject/skupper/cmd/network-observer/internal/server"
@@ -222,6 +223,23 @@ func main() {
 	if *isVersion {
 		fmt.Println(version.Version)
 		os.Exit(0)
+	}
+
+	args := flags.Args()
+	if len(args) > 0 { // Handle internal subcommands
+		subcommand := args[0]
+		switch subcommand {
+		case cmd.EnsureCookieSecretCommand:
+			if err := cmd.RunEnsureCookieSecret(args); err != nil {
+				slog.Error("network observer error", slog.Any("error", err), slog.String("command", subcommand))
+				os.Exit(1)
+			}
+			os.Exit(0)
+		default:
+			fmt.Printf("Unknown command %q\n", subcommand)
+			flags.Usage()
+			os.Exit(1)
+		}
 	}
 
 	if err := run(cfg); err != nil {
