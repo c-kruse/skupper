@@ -243,6 +243,36 @@ func TestSiteConfigRoundtrip(t *testing.T) {
 				},
 			},
 		},
+		{
+			input: types.SiteConfigSpec{
+				Router: types.RouterOptions{
+					PodAnnotations: map[string]string{
+						"x.y.z/test-multivalue": "a,b,c",
+						"x.y.z/test-complex":    "x=11,y=12 z:4",
+						"x.y.z/test-utf8":       "斯库珀",
+					},
+				},
+			},
+			expected: types.SiteConfigSpec{
+				SkupperName:      "site-config-roundtrip-9",
+				SkupperNamespace: "site-config-roundtrip-9",
+				Ingress:          "loadbalancer",
+				RouterMode:       "interior",
+				AuthMode:         "internal",
+				Labels:           map[string]string{},
+				Annotations:      map[string]string{},
+				FlowCollector:    types.FlowCollectorOptions{FlowRecordTtl: types.DefaultFlowTimeoutDuration},
+				PrometheusServer: types.PrometheusServerOptions{AuthMode: "tls"},
+				Router: types.RouterOptions{
+					Logging: []types.RouterLogConfig{{Module: "ROUTER_CORE", Level: "error+"}},
+					PodAnnotations: map[string]string{
+						"x.y.z/test-multivalue": "a,b,c",
+						"x.y.z/test-complex":    "x=11,y=12 z:4",
+						"x.y.z/test-utf8":       "斯库珀",
+					},
+				},
+			},
+		},
 	}
 
 	isCluster := *clusterRun

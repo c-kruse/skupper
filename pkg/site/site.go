@@ -178,7 +178,7 @@ func WriteSiteConfig(spec types.SiteConfigSpec, namespace string) (*corev1.Confi
 		for key, value := range spec.IngressAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigIngressAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigIngressAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 	if spec.ConsoleIngress != "" {
 		siteConfig.Data[SiteConfigConsoleIngressKey] = spec.ConsoleIngress
@@ -255,14 +255,14 @@ func WriteSiteConfig(spec types.SiteConfigSpec, namespace string) (*corev1.Confi
 		for key, value := range spec.Router.ServiceAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigRouterServiceAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigRouterServiceAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 	if len(spec.Router.PodAnnotations) > 0 {
 		var annotations []string
 		for key, value := range spec.Router.PodAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigRouterPodAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigRouterPodAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 	if spec.Router.LoadBalancerIp != "" {
 		siteConfig.Data[SiteConfigRouterLoadBalancerIp] = spec.Router.LoadBalancerIp
@@ -318,14 +318,14 @@ func WriteSiteConfig(spec types.SiteConfigSpec, namespace string) (*corev1.Confi
 		for key, value := range spec.Controller.ServiceAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigControllerServiceAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigControllerServiceAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 	if len(spec.Controller.PodAnnotations) > 0 {
 		var annotations []string
 		for key, value := range spec.Controller.PodAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigControllerPodAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigControllerPodAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 	if spec.Controller.LoadBalancerIp != "" {
 		siteConfig.Data[SiteConfigControllerLoadBalancerIp] = spec.Controller.LoadBalancerIp
@@ -443,7 +443,7 @@ func WriteSiteConfig(spec types.SiteConfigSpec, namespace string) (*corev1.Confi
 		for key, value := range spec.PrometheusServer.PodAnnotations {
 			annotations = append(annotations, key+"="+value)
 		}
-		siteConfig.Data[SiteConfigPrometheusServerPodAnnotationsKey] = strings.Join(annotations, ",")
+		siteConfig.Data[SiteConfigPrometheusServerPodAnnotationsKey] = joinWithEscaping(annotations, ',', '\\')
 	}
 
 	// TODO: allow Replicas to be set through skupper-site configmap?
@@ -572,6 +572,7 @@ func ReadSiteConfig(siteConfig *corev1.ConfigMap, namespace string, defaultIngre
 			result.Spec.Ingress = defaultIngress
 		}
 	}
+
 	if ingressAnnotations, ok := siteConfig.Data[SiteConfigIngressAnnotationsKey]; ok {
 		result.Spec.IngressAnnotations = asMap(splitWithEscaping(ingressAnnotations, ',', '\\'))
 	}
@@ -845,14 +846,32 @@ func splitWithEscaping(s string, separator, escape byte) []string {
 			token = append(token, s[i])
 		}
 	}
-	tokens = append(tokens, strings.TrimSpace(string(token)))
+	if end := strings.TrimSpace(string(token)); end != "" {
+		tokens = append(tokens, end)
+	}
 	return tokens
+}
+
+func joinWithEscaping(entries []string, delim rune, escapeCode rune) string {
+	var builder strings.Builder
+	for idx, entry := range entries {
+		if idx > 0 {
+			builder.WriteRune(delim)
+		}
+		for _, r := range entry {
+			if r == delim || r == escapeCode {
+				builder.WriteRune(escapeCode)
+			}
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func asMap(entries []string) map[string]string {
 	result := map[string]string{}
 	for _, entry := range entries {
-		parts := strings.Split(entry, "=")
+		parts := strings.SplitN(entry, "=", 2)
 		if len(parts) > 1 {
 			result[parts[0]] = parts[1]
 		} else {

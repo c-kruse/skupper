@@ -390,7 +390,7 @@ var routerLogging string
 func asMap(entries []string) map[string]string {
 	result := map[string]string{}
 	for _, entry := range entries {
-		parts := strings.Split(entry, "=")
+		parts := strings.SplitN(entry, "=", 2)
 		if len(parts) > 1 {
 			result[parts[0]] = parts[1]
 		} else {

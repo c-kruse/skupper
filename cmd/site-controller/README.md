@@ -114,3 +114,24 @@ metadata:
 ```
 
 Note that `metadata:name` is name of the ConfigMap, and must be set to `skupper-site`.
+
+The `data:*-annotations` fields are comma delimited sets of annotations in the form "key1=value1,key2=value2". Use the '\' character to escape commas inside of an annotation value.
+
+For example:
+
+```yaml
+kind: ConfigMap
+metadata:
+  name: skupper-site
+data:
+    router-service-annotations: traffic.sidecar.istio.io/excludeInboundPorts=55671\,45671,my-other-annotation=env=dev\,foo=bar
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    traffic.sidecar.istio.io/excludeInboundPorts: 55671,45671
+    my-other-annotation: env=dev,foo=bar
+```
