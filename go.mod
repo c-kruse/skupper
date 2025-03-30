@@ -25,7 +25,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/crypto v0.23.0
 	golang.org/x/sync v0.7.0
-	golang.org/x/sys v0.20.0
+	golang.org/x/sys v0.28.0
 	golang.org/x/text v0.15.0
 	golang.org/x/time v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -39,8 +39,7 @@ require (
 replace github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
 
 require (
-	cloud.google.com/go/compute v1.19.1 // indirect
-	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	cloud.google.com/go/compute/metadata v0.6.0 // indirect
 	github.com/Azure/azure-sdk-for-go v46.0.0+incompatible // indirect
 	github.com/Azure/go-autorest v14.2.0+incompatible // indirect
 	github.com/Azure/go-autorest/autorest v0.11.1 // indirect
