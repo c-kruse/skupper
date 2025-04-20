@@ -34,18 +34,20 @@ func InitialiseConfig(client kubernetes.Interface, namespace string, path string
 	}
 	log.Printf("Router configuration written to %s", configFile)
 
-	profileSyncer := newSslProfileSyncer(path)
+	profileManager := newSslProfileManager(path)
 	for _, profile := range config.SslProfiles {
-		target, _ := profileSyncer.get(profile.Name)
+		pState, _, _ := profileManager.Register(profile)
 
-		secret, err := client.CoreV1().Secrets(namespace).Get(ctxt, target.name, metav1.GetOptions{})
+		secret, err := client.CoreV1().Secrets(namespace).Get(ctxt, pState.SecretName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
-		if err, _ := target.sync(secret); err != nil {
+		if _, err := profileManager.WriteLatest(secret, nil); err != nil {
 			return err
 		}
-		log.Printf("Resources for SslProfile %s written to %s", profile.Name, target.path)
+	}
+	for _, state := range profileManager.profiles {
+		log.Printf("SSL Profile %q configured to ordinal %d, present: %t", state.ProfileName, state.Latest, len(state.LatestSum) > 0)
 	}
 	return nil
 }

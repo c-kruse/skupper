@@ -1163,6 +1163,9 @@ func (a *Agent) UpdateConnectorConfig(changes *ConnectorDifference) error {
 			if err != nil {
 				return err
 			}
+			if sslProfile == nil {
+				return fmt.Errorf("missing sslProfile %q", added.SslProfile)
+			}
 
 			if sslProfile.CaCertFile != "" {
 				_, err = os.Stat(sslProfile.CaCertFile)
@@ -1333,25 +1336,13 @@ func (a *Agent) CreateSslProfile(profile SslProfile) error {
 	return nil
 }
 
-func (a *Agent) ReloadSslProfile(name string) error {
-
-	profile, err := a.GetSslProfileByName(name)
-	if err != nil {
-		return err
-	}
-
-	// A profile is expected to be returned
-	if profile == nil {
-		return fmt.Errorf("No SSL Profile with name %s found", name)
-	}
-
+func (a *Agent) UpdateSslProfile(profile SslProfile) error {
 	if err := a.Update("io.skupper.router.sslProfile", profile.Name, profile); err != nil {
-		return fmt.Errorf("Error updating SSL Profile: %s", err)
+		return fmt.Errorf("error updating SSL Profile: %s", err)
 	}
 
 	return nil
 }
-
 func ConnectedSitesInfo(selfId string, routers []Router) types.TransportConnectedSites {
 	var connectedSites types.TransportConnectedSites
 	var self *Router
