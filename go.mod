@@ -18,7 +18,7 @@ require (
 	github.com/oapi-codegen/oapi-codegen/v2 v2.3.0
 	github.com/oapi-codegen/runtime v1.1.1
 	github.com/openshift/api v0.0.0-20210428205234-a8389931bee7
-	github.com/openshift/client-go v0.0.0-20210112165513-ebc401615f47
+	github.com/openshift/client-go 5f55ff6979a1
 	github.com/prometheus/client_golang v1.14.0
 	github.com/skupperproject/skupper-libpod/v4 v4.0.3-0
 	github.com/spf13/cobra v1.8.0
