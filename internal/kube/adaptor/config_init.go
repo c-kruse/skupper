@@ -36,7 +36,7 @@ func InitialiseConfig(client kubernetes.Interface, namespace string, path string
 
 	profileSyncer := newSslProfileSyncer(path)
 	for _, profile := range config.SslProfiles {
-		target, _ := profileSyncer.get(profile.Name)
+		target, _ := profileSyncer.get(profile.Name, profile.Ordinal)
 
 		secret, err := client.CoreV1().Secrets(namespace).Get(ctxt, target.name, metav1.GetOptions{})
 		if err != nil {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -62,8 +63,8 @@ func (c *ConfigSync) key(name string) string {
 	return fmt.Sprintf("%s/%s", c.namespace, name)
 }
 
-func (c *ConfigSync) trackSslProfile(profile string) (*SslProfile, bool) {
-	return c.profileSyncer.get(profile)
+func (c *ConfigSync) trackSslProfile(profile string, ordinal uint64) (*SslProfile, bool) {
+	return c.profileSyncer.get(profile, ordinal)
 }
 
 func (c *ConfigSync) sync(target *SslProfile) error {
@@ -75,19 +76,22 @@ func (c *ConfigSync) sync(target *SslProfile) error {
 		log.Printf("CONFIG_SYNC: No secret %q cached", target.name)
 		return fmt.Errorf("No secret %q cached", target.name)
 	}
-	var wrote bool
-	if err, wrote = target.sync(secret); err != nil {
+	configuredOrdVal, ok := secret.ObjectMeta.Annotations["internal.skupper.io/ssl-profile-ordinal"]
+	if !ok {
+		return fmt.Errorf("secret %q missing ssl-profile-ordinal annotation", target.name)
+	}
+	parsed, err := strconv.ParseUint(configuredOrdVal, 10, 64)
+	if err != nil {
+		return fmt.Errorf("secret %q has malformed ssl-profile-ordinal annotation: %s", target.name, err)
+	}
+	if target.ordinal > parsed {
+		return fmt.Errorf("secret %q has ssl-profile-ordinal %d, but configured version is %d", target.name, parsed, target.ordinal)
+	}
+	if err, _ = target.sync(secret); err != nil {
 		log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", target.name, err)
 		return err
 	}
 	log.Printf("CONFIG_SYNC: Secret %q synced", target.name)
-	if wrote {
-		if err := c.reloadSslProfileInRouter(target.name); err != nil {
-			log.Printf("CONFIG_SYNC: Error reloading SslProfile %q: %s", target.name, err)
-			return err
-		}
-		log.Printf("CONFIG_SYNC: SslProfile %q reloaded", target.name)
-	}
 	return nil
 }
 
@@ -101,19 +105,11 @@ func (c *ConfigSync) secretEvent(key string, secret *corev1.Secret) error {
 			return nil
 		}
 		var err error
-		var wrote bool
-		if err, wrote = current.sync(secret); err != nil {
+		if err, _ = current.sync(secret); err != nil {
 			log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", secret.Name, err)
 			return err
 		}
 		log.Printf("CONFIG_SYNC: Secret %q synced", secret.Name)
-		if wrote {
-			if err := c.reloadSslProfileInRouter(current.name); err != nil {
-				log.Printf("CONFIG_SYNC: Error reloading SslProfile %q: %s", current.name, err)
-				return err
-			}
-			log.Printf("CONFIG_SYNC: SslProfile %q reloaded", current.name)
-		}
 	} else {
 		log.Printf("CONFIG_SYNC: Secret %q not being tracked", secret.Name)
 	}
@@ -234,6 +230,16 @@ func syncListeners(agent *qdr.Agent, desired *qdr.RouterConfig) error {
 	return nil
 }
 
+func (c *ConfigSync) updateSslProfileInRouter(profile qdr.SslProfile) error {
+	agent, err := c.agentPool.Get()
+	if err != nil {
+		return err
+	}
+	defer c.agentPool.Put(agent)
+
+	return agent.UpdateSslProfile(profile)
+}
+
 func (c *ConfigSync) reloadSslProfileInRouter(sslProfileName string) error {
 	agent, err := c.agentPool.Get()
 	if err != nil {
@@ -253,7 +259,14 @@ func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) 
 	}
 
 	for _, profile := range desired {
-		if _, ok := actual[profile.Name]; !ok {
+		configured, ok := actual[profile.Name]
+		if ok {
+			if configured != profile {
+				if err := agent.UpdateSslProfile(profile); err != nil {
+					return nil
+				}
+			}
+		} else {
 			if err := agent.CreateSslProfile(profile); err != nil {
 				return err
 			}
@@ -272,7 +285,7 @@ func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) 
 
 func (c *ConfigSync) syncSslProfileCredentialsToDisk(profiles map[string]qdr.SslProfile) error {
 	for _, profile := range profiles {
-		if tracker, sync := c.trackSslProfile(profile.Name); sync {
+		if tracker, sync := c.trackSslProfile(profile.Name, profile.Ordinal); sync {
 			if err := c.sync(tracker); err != nil {
 				return fmt.Errorf("Error synchronising secret for profile %s: %s", profile.Name, err)
 			}
@@ -294,7 +307,7 @@ func (c *ConfigSync) recoverTracking() error {
 		return err
 	}
 	for _, profile := range current.SslProfiles {
-		c.trackSslProfile(profile.Name)
+		c.trackSslProfile(profile.Name, profile.Ordinal)
 	}
 	return nil
 }

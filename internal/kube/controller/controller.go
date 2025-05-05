@@ -24,6 +24,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/network"
+	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -56,6 +57,12 @@ type Controller struct {
 func skupperNetworkStatus() internalinterfaces.TweakListOptionsFunc {
 	return func(options *metav1.ListOptions) {
 		options.FieldSelector = "metadata.name=skupper-network-status"
+	}
+}
+
+func skupperRouterConfig() internalinterfaces.TweakListOptionsFunc {
+	return func(options *metav1.ListOptions) {
+		options.LabelSelector = "internal.skupper.io/router-config"
 	}
 }
 
@@ -120,6 +127,7 @@ func NewController(cli internalclient.Clients, config *Config) (*Controller, err
 	controller.controller.WatchAttachedConnectorBindings(config.WatchNamespace, filter(controller, controller.checkAttachedConnectorBinding))
 	controller.controller.WatchLinks(config.WatchNamespace, filter(controller, controller.checkLink))
 	controller.controller.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
+	controller.controller.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
 	controller.controller.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
 	controller.controller.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
 	controller.siteSizingWatcher = controller.controller.WatchConfigMaps(skupperSiteSizingConfig(), config.Namespace, filter(controller, controller.siteSizing.Update))
@@ -443,6 +451,18 @@ func (c *Controller) checkAttachedConnector(key string, connector *skupperv2alph
 	} else {
 		return c.getSite(connector.Spec.SiteNamespace).AttachedConnectorUpdated(connector)
 	}
+}
+
+func (c *Controller) routerConfigUpdate(_ string, cm *corev1.ConfigMap) error {
+	if cm == nil {
+		return nil
+	}
+	config, err := qdr.GetRouterConfigFromConfigMap(cm)
+	if err != nil {
+		return err
+	}
+	c.getSite(cm.Namespace).CheckSslProfiles(config)
+	return nil
 }
 
 func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error {

@@ -54,6 +54,7 @@ type Site struct {
 	logger        *slog.Logger
 	currentGroups []string
 	labelling     Labelling
+	profileMgr    *sslProfileManager
 }
 
 func NewSite(namespace string, controller *internalclient.Controller, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling) *Site {
@@ -70,7 +71,8 @@ func NewSite(namespace string, controller *internalclient.Controller, certs cert
 		logger: slog.New(slog.Default().Handler()).With(
 			slog.String("component", "kube.site.site"),
 		),
-		labelling: labelling,
+		profileMgr: newSslProfileManager(namespace, controller.GetKubeClient()),
+		labelling:  labelling,
 	}
 }
 
@@ -139,10 +141,12 @@ func (s *Site) reconcile(siteDef *skupperv2alpha1.Site, inRecovery bool) error {
 		}
 		s.initialised = true
 		s.currentGroups = s.groups()
+		s.profileMgr.Init(s, routerConfig)
 		s.bindings.init(s, routerConfig)
 		s.bindings.SetSite(s)
 		s.setBindingsConfiguredStatus(nil)
 		s.checkSecuredAccess()
+
 	} else if len(s.currentGroups) != len(s.groups()) {
 		s.logger.Info("HA setting changed for site",
 			slog.String("namespace", siteDef.Namespace),
@@ -1011,6 +1015,7 @@ func (s *Site) Deleted() {
 		slog.String("name", s.name))
 	s.bindings.cleanup()
 	s.setBindingsConfiguredStatus(stderrors.New("No active site"))
+	s.profileMgr.Stop()
 }
 
 func (s *Site) setDefaultIssuerInStatus() bool {
@@ -1074,6 +1079,13 @@ func getLinkRecordsForSite(siteId string, network []skupperv2alpha1.SiteRecord) 
 	return nil
 }
 
+func (s *Site) CheckSslProfiles(config *qdr.RouterConfig) error {
+	if !s.initialised {
+		return nil
+	}
+	s.profileMgr.Reload(config)
+	return nil
+}
 func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error {
 	if s.site == nil || reflect.DeepEqual(s.site.Status.Network, network) {
 		return nil
@@ -1308,6 +1320,10 @@ func (s *Site) isRouterPodRunning() skupperv2alpha1.ConditionState {
 		}
 	}
 	return state
+}
+
+func (s *Site) watchSecrets(handler internalclient.SecretHandler) *internalclient.SecretWatcher {
+	return s.controller.WatchAllSecrets(s.namespace, handler)
 }
 
 func podState(pod *corev1.Pod) skupperv2alpha1.ConditionState {

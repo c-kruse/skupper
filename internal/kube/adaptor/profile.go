@@ -22,17 +22,20 @@ func newSslProfileSyncer(path string) *SslProfileSyncer {
 	}
 }
 
-func (s SslProfileSyncer) get(profile string) (*SslProfile, bool) {
+func (s SslProfileSyncer) get(profile string, ordinal uint64) (*SslProfile, bool) {
 	secret := profile
 	if strings.HasSuffix(profile, "-profile") {
 		secret = strings.TrimSuffix(profile, "-profile")
 	}
 	if current, ok := s.profiles[secret]; ok {
-		return current, false
+		doSync := current.ordinal < ordinal
+		current.ordinal = ordinal
+		return current, doSync
 	}
 	target := &SslProfile{
-		name: secret,
-		path: paths.Join(s.path, profile),
+		name:    secret,
+		path:    paths.Join(s.path, profile),
+		ordinal: ordinal,
 	}
 	s.profiles[secret] = target
 	return target, true
@@ -44,9 +47,10 @@ func (s SslProfileSyncer) bySecretName(secret string) (*SslProfile, bool) {
 }
 
 type SslProfile struct {
-	name   string
-	path   string
-	secret *corev1.Secret
+	name    string
+	ordinal uint64
+	path    string
+	secret  *corev1.Secret
 }
 
 func (s *SslProfile) sync(secret *corev1.Secret) (error, bool) {

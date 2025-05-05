@@ -182,10 +182,11 @@ func (c *Controller) process() bool {
 	} else {
 		log.Printf("Invalid object on event queue for %q: %#v", c.errorKey, obj)
 	}
-	c.queue.Forget(obj)
 
 	if retry && c.queue.NumRequeues(obj) < 5 {
 		c.queue.AddRateLimited(obj)
+	} else {
+		c.queue.Forget(obj)
 	}
 
 	return true
