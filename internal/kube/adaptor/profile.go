@@ -2,9 +2,12 @@ package adaptor
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	paths "path"
 	"reflect"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,23 +50,39 @@ func (s SslProfileSyncer) bySecretName(secret string) (*SslProfile, bool) {
 }
 
 type SslProfile struct {
-	name    string
-	ordinal uint64
-	path    string
-	secret  *corev1.Secret
+	name        string
+	ordinal     uint64
+	prevOrdinal *uint64
+	path        string
+	secret      *corev1.Secret
+}
+
+func (s *SslProfile) isCurrent() bool {
+	return s.prevOrdinal != nil && *s.prevOrdinal >= s.ordinal
 }
 
 func (s *SslProfile) sync(secret *corev1.Secret) (error, bool) {
-	if s.secret != nil && reflect.DeepEqual(s.secret.Data, secret.Data) {
+	if s.secret != nil && reflect.DeepEqual(s.secret.Data, secret.Data) &&
+		s.isCurrent() {
 		return nil, false
 	}
-	var wrote bool
-	var err error
-	if err, wrote = writeSecretToPath(secret, s.path); err != nil {
-		return err, wrote
+	ord, err := ordinalFromSecret(secret)
+	if err != nil {
+		return err, false
+	}
+	if ord < s.ordinal {
+		return fmt.Errorf("secret %q has ssl-profile-ordinal %d but want %d", secret.Name, ord, s.ordinal), false
+	}
+	var sync bool
+	if err, _ = writeSecretToPath(secret, s.path); err != nil {
+		return err, false
 	}
 	s.secret = secret
-	return nil, wrote
+	if !s.isCurrent() && ord >= s.ordinal {
+		sync = true
+	}
+	s.prevOrdinal = &ord
+	return err, sync
 }
 
 func writeSecretToPath(secret *corev1.Secret, path string) (error, bool) {
@@ -95,4 +114,19 @@ func mkdir(path string) error {
 		}
 	}
 	return nil
+}
+
+func ordinalFromSecret(secret *corev1.Secret) (uint64, error) {
+	if secret == nil || secret.ObjectMeta.Annotations == nil {
+		return 0, errors.New("secret missing ssl-profile-ordinal annotation")
+	}
+	ordStr, found := secret.ObjectMeta.Annotations["internal.skupper.io/ssl-profile-ordinal"]
+	if !found {
+		return 0, fmt.Errorf("secret %q missing ssl-profile-ordinal annotation", secret.Name)
+	}
+	parsed, err := strconv.ParseUint(ordStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("malformed ssl-profile-ordinal annotation value on secret %q", secret.Name)
+	}
+	return parsed, nil
 }

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"reflect"
-	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -76,17 +75,6 @@ func (c *ConfigSync) sync(target *SslProfile) error {
 		log.Printf("CONFIG_SYNC: No secret %q cached", target.name)
 		return fmt.Errorf("No secret %q cached", target.name)
 	}
-	configuredOrdVal, ok := secret.ObjectMeta.Annotations["internal.skupper.io/ssl-profile-ordinal"]
-	if !ok {
-		return fmt.Errorf("secret %q missing ssl-profile-ordinal annotation", target.name)
-	}
-	parsed, err := strconv.ParseUint(configuredOrdVal, 10, 64)
-	if err != nil {
-		return fmt.Errorf("secret %q has malformed ssl-profile-ordinal annotation: %s", target.name, err)
-	}
-	if target.ordinal > parsed {
-		return fmt.Errorf("secret %q has ssl-profile-ordinal %d, but configured version is %d", target.name, parsed, target.ordinal)
-	}
 	if err, _ = target.sync(secret); err != nil {
 		log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", target.name, err)
 		return err
@@ -105,11 +93,19 @@ func (c *ConfigSync) secretEvent(key string, secret *corev1.Secret) error {
 			return nil
 		}
 		var err error
-		if err, _ = current.sync(secret); err != nil {
+		err, resync := current.sync(secret)
+		if err != nil {
 			log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", secret.Name, err)
 			return err
 		}
 		log.Printf("CONFIG_SYNC: Secret %q synced", secret.Name)
+		if resync {
+			key := c.namespace + "/" + c.routerConfigMap
+			cm, err := c.config.Get(key)
+			if err == nil {
+				c.configEvent(key, cm)
+			}
+		}
 	} else {
 		log.Printf("CONFIG_SYNC: Secret %q not being tracked", secret.Name)
 	}
@@ -228,24 +224,6 @@ func syncListeners(agent *qdr.Agent, desired *qdr.RouterConfig) error {
 		}
 	}
 	return nil
-}
-
-func (c *ConfigSync) updateSslProfileInRouter(profile qdr.SslProfile) error {
-	agent, err := c.agentPool.Get()
-	if err != nil {
-		return err
-	}
-	defer c.agentPool.Put(agent)
-
-	return agent.UpdateSslProfile(profile)
-}
-
-func (c *ConfigSync) reloadSslProfileInRouter(sslProfileName string) error {
-	agent, err := c.agentPool.Get()
-	if err != nil {
-		return err
-	}
-	return agent.ReloadSslProfile(sslProfileName)
 }
 
 func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) error {
