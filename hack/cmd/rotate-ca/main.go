@@ -216,8 +216,8 @@ func main() {
 	}
 
 	log.Printf("cleaning up rotation certificates for run: %s", prefix)
-	err = secrets.DeleteCollection(ctx, v1.DeleteOptions{}, v1.ListOptions{
-		LabelSelector: "internal.skupper.io/hack-rotate-prefix",
+	err = skupperCli.Certificates(cli.Namespace).DeleteCollection(ctx, v1.DeleteOptions{}, v1.ListOptions{
+		LabelSelector: "internal.skupper.io/hack-rotate-prefix=" + prefix,
 	})
 	if err != nil {
 		log.Fatal(err)
