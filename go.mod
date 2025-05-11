@@ -63,7 +63,7 @@ require (
 	github.com/fatih/color v1.7.0 // indirect
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/form3tech-oss/jwt-go v3.2.2+incompatible // indirect
-	github.com/getkin/kin-openapi v0.124.0 // indirect
+	github.com/getkin/kin-openapi v0.132.0 // indirect
 	github.com/go-logr/logr v0.2.0 // indirect
 	github.com/go-openapi/analysis v0.21.2 // indirect
 	github.com/go-openapi/errors v0.20.3 // indirect
