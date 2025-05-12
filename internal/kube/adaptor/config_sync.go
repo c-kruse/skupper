@@ -3,11 +3,13 @@ package adaptor
 import (
 	"fmt"
 	"log"
-	"reflect"
+	"log/slog"
+	"os"
 
 	corev1 "k8s.io/api/core/v1"
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
+	"github.com/skupperproject/skupper/internal/kube/secrets"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
 )
@@ -18,19 +20,31 @@ type ConfigSync struct {
 	agentPool       *qdr.AgentPool
 	controller      *watchers.EventProcessor
 	namespace       string
-	profileSyncer   *SslProfileSyncer
+	profileSyncer   *secrets.Sync
 	config          *watchers.ConfigMapWatcher
 	secrets         *watchers.SecretWatcher
 	path            string
 	routerConfigMap string
 }
 
+func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
+	return func(handler func(string, *corev1.Secret) error) secrets.SecretsCache {
+		m := eventProcessor.WatchAllSecrets(namespace, handler)
+		m.Start(make(<-chan struct{}))
+		return m
+	}
+}
+
 func NewConfigSync(cli internalclient.Clients, namespace string, path string, routerConfigMap string) *ConfigSync {
+	controller := watchers.NewEventProcessor("config-sync", cli)
 	configSync := &ConfigSync{
-		agentPool:       qdr.NewAgentPool("amqp://localhost:5672", nil),
-		controller:      watchers.NewEventProcessor("config-sync", cli),
-		namespace:       namespace,
-		profileSyncer:   newSslProfileSyncer(path),
+		agentPool:  qdr.NewAgentPool("amqp://localhost:5672", nil),
+		controller: controller,
+		namespace:  namespace,
+		profileSyncer: secrets.NewSync(
+			sslSecretsWatcher(namespace, controller),
+			slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
+		),
 		path:            path,
 		routerConfigMap: routerConfigMap,
 	}
@@ -42,7 +56,6 @@ func (c *ConfigSync) Start(stopCh <-chan struct{}) error {
 		return err
 	}
 	c.config = c.controller.WatchConfigMaps(watchers.ByName(c.routerConfigMap), c.namespace, c.configEvent)
-	c.secrets = c.controller.WatchAllSecrets(c.namespace, c.secretEvent)
 	c.controller.StartWatchers(stopCh)
 	log.Printf("CONFIG_SYNC: Waiting for informers to sync...")
 	if ok := c.controller.WaitForCacheSync(stopCh); !ok {
@@ -61,64 +74,6 @@ func (c *ConfigSync) Stop() {
 
 func (c *ConfigSync) key(name string) string {
 	return fmt.Sprintf("%s/%s", c.namespace, name)
-}
-
-func (c *ConfigSync) trackSslProfile(profile string) (*SslProfile, bool) {
-	return c.profileSyncer.get(profile)
-}
-
-func (c *ConfigSync) sync(target *SslProfile) error {
-	secret, err := c.secrets.Get(c.key(target.name))
-	if err != nil {
-		return fmt.Errorf("CONFIG_SYNC: Error looking up secret for %s: %s", target.name, err)
-	}
-	if secret == nil {
-		log.Printf("CONFIG_SYNC: No secret %q cached", target.name)
-		return fmt.Errorf("No secret %q cached", target.name)
-	}
-	var wrote bool
-	if err, wrote = target.sync(secret); err != nil {
-		log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", target.name, err)
-		return err
-	}
-	log.Printf("CONFIG_SYNC: Secret %q synced", target.name)
-	if wrote {
-		if err := c.reloadSslProfileInRouter(target.name); err != nil {
-			log.Printf("CONFIG_SYNC: Error reloading SslProfile %q: %s", target.name, err)
-			return err
-		}
-		log.Printf("CONFIG_SYNC: SslProfile %q reloaded", target.name)
-	}
-	return nil
-}
-
-func (c *ConfigSync) secretEvent(key string, secret *corev1.Secret) error {
-	if secret == nil {
-		return nil
-	}
-	if current, ok := c.profileSyncer.bySecretName(secret.Name); ok {
-		if current.secret != nil && reflect.DeepEqual(current.secret.Data, secret.Data) {
-			log.Printf("CONFIG_SYNC: Secret %q already up to date", secret.Name)
-			return nil
-		}
-		var err error
-		var wrote bool
-		if err, wrote = current.sync(secret); err != nil {
-			log.Printf("CONFIG_SYNC: Error syncing secret %q: %s", secret.Name, err)
-			return err
-		}
-		log.Printf("CONFIG_SYNC: Secret %q synced", secret.Name)
-		if wrote {
-			if err := c.reloadSslProfileInRouter(current.name); err != nil {
-				log.Printf("CONFIG_SYNC: Error reloading SslProfile %q: %s", current.name, err)
-				return err
-			}
-			log.Printf("CONFIG_SYNC: SslProfile %q reloaded", current.name)
-		}
-	} else {
-		log.Printf("CONFIG_SYNC: Secret %q not being tracked", secret.Name)
-	}
-	return nil
 }
 
 func (c *ConfigSync) configEvent(key string, configmap *corev1.ConfigMap) error {
@@ -254,8 +209,14 @@ func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) 
 	}
 
 	for _, profile := range desired {
-		if _, ok := actual[profile.Name]; !ok {
+		current, ok := actual[profile.Name]
+		if !ok {
 			if err := agent.CreateSslProfile(profile); err != nil {
+				return err
+			}
+		}
+		if current != profile {
+			if err := agent.UpdateSslProfile(profile); err != nil {
 				return err
 			}
 		}
@@ -272,14 +233,8 @@ func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) 
 }
 
 func (c *ConfigSync) syncSslProfileCredentialsToDisk(profiles map[string]qdr.SslProfile) error {
-	for _, profile := range profiles {
-		if tracker, sync := c.trackSslProfile(profile.Name); sync {
-			if err := c.sync(tracker); err != nil {
-				return fmt.Errorf("Error synchronising secret for profile %s: %s", profile.Name, err)
-			}
-		}
-	}
-	return nil
+	delta := c.profileSyncer.Expect(profiles)
+	return delta.Error()
 }
 
 func (c *ConfigSync) recoverTracking() error {
@@ -290,12 +245,21 @@ func (c *ConfigSync) recoverTracking() error {
 	if configmap == nil {
 		return fmt.Errorf("No configmap %q", c.routerConfigMap)
 	}
-	current, err := qdr.GetRouterConfigFromConfigMap(configmap)
-	if err != nil {
+
+	if _, err := qdr.GetRouterConfigFromConfigMap(configmap); err != nil {
 		return err
 	}
-	for _, profile := range current.SslProfiles {
-		c.trackSslProfile(profile.Name)
+	c.profileSyncer.Recover()
+	return nil
+}
+
+func mkdir(path string) error {
+	_, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		err = os.Mkdir(path, 0777)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

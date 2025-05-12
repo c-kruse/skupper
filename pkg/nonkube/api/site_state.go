@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/site"
+	"github.com/skupperproject/skupper/internal/sslprofile"
 	"github.com/skupperproject/skupper/internal/utils"
 	"github.com/skupperproject/skupper/internal/version"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -247,10 +248,10 @@ func (s *SiteState) linkAccessMap() site.RouterAccessMap {
 	}
 	return linkAccessMap
 }
-func (s *SiteState) linkMap(sslProfileBasePath string) site.LinkMap {
+func (s *SiteState) linkMap(sslprofiles sslprofile.Provider) site.LinkMap {
 	linkMap := site.LinkMap{}
 	for name, link := range s.Links {
-		siteLink := site.NewLink(name, path.Join(sslProfileBasePath, string(CertificatesPath)))
+		siteLink := site.NewLink(name, sslprofiles)
 		link.SetConfigured(nil)
 		siteLink.Update(link)
 		linkMap[name] = siteLink
@@ -272,6 +273,7 @@ func (s *SiteState) bindings(sslProfileBasePath string) *site.Bindings {
 }
 
 func (s *SiteState) ToRouterConfig(sslProfileBasePath string, platform string) qdr.RouterConfig {
+	profiles := sslprofile.NewStaticCollection(path.Join(sslProfileBasePath, string(CertificatesPath)))
 	if s.SiteId == "" {
 		s.SiteId = uuid.New().String()
 	}
@@ -301,9 +303,9 @@ func (s *SiteState) ToRouterConfig(sslProfileBasePath string, platform string) q
 		routerConfig.SiteConfig.Platform = "{{.Platform}}"
 	}
 	// LinkAccess
-	s.linkAccessMap().DesiredConfig(nil, path.Join(sslProfileBasePath, string(CertificatesPath))).Apply(&routerConfig)
+	s.linkAccessMap().DesiredConfig(nil, profiles).Apply(&routerConfig)
 	// Link
-	s.linkMap(sslProfileBasePath).Apply(&routerConfig)
+	s.linkMap(profiles).Apply(&routerConfig)
 	// Bindings
 	s.bindings(sslProfileBasePath).Apply(&routerConfig)
 	// Log (static for now) TODO use site specific options to configure logging

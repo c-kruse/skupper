@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/sslprofile"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"gotest.tools/v3/assert"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,7 +117,7 @@ func TestLink_Apply(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := NewLink(tt.fields.name, tt.fields.profilePath)
+			l := NewLink(tt.fields.name, sslprofile.NewStaticCollection(tt.fields.profilePath))
 			l.definition = tt.fields.definition
 			if got := l.Apply(&tt.args.current); got != tt.want {
 				t.Errorf("Link.Apply() = %v, want %v", got, tt.want)
@@ -149,9 +150,9 @@ func TestLinkMap_Apply(t *testing.T) {
 			name: "no definition",
 			links: []Link{
 				{
-					name:        "link1",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
-					definition:  nil,
+					name:       "link1",
+					definition: nil,
+					profiles:   provider{},
 				},
 			},
 			connectors:         []qdr.Connector{},
@@ -162,8 +163,8 @@ func TestLinkMap_Apply(t *testing.T) {
 			name: "inter router definition",
 			links: []Link{
 				{
-					name:        "link1",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
+					name:     "link1",
+					profiles: provider{},
 					definition: &skupperv2alpha1.Link{
 						ObjectMeta: v1.ObjectMeta{
 							Name:      "site-1",
@@ -189,8 +190,8 @@ func TestLinkMap_Apply(t *testing.T) {
 			name: "edge definition",
 			links: []Link{
 				{
-					name:        "link1",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
+					name:     "link1",
+					profiles: provider{},
 					definition: &skupperv2alpha1.Link{
 						ObjectMeta: v1.ObjectMeta{
 							Name:      "site-1",
@@ -217,8 +218,8 @@ func TestLinkMap_Apply(t *testing.T) {
 			name: "two links",
 			links: []Link{
 				{
-					name:        "link1",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
+					name:     "link1",
+					profiles: provider{},
 					definition: &skupperv2alpha1.Link{
 						ObjectMeta: v1.ObjectMeta{
 							Name:      "site-1",
@@ -236,8 +237,8 @@ func TestLinkMap_Apply(t *testing.T) {
 					},
 				},
 				{
-					name:        "link2",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
+					name:     "link2",
+					profiles: provider{},
 					definition: &skupperv2alpha1.Link{
 						ObjectMeta: v1.ObjectMeta{
 							Name:      "site-2",
@@ -263,8 +264,8 @@ func TestLinkMap_Apply(t *testing.T) {
 			name: "remove a connection",
 			links: []Link{
 				{
-					name:        "link1",
-					profilePath: "/etc/skupper-router-certs/skupper-internal/ca.crt",
+					name:     "link1",
+					profiles: provider{},
 					definition: &skupperv2alpha1.Link{
 						ObjectMeta: v1.ObjectMeta{
 							Name:      "site-1",
@@ -413,9 +414,9 @@ func TestLink_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			link := &Link{
-				name:        tt.fields.name,
-				profilePath: tt.fields.profilePath,
-				definition:  tt.fields.definition,
+				name:       tt.fields.name,
+				profiles:   provider{},
+				definition: tt.fields.definition,
 			}
 			if got := link.Update(tt.args.definition); got != tt.want {
 				t.Errorf("Link.Update() = %v, want %v", got, tt.want)

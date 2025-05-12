@@ -13,11 +13,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	kubeqdr "github.com/skupperproject/skupper/internal/kube/qdr"
+	"github.com/skupperproject/skupper/internal/kube/secrets"
 	"github.com/skupperproject/skupper/internal/kube/site/resources"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
@@ -55,10 +57,20 @@ type Site struct {
 	logger        *slog.Logger
 	currentGroups []string
 	labelling     Labelling
+	profiles      *secrets.Manager
+}
+
+func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
+	return func(handler func(string, *corev1.Secret) error) secrets.SecretsCache {
+		m := eventProcessor.WatchAllSecrets(namespace, handler)
+		m.Start(make(<-chan struct{}))
+		return m
+	}
 }
 
 func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling) *Site {
-	return &Site{
+	baseLogger := slog.New(slog.Default().Handler())
+	site := &Site{
 		bindings:   NewExtendedBindings(eventProcessor, SSL_PROFILE_PATH),
 		namespace:  namespace,
 		clients:    eventProcessor,
@@ -68,11 +80,20 @@ func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs ce
 		access:     access,
 		sizes:      sizes,
 		routerPods: map[string]*corev1.Pod{},
-		logger: slog.New(slog.Default().Handler()).With(
+		logger: baseLogger.With(
 			slog.String("component", "kube.site.site"),
 		),
 		labelling: labelling,
 	}
+	site.profiles = secrets.NewManager(sslSecretsWatcher(namespace, eventProcessor),
+		site.clients.GetKubeClient().CoreV1().Secrets(namespace),
+		site.recheckProfiles,
+		namespace,
+		baseLogger.With(
+			slog.String("component", "kube.site.secrets"),
+			slog.String("namespace", namespace),
+		))
+	return site
 }
 
 func (s *Site) NameMatches(name string) bool {
@@ -661,7 +682,7 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 	for i, group := range groups {
 		if config, ok := byName[group]; ok {
 			if update {
-				op := ConfigUpdateList{s.bindings, s, s.linkAccess.DesiredConfig(groups[:i], SSL_PROFILE_PATH)}
+				op := ConfigUpdateList{s.bindings, s, s.linkAccess.DesiredConfig(groups[:i], s.profiles)}
 				if err := kubeqdr.UpdateRouterConfig(s.clients.GetKubeClient(), group, s.namespace, context.TODO(), op, s.labelling); err != nil {
 					s.logger.Error("Failed to update router config map",
 						slog.String("namespace", s.namespace),
@@ -674,7 +695,7 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 		} else {
 			routerConfig := s.initialRouterConfig()
 			s.bindings.Apply(routerConfig)
-			s.linkAccess.DesiredConfig(groups[:i], SSL_PROFILE_PATH).Apply(routerConfig)
+			s.linkAccess.DesiredConfig(groups[:i], s.profiles).Apply(routerConfig)
 			if err := s.createRouterConfigForGroup(group, routerConfig); err != nil {
 				s.logger.Error("Failed to create router config map",
 					slog.String("namespace", s.namespace),
@@ -929,7 +950,7 @@ func (s *Site) setBindingsConfiguredStatus(err error) {
 }
 
 func (s *Site) newLink(linkconfig *skupperv2alpha1.Link) *site.Link {
-	config := site.NewLink(linkconfig.ObjectMeta.Name, SSL_PROFILE_PATH)
+	config := site.NewLink(linkconfig.ObjectMeta.Name, s.profiles)
 	config.Update(linkconfig)
 	return config
 }
@@ -1233,7 +1254,7 @@ func (s *Site) CheckRouterAccess(name string, la *skupperv2alpha1.RouterAccess) 
 		groups := s.groups()
 		var errors []string
 		for i, group := range groups {
-			if err := s.updateRouterConfigForGroup(s.linkAccess.DesiredConfig(previousGroups, SSL_PROFILE_PATH), group); err != nil {
+			if err := s.updateRouterConfigForGroup(s.linkAccess.DesiredConfig(previousGroups, s.profiles), group); err != nil {
 				s.logger.Error("Error updating router config",
 					slog.String("namespace", s.namespace),
 					slog.Any("error", err))
@@ -1309,6 +1330,28 @@ func (s *Site) isRouterPodRunning() skupperv2alpha1.ConditionState {
 		}
 	}
 	return state
+}
+
+func (s *Site) recheckProfiles(tlsCredentials string) {
+	for _, ra := range s.linkAccess {
+		if ra == nil {
+			continue
+		}
+		if ra.Spec.TlsCredentials == tlsCredentials {
+			key, _ := cache.MetaNamespaceKeyFunc(ra)
+			s.CheckRouterAccess(key, ra)
+		}
+	}
+	for _, link := range s.links {
+		def := link.Definition()
+		if def == nil {
+			continue
+		}
+		if def.Spec.TlsCredentials == tlsCredentials {
+			key, _ := cache.MetaNamespaceKeyFunc(def)
+			s.CheckLink(key, def)
+		}
+	}
 }
 
 func podState(pod *corev1.Pod) skupperv2alpha1.ConditionState {
