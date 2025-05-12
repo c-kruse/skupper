@@ -5,9 +5,15 @@ import (
 	"testing"
 
 	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/sslprofile"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+type provider struct{}
+
+func (p provider) Apply(config *qdr.RouterConfig) bool                             { return false }
+func (p provider) Get(tlsCredentials string, opts sslprofile.Opts) (string, error) { return "", nil }
 
 func TestRouterAccessConfig_Apply(t *testing.T) {
 	id := "router-1"
@@ -17,9 +23,8 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 	helloAge := 10
 
 	type fields struct {
-		listeners   map[string]qdr.Listener
-		connectors  []qdr.Connector
-		profilePath string
+		listeners  map[string]qdr.Listener
+		connectors []qdr.Connector
 	}
 	type args struct {
 		listeners   map[string]qdr.Listener
@@ -35,9 +40,8 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 		{
 			name: "no listeners, connectors, or profiles",
 			fields: fields{
-				listeners:   map[string]qdr.Listener{},
-				connectors:  []qdr.Connector{},
-				profilePath: "",
+				listeners:  map[string]qdr.Listener{},
+				connectors: []qdr.Connector{},
 			},
 			args: args{
 				listeners:   map[string]qdr.Listener{},
@@ -58,8 +62,7 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper",
 					},
 				},
-				connectors:  []qdr.Connector{},
-				profilePath: "/etc/skupper/skupper",
+				connectors: []qdr.Connector{},
 			},
 			args: args{
 				listeners:  map[string]qdr.Listener{},
@@ -87,8 +90,7 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper",
 					},
 				},
-				connectors:  []qdr.Connector{},
-				profilePath: "/etc/skupper/skupper",
+				connectors: []qdr.Connector{},
 			},
 			args: args{
 				listeners: map[string]qdr.Listener{
@@ -124,8 +126,7 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper-other",
 					},
 				},
-				connectors:  []qdr.Connector{},
-				profilePath: "/etc/skupper/skupper-other",
+				connectors: []qdr.Connector{},
 			},
 			args: args{
 				listeners:  map[string]qdr.Listener{},
@@ -144,9 +145,8 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 		{
 			name: "listener deleted",
 			fields: fields{
-				listeners:   map[string]qdr.Listener{},
-				connectors:  []qdr.Connector{},
-				profilePath: "",
+				listeners:  map[string]qdr.Listener{},
+				connectors: []qdr.Connector{},
 			},
 			args: args{
 				listeners: map[string]qdr.Listener{
@@ -183,7 +183,6 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper",
 					},
 				},
-				profilePath: "/etc/skupper/skupper",
 			},
 			args: args{
 				listeners:  map[string]qdr.Listener{},
@@ -212,7 +211,6 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper",
 					},
 				},
-				profilePath: "/etc/skupper/skupper",
 			},
 			args: args{
 				listeners: map[string]qdr.Listener{},
@@ -249,7 +247,6 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 						SslProfile: "skupper",
 					},
 				},
-				profilePath: "/etc/skupper/skupper",
 			},
 			args: args{
 				listeners: map[string]qdr.Listener{},
@@ -279,7 +276,7 @@ func TestRouterAccessConfig_Apply(t *testing.T) {
 			g := &RouterAccessConfig{}
 			g.listeners = tt.fields.listeners
 			g.connectors = tt.fields.connectors
-			g.profilePath = ""
+			g.profiles = provider{}
 
 			argsConfig := qdr.InitialConfig(id, siteId, version, notEdge, helloAge)
 			argsConfig.Listeners = tt.args.listeners
@@ -446,7 +443,9 @@ func TestRouterAccessMap_DesiredConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.m.DesiredConfig(tt.args.targetGroups, tt.args.profilePath); !reflect.DeepEqual(*got, tt.want) {
+			profiles := sslprofile.NewStaticCollection(tt.args.profilePath)
+			tt.want.profiles = profiles
+			if got := tt.m.DesiredConfig(tt.args.targetGroups, profiles); !reflect.DeepEqual(*got, tt.want) {
 				t.Errorf("RouterAccessMap.DesiredConfig() = %v, want %v", *got, tt.want)
 			}
 		})

@@ -2,29 +2,67 @@ package adaptor
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	paths "path"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
+	"github.com/cenkalti/backoff/v4"
+	internalclient "github.com/skupperproject/skupper/internal/kube/client"
+	"github.com/skupperproject/skupper/internal/kube/secrets"
+	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
 )
 
-func InitialiseConfig(client kubernetes.Interface, namespace string, path string, routerConfigMap string) error {
+func InitialiseConfig(cli internalclient.Clients, namespace string, path string, routerConfigMap string) error {
 	ctxt := context.Background()
-	current, err := client.CoreV1().ConfigMaps(namespace).Get(ctxt, routerConfigMap, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
+	controller := watchers.NewEventProcessor("config-init", cli)
+	secretsSync := secrets.NewSync(
+		sslSecretsWatcher(namespace, controller),
+		nil,
+		slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
+	)
+	stop := make(chan struct{})
+	defer close(stop)
+	log.Println("Starting secret watcher")
+	controller.StartWatchers(stop)
+	configMaps := cli.GetKubeClient().CoreV1().ConfigMaps(namespace)
+	log.Println("Waiting for secret watcher cache")
+	controller.WaitForCacheSync(stop)
+	secretsSync.Recover()
+	var (
+		routerConfiguration *qdr.RouterConfig
+		err                 error
+		init                bool = true
+	)
+	retryErr := backoff.Retry(func() error {
+		log.Println("Synchroninzing Secrets with router configuration")
+		routerConfiguration, err = getRouterConfig(ctxt, configMaps, routerConfigMap)
+		if err != nil {
+			return err
+		}
+		if routerConfiguration == nil {
+			return fmt.Errorf("empty router configuration in ConfigMap %q", routerConfigMap)
+		}
+		if init {
+			init = false
+			secretsSync.Expect(routerConfiguration.SslProfiles)
+			secretsSync.Recover()
 
-	config, err := qdr.GetRouterConfigFromConfigMap(current)
-	if err != nil {
-		return err
+		}
+		delta := secretsSync.Expect(routerConfiguration.SslProfiles)
+		return delta.Error()
+	}, backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(time.Second*60)))
+	if retryErr != nil {
+		return retryErr
 	}
-
-	value, err := qdr.MarshalRouterConfig(*config)
+	log.Printf("Finished synchronizing Secrets with router configuration")
+	value, err := qdr.MarshalRouterConfig(*routerConfiguration)
 	if err != nil {
 		return err
 	}
@@ -33,19 +71,13 @@ func InitialiseConfig(client kubernetes.Interface, namespace string, path string
 		return err
 	}
 	log.Printf("Router configuration written to %s", configFile)
-
-	profileSyncer := newSslProfileSyncer(path)
-	for _, profile := range config.SslProfiles {
-		target, _ := profileSyncer.get(profile.Name)
-
-		secret, err := client.CoreV1().Secrets(namespace).Get(ctxt, target.name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if err, _ := target.sync(secret); err != nil {
-			return err
-		}
-		log.Printf("Resources for SslProfile %s written to %s", profile.Name, target.path)
-	}
 	return nil
+}
+
+func getRouterConfig(ctx context.Context, configMaps v1.ConfigMapInterface, name string) (*qdr.RouterConfig, error) {
+	current, err := configMaps.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return qdr.GetRouterConfigFromConfigMap(current)
 }

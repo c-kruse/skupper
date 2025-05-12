@@ -4,14 +4,19 @@ import (
 	"strconv"
 
 	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/sslprofile"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
 type RouterAccessMap map[string]*skupperv2alpha1.RouterAccess
 
-func (m RouterAccessMap) desiredListeners() map[string]qdr.Listener {
+func (m RouterAccessMap) desiredListeners(profiles sslprofile.Provider) map[string]qdr.Listener {
 	desired := map[string]qdr.Listener{}
 	for _, ra := range m {
+		profileName, err := sslprofile.RouterAccess(profiles, ra)
+		if err != nil {
+			continue
+		}
 		for _, role := range ra.Spec.Roles {
 			name := ra.Name + "-" + role.Name
 			desired[name] = qdr.Listener{
@@ -19,7 +24,7 @@ func (m RouterAccessMap) desiredListeners() map[string]qdr.Listener {
 				Role:             qdr.GetRole(role.Name),
 				Host:             ra.Spec.BindHost,
 				Port:             role.GetPort(),
-				SslProfile:       ra.Spec.TlsCredentials,
+				SslProfile:       profileName,
 				SaslMechanisms:   "EXTERNAL",
 				AuthenticatePeer: true,
 			}
@@ -28,12 +33,16 @@ func (m RouterAccessMap) desiredListeners() map[string]qdr.Listener {
 	return desired
 }
 
-func (m RouterAccessMap) desiredConnectors(targetGroups []string) []qdr.Connector {
+func (m RouterAccessMap) desiredConnectors(profiles sslprofile.Provider, targetGroups []string) []qdr.Connector {
 	if len(targetGroups) == 0 {
 		return nil
 	}
 	var connectors []qdr.Connector
 	if role, ra := m.findInterRouterRole(); role != nil {
+		profileName, err := sslprofile.RouterAccess(profiles, ra)
+		if err != nil {
+			return connectors
+		}
 		for _, group := range targetGroups {
 			name := group
 			connector := qdr.Connector{
@@ -41,7 +50,7 @@ func (m RouterAccessMap) desiredConnectors(targetGroups []string) []qdr.Connecto
 				Host:       group,
 				Role:       qdr.RoleInterRouter,
 				Port:       strconv.Itoa(role.Port),
-				SslProfile: ra.Spec.TlsCredentials,
+				SslProfile: profileName,
 			}
 			connectors = append(connectors, connector)
 		}
@@ -58,18 +67,18 @@ func (m RouterAccessMap) findInterRouterRole() (*skupperv2alpha1.RouterAccessRol
 	return nil, nil
 }
 
-func (m RouterAccessMap) DesiredConfig(targetGroups []string, profilePath string) *RouterAccessConfig {
+func (m RouterAccessMap) DesiredConfig(targetGroups []string, profiles sslprofile.Provider) *RouterAccessConfig {
 	return &RouterAccessConfig{
-		listeners:   m.desiredListeners(),
-		connectors:  m.desiredConnectors(targetGroups),
-		profilePath: profilePath,
+		listeners:  m.desiredListeners(profiles),
+		connectors: m.desiredConnectors(profiles, targetGroups),
+		profiles:   profiles,
 	}
 }
 
 type RouterAccessConfig struct {
-	listeners   map[string]qdr.Listener
-	connectors  []qdr.Connector
-	profilePath string
+	listeners  map[string]qdr.Listener
+	connectors []qdr.Connector
+	profiles   sslprofile.Provider
 }
 
 func (g *RouterAccessConfig) Apply(config *qdr.RouterConfig) bool {
@@ -83,7 +92,7 @@ func (g *RouterAccessConfig) Apply(config *qdr.RouterConfig) bool {
 		}
 	}
 	for _, value := range lc.Added {
-		if config.AddListener(value) && config.AddSslProfile(qdr.ConfigureSslProfile(value.SslProfile, g.profilePath, true)) {
+		if config.AddListener(value) {
 			changed = true
 		}
 	}
@@ -92,9 +101,7 @@ func (g *RouterAccessConfig) Apply(config *qdr.RouterConfig) bool {
 			changed = true
 		}
 	}
-	// SslProfiles may be shared, so only delete those that are now unreferenced
-	for name, _ := range config.UnreferencedSslProfiles() {
-		config.RemoveSslProfile(name)
+	if g.profiles.Apply(config) {
 		changed = true
 	}
 	return changed

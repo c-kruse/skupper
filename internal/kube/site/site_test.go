@@ -4,8 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"log/slog"
+
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
+	"github.com/skupperproject/skupper/internal/kube/secrets"
 	"github.com/skupperproject/skupper/internal/kube/securedaccess"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
@@ -18,7 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"log/slog"
 )
 
 func TestSite_Recover(t *testing.T) {
@@ -1049,6 +1051,15 @@ func newSiteMocks(namespace string, k8sObjects []runtime.Object, skupperObjects 
 		routerPods: make(map[string]*corev1.Pod),
 		logger: slog.New(slog.Default().Handler()).With(
 			slog.String("component", "kube.site.site"),
+		),
+		profiles: secrets.NewManager(
+			sslSecretsWatcher(namespace, controller),
+			controller.GetKubeClient().CoreV1().Secrets(namespace),
+			nil,
+			namespace,
+			slog.New(slog.Default().Handler()).With(
+				slog.String("component", "kube.site.secrets"),
+			),
 		),
 	}
 	newSite.bindings.init(NewMockBindingContext(map[string]TargetSelection{}), &qdr.RouterConfig{})
