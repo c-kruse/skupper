@@ -2,6 +2,7 @@ package adaptor
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -30,13 +31,37 @@ func InitialiseConfig(cli internalclient.Clients, namespace string, path string,
 	log.Println("Starting secret watcher")
 	controller.StartWatchers(stop)
 	configMaps := cli.GetKubeClient().CoreV1().ConfigMaps(namespace)
-	log.Println("Getting router configuration")
-	config, err := getRouterConfig(ctxt, configMaps, routerConfigMap)
-	if err != nil {
-		return err
-	}
+	log.Println("Waiting for secret watcher cache")
+	controller.WaitForCacheSync(stop)
+	secretsSync.Recover()
+	var (
+		routerConfiguration *qdr.RouterConfig
+		err                 error
+		init                bool = true
+	)
+	retryErr := backoff.Retry(func() error {
+		log.Println("Synchroninzing Secrets with router configuration")
+		routerConfiguration, err = getRouterConfig(ctxt, configMaps, routerConfigMap)
+		if err != nil {
+			return err
+		}
+		if routerConfiguration == nil {
+			return fmt.Errorf("empty router configuration in ConfigMap %q", routerConfigMap)
+		}
+		if init {
+			init = false
+			secretsSync.Expect(routerConfiguration.SslProfiles)
+			secretsSync.Recover()
 
-	value, err := qdr.MarshalRouterConfig(*config)
+		}
+		delta := secretsSync.Expect(routerConfiguration.SslProfiles)
+		return delta.Error()
+	}, backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(time.Second*60)))
+	if retryErr != nil {
+		return retryErr
+	}
+	log.Printf("Finished synchronizing Secrets with router configuration")
+	value, err := qdr.MarshalRouterConfig(*routerConfiguration)
 	if err != nil {
 		return err
 	}
@@ -45,23 +70,6 @@ func InitialiseConfig(cli internalclient.Clients, namespace string, path string,
 		return err
 	}
 	log.Printf("Router configuration written to %s", configFile)
-
-	log.Println("Waiting for secret watcher cache")
-	controller.WaitForCacheSync(stop)
-	secretsSync.Recover()
-	err = backoff.Retry(func() error {
-		log.Println("Synchroninzing Secrets with router configuration")
-		_, err := getRouterConfig(ctxt, configMaps, routerConfigMap)
-		if err != nil {
-			return err
-		}
-		delta := secretsSync.Expect(config.SslProfiles)
-		return delta.Error()
-	}, backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(time.Second*60)))
-	if err != nil {
-		return err
-	}
-	log.Printf("Finished synchronizing Secrets with router configuration")
 	return nil
 }
 

@@ -28,9 +28,9 @@ type ConfigSync struct {
 }
 
 func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
-	return func(handler func(string, *corev1.Secret) error) secrets.SecretsCache {
+	return func(stopCh <-chan struct{}, handler func(string, *corev1.Secret) error) secrets.SecretsCache {
 		m := eventProcessor.WatchAllSecrets(namespace, handler)
-		m.Start(make(<-chan struct{}))
+		m.Start(stopCh)
 		return m
 	}
 }

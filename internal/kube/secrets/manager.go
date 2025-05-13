@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strconv"
+	"sync"
 
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/sslprofile"
@@ -25,7 +26,7 @@ type SecretsCache interface {
 	List() []*corev1.Secret
 }
 
-type SecretsCacheFactory func(func(string, *corev1.Secret) error) SecretsCache
+type SecretsCacheFactory func(stopCh <-chan struct{}, handler func(string, *corev1.Secret) error) SecretsCache
 type Callback func(secretName string)
 
 type sslProfile struct {
@@ -49,10 +50,15 @@ type Manager struct {
 
 	profiles         map[string]*sslProfile
 	profilesBySecret map[string]string
+
+	cleanup func()
 }
 
 func NewManager(factory SecretsCacheFactory, client v1.SecretInterface, changeHandler Callback, namespace string, logger *slog.Logger) *Manager {
+	stopCh := make(chan struct{})
 	manager := &Manager{
+		cleanup:          sync.OnceFunc(func() { close(stopCh) }),
+		callback:         changeHandler,
 		logger:           logger,
 		secrets:          client,
 		namespace:        namespace,
@@ -60,7 +66,7 @@ func NewManager(factory SecretsCacheFactory, client v1.SecretInterface, changeHa
 		profiles:         make(map[string]*sslProfile),
 		profilesBySecret: make(map[string]string),
 	}
-	manager.cache = factory(manager.handleEvent)
+	manager.cache = factory(stopCh, manager.handleEvent)
 	return manager
 }
 
@@ -97,11 +103,12 @@ func (m *Manager) handleEvent(key string, secret *corev1.Secret) error {
 		delete(m.profilesBySecret, name)
 		return nil
 	}
+	changed := false
 	if !profile.HasSecret {
+		changed = true
 		profile.HasSecret = true
 		updateSecretChecksum(secret, &profile.SecretContentSum)
 	}
-	changed := false
 	if updateSecretChecksum(secret, &profile.SecretContentSum) {
 		profile.Ordinal += 1
 		changed = true
@@ -134,8 +141,12 @@ func (m *Manager) handleEvent(key string, secret *corev1.Secret) error {
 	return nil
 }
 
+func (m *Manager) Stop() {
+	m.cleanup()
+}
 func (m *Manager) Recover(routerConfig *qdr.RouterConfig) {
 	for profileName, profile := range routerConfig.SslProfiles {
+		m.logger.Info("Recovered profile", slog.String("name", profileName), slog.Uint64("ordinal", profile.Ordinal))
 		m.profiles[profileName] = &sslProfile{
 			Name:               profileName,
 			Ordinal:            profile.Ordinal,
@@ -146,6 +157,11 @@ func (m *Manager) Recover(routerConfig *qdr.RouterConfig) {
 }
 
 func (m *Manager) Apply(current *qdr.RouterConfig) bool {
+
+	var allprofiles []string
+	for name, p := range m.profiles {
+		allprofiles = append(allprofiles, fmt.Sprintf("%s:%t", name, p.HasSecret))
+	}
 	change := false
 
 	found := make(map[string]struct{}, len(current.SslProfiles))
@@ -186,6 +202,7 @@ func (m *Manager) Get(tlsCredentials string, opts sslprofile.Opts) (string, erro
 	profileName := opts.NamingStrategy.TLSCredentialsToProfile(tlsCredentials)
 	profile, ok := m.profiles[profileName]
 	if !ok {
+		m.logger.Info("Get for unknown profile", slog.String("name", profileName))
 		profile = &sslProfile{
 			Name:   profileName,
 			CAOnly: opts.CAOnly,
@@ -208,9 +225,11 @@ func (m *Manager) ensureSecretProfile(profileName, tlsCredentials string, caOnly
 	if profile, ok := m.profiles[profileName]; ok {
 		profile.CAOnly = caOnly
 		if profile.HasSecret {
+			m.logger.Info("Found secret for profile", slog.String("name", profileName))
 			return nil
 		}
 	}
+	m.logger.Info("Rechecking secret", slog.String("name", target.Name))
 	return m.handleEvent(targetKey, target)
 }
 

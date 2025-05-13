@@ -25,6 +25,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/site"
+	"github.com/skupperproject/skupper/internal/sslprofile"
 	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -61,9 +62,9 @@ type Site struct {
 }
 
 func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
-	return func(handler func(string, *corev1.Secret) error) secrets.SecretsCache {
+	return func(stopCh <-chan struct{}, handler func(string, *corev1.Secret) error) secrets.SecretsCache {
 		m := eventProcessor.WatchAllSecrets(namespace, handler)
-		m.Start(make(<-chan struct{}))
+		m.Start(stopCh)
 		return m
 	}
 }
@@ -246,14 +247,6 @@ func (s *Site) initialRouterConfig() *qdr.RouterConfig {
 		Name: "amqp",
 		Host: "localhost",
 		Port: 5672,
-	})
-	rc.AddSslProfile(qdr.ConfigureSslProfile("skupper-local-server", SSL_PROFILE_PATH, true))
-	rc.AddListener(qdr.Listener{
-		Name:             "amqps",
-		Port:             5671,
-		SslProfile:       "skupper-local-server",
-		SaslMechanisms:   "EXTERNAL",
-		AuthenticatePeer: true,
 	})
 	return &rc
 }
@@ -479,6 +472,22 @@ func (s *Site) Apply(config *qdr.RouterConfig) bool {
 			slog.String("namespace", s.namespace),
 			slog.String("name", s.name))
 	}
+	profileName, err := s.profiles.Get("skupper-local-server", sslprofile.Opts{})
+	if err != nil {
+		s.logger.Info("Site missing skupper-local-server profile", slog.Any("error", err))
+	} else if _, ok := config.Listeners["amqps"]; !ok {
+		config.AddListener(qdr.Listener{
+			Name:             "amqps",
+			Port:             5671,
+			SslProfile:       profileName,
+			SaslMechanisms:   "EXTERNAL",
+			AuthenticatePeer: true,
+		})
+		updated = true
+	}
+	if s.profiles.Apply(config) {
+		updated = true
+	}
 	return updated
 }
 
@@ -681,6 +690,7 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 	groups := s.groups()
 	for i, group := range groups {
 		if config, ok := byName[group]; ok {
+			s.profiles.Recover(config)
 			if update {
 				op := ConfigUpdateList{s.bindings, s, s.linkAccess.DesiredConfig(groups[:i], s.profiles)}
 				if err := kubeqdr.UpdateRouterConfig(s.clients.GetKubeClient(), group, s.namespace, context.TODO(), op, s.labelling); err != nil {
@@ -1032,6 +1042,7 @@ func (s *Site) Deleted() {
 		slog.String("namespace", s.namespace),
 		slog.String("name", s.name))
 	s.bindings.cleanup()
+	s.profiles.Stop()
 	s.setBindingsConfiguredStatus(stderrors.New("No active site"))
 }
 
@@ -1243,6 +1254,8 @@ func (s *Site) CheckRouterAccess(name string, la *skupperv2alpha1.RouterAccess) 
 	} else {
 		if existing, ok := s.linkAccess[name]; ok {
 			specChanged = !reflect.DeepEqual(existing.Spec, la.Spec)
+		} else {
+			specChanged = true
 		}
 		s.linkAccess[name] = la
 	}
@@ -1333,6 +1346,10 @@ func (s *Site) isRouterPodRunning() skupperv2alpha1.ConditionState {
 }
 
 func (s *Site) recheckProfiles(tlsCredentials string) {
+	s.logger.Info("CKDEBUG: Recheck", slog.String("tlsCredentials", tlsCredentials))
+	if tlsCredentials == "skupper-local-server" {
+		s.reconcile(s.GetSite(), false)
+	}
 	for _, ra := range s.linkAccess {
 		if ra == nil {
 			continue

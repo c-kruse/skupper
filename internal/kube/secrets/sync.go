@@ -25,15 +25,22 @@ type Sync struct {
 
 	mu       sync.Mutex
 	profiles map[string]syncContext
+	cleanup  func()
 }
 
 func NewSync(factory SecretsCacheFactory, logger *slog.Logger) *Sync {
+	stopCh := make(chan struct{})
 	sync := &Sync{
+		cleanup:  sync.OnceFunc(func() { close(stopCh) }),
 		logger:   logger,
 		profiles: make(map[string]syncContext),
 	}
-	sync.cache = factory(sync.handle)
+	sync.cache = factory(stopCh, sync.handle)
 	return sync
+}
+
+func (s *Sync) Stop() {
+	s.cleanup()
 }
 
 func (s *Sync) Recover() {
@@ -56,7 +63,9 @@ func (s *Sync) handle(key string, secret *corev1.Secret) error {
 		return nil
 	}
 	profileName := metadata.ProfileName
-	var expectProfile qdr.SslProfile
+	var (
+		expectProfile qdr.SslProfile
+	)
 	if context, ok := s.profiles[profileName]; ok {
 		expectProfile = context.Expect
 		if prev := context.Prev; prev != nil {
@@ -160,6 +169,9 @@ func (d SyncDelta) Empty() bool {
 }
 
 func writeSslProfile(secret *corev1.Secret, profile qdr.SslProfile) error {
+	if profile.CaCertFile == "" {
+		return fmt.Errorf("empty sslProfile %q", secret.Name)
+	}
 	baseName := path.Dir(profile.CaCertFile)
 	if err := os.MkdirAll(baseName, 0777); err != nil {
 		return fmt.Errorf("error making sslProfile certificates directory %q: %e", baseName, err)
