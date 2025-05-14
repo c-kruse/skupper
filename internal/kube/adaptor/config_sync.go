@@ -22,7 +22,6 @@ type ConfigSync struct {
 	namespace       string
 	profileSyncer   *secrets.Sync
 	config          *watchers.ConfigMapWatcher
-	secrets         *watchers.SecretWatcher
 	path            string
 	routerConfigMap string
 }
@@ -38,17 +37,29 @@ func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor
 func NewConfigSync(cli internalclient.Clients, namespace string, path string, routerConfigMap string) *ConfigSync {
 	controller := watchers.NewEventProcessor("config-sync", cli)
 	configSync := &ConfigSync{
-		agentPool:  qdr.NewAgentPool("amqp://localhost:5672", nil),
-		controller: controller,
-		namespace:  namespace,
-		profileSyncer: secrets.NewSync(
-			sslSecretsWatcher(namespace, controller),
-			slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
-		),
+		agentPool:       qdr.NewAgentPool("amqp://localhost:5672", nil),
+		controller:      controller,
+		namespace:       namespace,
 		path:            path,
 		routerConfigMap: routerConfigMap,
 	}
+	configSync.profileSyncer = secrets.NewSync(
+		sslSecretsWatcher(namespace, controller),
+		configSync.recheckProfile,
+		slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
+	)
 	return configSync
+}
+
+func (c *ConfigSync) recheckProfile(_ string) {
+	key := c.key(c.routerConfigMap)
+	configmap, err := c.config.Get(key)
+	if err != nil {
+		return
+	}
+	if err := c.configEvent(key, configmap); err != nil {
+		log.Printf("CONFIG_SYNC: Error handling configuration after secret change: %s", err)
+	}
 }
 
 func (c *ConfigSync) Start(stopCh <-chan struct{}) error {
@@ -190,19 +201,12 @@ func syncListeners(agent *qdr.Agent, desired *qdr.RouterConfig) error {
 	return nil
 }
 
-func (c *ConfigSync) reloadSslProfileInRouter(sslProfileName string) error {
-	agent, err := c.agentPool.Get()
-	if err != nil {
-		return err
-	}
-	return agent.ReloadSslProfile(sslProfileName)
-}
-
 func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) error {
 	agent, err := c.agentPool.Get()
 	if err != nil {
 		return err
 	}
+	defer c.agentPool.Put(agent)
 	actual, err := agent.GetSslProfiles()
 	if err != nil {
 		return err
@@ -228,7 +232,6 @@ func (c *ConfigSync) syncSslProfilesToRouter(desired map[string]qdr.SslProfile) 
 			}
 		}
 	}
-	c.agentPool.Put(agent)
 	return nil
 }
 

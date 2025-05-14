@@ -157,11 +157,6 @@ func (m *Manager) Recover(routerConfig *qdr.RouterConfig) {
 }
 
 func (m *Manager) Apply(current *qdr.RouterConfig) bool {
-
-	var allprofiles []string
-	for name, p := range m.profiles {
-		allprofiles = append(allprofiles, fmt.Sprintf("%s:%t", name, p.HasSecret))
-	}
 	change := false
 
 	found := make(map[string]struct{}, len(current.SslProfiles))
@@ -200,14 +195,13 @@ func (m *Manager) Get(tlsCredentials string, opts sslprofile.Opts) (string, erro
 		opts.NamingStrategy = sslprofile.UseDefaultName
 	}
 	profileName := opts.NamingStrategy.TLSCredentialsToProfile(tlsCredentials)
-	profile, ok := m.profiles[profileName]
-	if !ok {
+
+	if _, ok := m.profiles[profileName]; !ok {
 		m.logger.Info("Get for unknown profile", slog.String("name", profileName))
-		profile = &sslProfile{
+		m.profiles[profileName] = &sslProfile{
 			Name:   profileName,
 			CAOnly: opts.CAOnly,
 		}
-		m.profiles[profileName] = profile
 	}
 	m.profilesBySecret[tlsCredentials] = profileName
 	return profileName, m.ensureSecretProfile(profileName, tlsCredentials, opts.CAOnly)

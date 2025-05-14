@@ -24,6 +24,7 @@ func InitialiseConfig(cli internalclient.Clients, namespace string, path string,
 	controller := watchers.NewEventProcessor("config-init", cli)
 	secretsSync := secrets.NewSync(
 		sslSecretsWatcher(namespace, controller),
+		nil,
 		slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
 	)
 	stop := make(chan struct{})

@@ -20,15 +20,16 @@ type syncContext struct {
 }
 
 type Sync struct {
-	logger *slog.Logger
-	cache  SecretsCache
+	logger   *slog.Logger
+	cache    SecretsCache
+	callback Callback
 
 	mu       sync.Mutex
 	profiles map[string]syncContext
 	cleanup  func()
 }
 
-func NewSync(factory SecretsCacheFactory, logger *slog.Logger) *Sync {
+func NewSync(factory SecretsCacheFactory, callback Callback, logger *slog.Logger) *Sync {
 	stopCh := make(chan struct{})
 	sync := &Sync{
 		cleanup:  sync.OnceFunc(func() { close(stopCh) }),
@@ -41,6 +42,13 @@ func NewSync(factory SecretsCacheFactory, logger *slog.Logger) *Sync {
 
 func (s *Sync) Stop() {
 	s.cleanup()
+}
+
+func (m *Sync) doCallback(name string) {
+	if m.callback == nil {
+		return
+	}
+	m.callback(name)
 }
 
 func (s *Sync) Recover() {
@@ -99,6 +107,7 @@ func (s *Sync) handle(key string, secret *corev1.Secret) error {
 		slog.Uint64("want_ordinal", prevContext.Expect.Ordinal),
 		slog.Uint64("have_ordinal", metadata.Ordinal),
 	)
+	s.doCallback(profileName)
 	return nil
 }
 
