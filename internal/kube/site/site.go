@@ -1257,10 +1257,18 @@ func (s *Site) CheckRouterAccess(name string, la *skupperv2alpha1.RouterAccess) 
 	if !s.initialised {
 		return nil
 	}
-	if specChanged || !la.IsConfigured() {
+	hasProfile := true
+	_, profileErr := sslprofile.RouterAccess(s.profiles, la)
+	if profileErr != nil {
+		hasProfile = false
+	}
+	if specChanged || !la.IsConfigured() || (la.IsConfigured() && !hasProfile) {
 		var previousGroups []string
 		groups := s.groups()
 		var errors []string
+		if !hasProfile {
+			errors = append(errors, profileErr.Error())
+		}
 		for i, group := range groups {
 			if err := s.updateRouterConfigForGroup(s.linkAccess.DesiredConfig(previousGroups, s.profiles), group); err != nil {
 				s.logger.Error("Error updating router config",
