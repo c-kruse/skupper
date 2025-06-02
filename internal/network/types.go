@@ -49,15 +49,17 @@ type RouterInfo struct {
 }
 
 type LinkInfo struct {
-	Name     string `json:"name,omitempty"`
-	LinkCost uint64 `json:"linkCost,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Role     string `json:"role,omitempty"`
-	Peer     string `json:"peer,omitempty"`
+	Name             string `json:"name,omitempty"`
+	LinkCost         uint64 `json:"linkCost,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Role             string `json:"role,omitempty"`
+	Peer             string `json:"peer,omitempty"`
+	ActiveTLSOrdinal uint64 `json:"activeTlsOrdinal,omitempty"`
 }
 
 type RouterAccessInfo struct {
-	Identity string `json:"identity,omitempty"`
+	Identity         string `json:"identity,omitempty"`
+	ActiveTLSOrdinal uint64 `json:"activeTlsOrdinal,omitempty"`
 }
 
 type ListenerInfo struct {

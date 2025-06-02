@@ -478,17 +478,19 @@ func asAddressInfo(address string, connectors []vanflow.ConnectorRecord, listene
 
 func asLinkInfo(link vanflow.LinkRecord) network.LinkInfo {
 	return network.LinkInfo{
-		Name:     dref(link.Name),
-		Status:   dref(link.Status),
-		LinkCost: dref(link.LinkCost),
-		Role:     dref(link.Role),
-		Peer:     dref(link.Peer),
+		Name:             dref(link.Name),
+		Status:           dref(link.Status),
+		LinkCost:         dref(link.LinkCost),
+		Role:             dref(link.Role),
+		Peer:             dref(link.Peer),
+		ActiveTLSOrdinal: dref(link.ActiveTLSOrdinal),
 	}
 }
 
 func asRouterAccessInfo(link vanflow.RouterAccessRecord) network.RouterAccessInfo {
 	return network.RouterAccessInfo{
-		Identity: link.ID,
+		Identity:         link.ID,
+		ActiveTLSOrdinal: dref(link.ActiveTLSOrdinal),
 	}
 }
 

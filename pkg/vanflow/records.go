@@ -80,11 +80,12 @@ type LinkRecord struct {
 	OctetsReverse    *uint64 `vflow:"58"`
 	OctetRateReverse *uint64 `vflow:"59"`
 
-	Result    *string `vflow:"28"`
-	Reason    *string `vflow:"29"`
-	LastUp    *uint64 `vflow:"55"`
-	LastDown  *uint64 `vflow:"56"`
-	DownCount *uint64 `vflow:"57"`
+	Result           *string `vflow:"28"`
+	Reason           *string `vflow:"29"`
+	LastUp           *uint64 `vflow:"55"`
+	LastDown         *uint64 `vflow:"56"`
+	DownCount        *uint64 `vflow:"57"`
+	ActiveTLSOrdinal *uint64 `vflow:"66"`
 }
 
 func (r LinkRecord) GetTypeMeta() TypeMeta {
@@ -249,10 +250,11 @@ func (r LogRecord) GetTypeMeta() TypeMeta {
 
 type RouterAccessRecord struct {
 	BaseRecord
-	Parent    *string `vflow:"2"`
-	Name      *string `vflow:"30"`
-	LinkCount *uint64 `vflow:"52"`
-	Role      *string `vflow:"54"`
+	Parent           *string `vflow:"2"`
+	Name             *string `vflow:"30"`
+	LinkCount        *uint64 `vflow:"52"`
+	Role             *string `vflow:"54"`
+	ActiveTLSOrdinal *uint64 `vflow:"66"`
 }
 
 func (r RouterAccessRecord) GetTypeMeta() TypeMeta {
