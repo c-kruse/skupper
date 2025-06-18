@@ -19,7 +19,6 @@ EOF
 readonly KIND=${KIND:-kind}
 readonly KUBECTL=${KUBECTL:-kubectl}
 readonly HELM=${HELM:-helm}
-readonly DOCKER=${DOCKER:-docker}
 readonly PYTHON=${PYTHON:-python3}
 readonly IMAGE_TAG=${IMAGE_TAG:-v2-dev}
 readonly ROUTER_IMAGE_TAG=${SKUPPER_ROUTER_IMAGE_TAG:-main}
@@ -30,12 +29,14 @@ readonly SKUPPER_KUBE_ADAPTOR_IMAGE=${SKUPPER_KUBE_ADAPTOR_IMAGE:-${REGISTRY}/ku
 readonly SKUPPER_NETWORK_OBSERVER_IMAGE=${SKUPPER_NETWORK_OBSERVER_IMAGE:-${REGISTRY}/network-observer:${IMAGE_TAG}}
 
 KIND_LOG_LEVEL="1"
+DOCKER=${DOCKER:-docker}
 DEBUG=${DEBUG:=false}
 CLUSTER="skupper-dev"
 IMAGE_SOURCE="docker"
 FORCE_RECREATE="false"
 METALLB="false"
 SUBNET="1"
+
 
 if [ "${DEBUG}" == "true" ]; then
   set -x
@@ -51,9 +52,12 @@ ensure::kind() {
 }
 ensure::docker() {
 	if ! command -v "${DOCKER}" > /dev/null 2>&1; then
-		echo "${DOCKER} not found";
-		echo "This tool assumes docker is used to run kind and does not support the experimental podman provider";
-		exit 1
+		if ! command -v podman > /dev/null 2>&1; then
+			echo "${DOCKER} not found";
+			exit 1
+		fi
+		DOCKER=podman
+		echo "Using provider podman"
 	fi
 }
 ensure::helm() {
@@ -115,7 +119,11 @@ kind::imageload::podman() {
 }
 
 docker::network::subnet () {
-		${DOCKER} network inspect "$1" | jq -r '.[].IPAM.Config[0].Subnet'
+		subnetPath='.[].IPAM.Config[].Subnet  | select(test("([0-9]{1,3}[.]){3}[0-9]{1,3}/[1-3]?[0-9]")?)'
+		if [ "${DOCKER}" == "podman" ]; then
+			subnetPath='.[].subnets[].subnet | select(test("([0-9]{1,3}[.]){3}[0-9]{1,3}/[1-3]?[0-9]")?)'
+		fi
+		"${DOCKER}" network inspect "$1" | jq -r "$subnetPath"
 }
 
 metallb::l2::config() {
