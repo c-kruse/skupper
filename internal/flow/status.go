@@ -487,10 +487,11 @@ func asLinkInfo(link vanflow.LinkRecord) network.LinkInfo {
 	}
 }
 
-func asRouterAccessInfo(link vanflow.RouterAccessRecord) network.RouterAccessInfo {
+func asRouterAccessInfo(routerAccess vanflow.RouterAccessRecord) network.RouterAccessInfo {
 	return network.RouterAccessInfo{
-		Identity:         link.ID,
-		ActiveTLSOrdinal: dref(link.ActiveTLSOrdinal),
+		Identity:         routerAccess.ID,
+		Name:             dref(routerAccess.Name),
+		ActiveTLSOrdinal: dref(routerAccess.ActiveTLSOrdinal),
 	}
 }
 

@@ -59,6 +59,7 @@ type LinkInfo struct {
 
 type RouterAccessInfo struct {
 	Identity         string `json:"identity,omitempty"`
+	Name             string `json:"name,omitempty"`
 	ActiveTLSOrdinal uint64 `json:"activeTlsOrdinal,omitempty"`
 }
 
