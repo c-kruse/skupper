@@ -41,7 +41,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           args:
-            - -listen=127.0.0.1:8080
+            - -listen=:8080
             - -prometheus-api=http://127.0.0.1:9090
             - -router-endpoint={{ .Values.router.endpoint }}
             - -router-tls-ca=/etc/messaging/ca.crt
