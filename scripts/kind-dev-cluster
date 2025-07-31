@@ -21,7 +21,6 @@ EOF
 
 readonly KIND=${KIND:-kind}
 readonly KUBECTL=${KUBECTL:-kubectl}
-readonly HELM=${HELM:-helm}
 readonly PYTHON=${PYTHON:-python3}
 readonly IMAGE_TAG=${IMAGE_TAG:-v2-dev}
 readonly ROUTER_IMAGE_TAG=${SKUPPER_ROUTER_IMAGE_TAG:-main}
@@ -81,13 +80,6 @@ ensure::container() {
 	fi
 }
 
-ensure::helm() {
-	if ! command -v "${HELM}" > /dev/null 2>&1; then
-		verbose_log "This tool uses helm to enable some features. See https://helm.sh/ for installation.";
-		echo "${HELM} not found, exiting";
-		exit 1
-	fi
-}
 ensure::python() {
 	if ! command -v "${PYTHON}" > /dev/null 2>&1; then
 		echo "This tool uses python3 for munging subnet addresses for installing metallb.";
@@ -262,7 +254,6 @@ main () {
 	esac
 
 	if [ "${METALLB}" == "true" ]; then
-		ensure::helm
 		ensure::python
 		echo "(skdev) deploying metallb to ${CLUSTER}"
 		kind_subnet=$(container::network::subnet kind)
@@ -271,12 +262,11 @@ main () {
 		if [[ "${VERBOSE}" == "true" ]]; then
 			METALLB_DEBUG_FLAG="--debug"
 		fi
-		"${HELM}" repo add metallb https://metallb.github.io/metallb
-		"${HELM}" upgrade --install metallb metallb/metallb \
-			--namespace metallb-system --create-namespace \
-			--set speaker.ignoreExcludeLB=true \
-			--version 0.15.* \
-			--wait ${METALLB_DEBUG_FLAG} # empty or --debug
+
+		"${KUBECTL}" apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.2/config/manifests/metallb-native.yaml
+		"${KUBECTL}" patch -n metallb-system daemonset/speaker --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "-ignore-exclude-lb"}]'
+		echo "(skdev) waiting for metallb to start"
+		"${KUBECTL}" wait --for=condition=available -n metallb-system deployment/controller
 		"${KUBECTL}" apply -f <(metallb::l2::config "$kind_subnet" "$SUBNET")
 	fi
 
