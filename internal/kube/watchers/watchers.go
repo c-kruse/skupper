@@ -11,6 +11,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -1721,6 +1722,85 @@ func (w *AttachedConnectorWatcher) List() []*skupperv2alpha1.AttachedConnector {
 	}
 	return results
 }
+
+func (c *EventProcessor) WatchMultiKeyListeners(namespace string, handler MultiKeyListenerHandler) MultiKeyWatcher {
+	informer := skupperv2alpha1informer.NewMultiKeyListenerInformer(
+		c.skupperClient,
+		namespace,
+		time.Second*30,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+	)
+	watcher := newResourceWatcher(handler, informer, namespace)
+	informer.AddEventHandler(c.newEventHandler(watcher))
+	c.addWatcher(watcher)
+	return watcher
+}
+
+type resourcePointer[T any] interface {
+	*T
+	runtime.Object
+}
+
+type resourceHandler[T any, P resourcePointer[T]] func(string, P) error
+
+var (
+	_ ResourceChangeHandler = (*resourceWatcher[skupperv2alpha1.Site, *skupperv2alpha1.Site])(nil)
+	_ Watcher               = (*resourceWatcher[skupperv2alpha1.Site, *skupperv2alpha1.Site])(nil)
+)
+
+type resourceWatcher[T any, P resourcePointer[T]] struct {
+	handler   resourceHandler[T, P]
+	informer  cache.SharedIndexInformer
+	kind      string
+	namespace string
+}
+
+func newResourceWatcher[T any, P resourcePointer[T]](
+	handler resourceHandler[T, P],
+	informer cache.SharedIndexInformer,
+	namespace string,
+) resourceWatcher[T, P] {
+	var typ P = new(T)
+	kind := typ.GetObjectKind().GroupVersionKind().Kind
+	return resourceWatcher[T, P]{
+		handler:   handler,
+		informer:  informer,
+		namespace: namespace,
+		kind:      kind,
+	}
+}
+
+func (w resourceWatcher[T, P]) Handle(event ResourceChange) error {
+	obj, err := w.Get(event.Key)
+	if err != nil {
+		return err
+	}
+	return w.handler(event.Key, obj)
+}
+
+func (w resourceWatcher[T, P]) Describe(event ResourceChange) string {
+	return fmt.Sprintf("%s %s", w.kind, event.Key)
+}
+
+func (w resourceWatcher[T, P]) Get(key string) (P, error) {
+	entity, exists, err := w.informer.GetStore().GetByKey(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+	return entity.(P), nil
+}
+func (w resourceWatcher[T, P]) HasSynced() func() bool {
+	return w.informer.HasSynced
+}
+func (w resourceWatcher[T, P]) Start(stopCh <-chan struct{}) {
+	go w.informer.Run(stopCh)
+}
+
+type MultiKeyListenerHandler = resourceHandler[skupperv2alpha1.MultiKeyListener, *skupperv2alpha1.MultiKeyListener]
+type MultiKeyWatcher = resourceWatcher[skupperv2alpha1.MultiKeyListener, *skupperv2alpha1.MultiKeyListener]
 
 func FilterByNamespace[V any](match func(string) bool, handler func(string, V) error) func(string, V) error {
 	if match == nil {
