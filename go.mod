@@ -1,6 +1,8 @@
 module github.com/skupperproject/skupper
 
-go 1.22
+go 1.24.0
+
+toolchain go1.24.6
 
 require (
 	github.com/Azure/go-amqp v1.0.5
@@ -27,7 +29,7 @@ require (
 	golang.org/x/sync v0.7.0
 	golang.org/x/sys v0.20.0
 	golang.org/x/text v0.15.0
-	golang.org/x/time v0.5.0
+	golang.org/x/time v0.13.0
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools v2.2.0+incompatible
 	k8s.io/api v0.20.0
