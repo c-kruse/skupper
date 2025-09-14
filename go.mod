@@ -1,6 +1,8 @@
 module github.com/skupperproject/skupper
 
-go 1.22
+go 1.23
+
+toolchain go1.24.6
 
 require (
 	github.com/Azure/go-amqp v1.0.5
@@ -106,7 +108,7 @@ require (
 	golang.org/x/term v0.20.0 // indirect
 	golang.org/x/tools v0.21.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
-	google.golang.org/protobuf v1.31.0 // indirect
+	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/klog/v2 v2.4.0 // indirect
