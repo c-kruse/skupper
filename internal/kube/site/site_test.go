@@ -1124,7 +1124,7 @@ func newSiteMocks(namespace string, k8sObjects []runtime.Object, skupperObjects 
 		return nil, err
 	}
 
-	controller := watchers.NewEventProcessor("test", client)
+	controller := watchers.NewEventProcessor("test", client, nil)
 	newSite := &Site{
 		clients:       controller,
 		bindings:      NewExtendedBindings(controller, ""),
