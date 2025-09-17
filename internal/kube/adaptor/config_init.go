@@ -21,7 +21,7 @@ import (
 
 func InitialiseConfig(cli internalclient.Clients, namespace string, path string, routerConfigMap string) error {
 	ctxt := context.Background()
-	controller := watchers.NewEventProcessor("config-init", cli)
+	controller := watchers.NewEventProcessor("config-init", cli, nil)
 	secretsSync := secrets.NewSync(
 		sslSecretsWatcher(namespace, controller),
 		nil,

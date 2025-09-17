@@ -7,12 +7,14 @@ import (
 
 	iflag "github.com/skupperproject/skupper/internal/flag"
 	"github.com/skupperproject/skupper/internal/kube/grants"
+	"github.com/skupperproject/skupper/internal/kube/metrics"
 	"github.com/skupperproject/skupper/internal/kube/securedaccess"
 )
 
 type Config struct {
 	GrantConfig            *grants.GrantConfig
 	SecuredAccessConfig    *securedaccess.Config
+	MetricsConfig          *metrics.Config
 	Namespace              string
 	Kubeconfig             string
 	WatchNamespace         string
@@ -42,6 +44,7 @@ func BoundConfig(flags *flag.FlagSet) (*Config, error) {
 	c := &Config{
 		GrantConfig:         grantConfig,
 		SecuredAccessConfig: securedAccessConfig,
+		MetricsConfig:       metrics.BoundConfig(flags),
 	}
 	iflag.StringVar(flags, &c.Namespace, "namespace", "NAMESPACE", "", "The Kubernetes namespace scope for the controller")
 	iflag.StringVar(flags, &c.Kubeconfig, "kubeconfig", "KUBECONFIG", "", "A path to the kubeconfig file to use")

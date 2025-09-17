@@ -125,10 +125,15 @@ type EventProcessor struct {
 	queue           workqueue.RateLimitingInterface
 	resync          time.Duration
 	watchers        []Watcher
+	metricsProvider MetricsProvider
+	metrics         map[string]metricsSet
 }
 
 // Creates a properly initialised EventProcessor instance.
-func NewEventProcessor(name string, clients internalclient.Clients) *EventProcessor {
+func NewEventProcessor(name string, clients internalclient.Clients, metrics MetricsProvider) *EventProcessor {
+	if metrics == nil {
+		metrics = noopMetricsProvider{}
+	}
 	return &EventProcessor{
 		errorKey:        name + "Error",
 		client:          clients.GetKubeClient(),
@@ -138,6 +143,7 @@ func NewEventProcessor(name string, clients internalclient.Clients) *EventProces
 		skupperClient:   clients.GetSkupperClient(),
 		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), name),
 		resync:          time.Minute * 5,
+		metricsProvider: metrics,
 	}
 }
 
@@ -203,6 +209,21 @@ func (c *EventProcessor) TestProcessAll() {
 	}
 }
 
+func (c *EventProcessor) metricsFor(kind string) metricsSet {
+	if c.metrics == nil {
+		c.metrics = map[string]metricsSet{}
+	}
+	if m, ok := c.metrics[kind]; ok {
+		return m
+	}
+	m := metricsSet{
+		WorkDuration: c.metricsProvider.NewWorkDurationMetric(kind),
+		Retries:      c.metricsProvider.NewRetriesMetric(kind),
+	}
+	c.metrics[kind] = m
+	return m
+}
+
 // The process method is the heart of the event processing loop.
 func (c *EventProcessor) process() bool {
 	obj, shutdown := c.queue.Get()
@@ -218,7 +239,11 @@ func (c *EventProcessor) process() bool {
 		if kind == "" {
 			return
 		}
-		log.Printf("HANDLER for %q competed after %s", kind, time.Since(start))
+		metrics := c.metricsFor(kind)
+		metrics.WorkDuration.Observe(time.Since(start).Seconds())
+		if retry {
+			metrics.Retries.Inc()
+		}
 	}()
 	defer c.queue.Done(obj)
 	if evt, ok := obj.(ResourceChange); ok {

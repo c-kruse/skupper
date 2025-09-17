@@ -109,7 +109,7 @@ func TestNamespaceWatcher(t *testing.T) {
 			if err != nil {
 				assert.Assert(t, err)
 			}
-			processor := NewEventProcessor("tester", client)
+			processor := NewEventProcessor("tester", client, nil)
 			handler, getCallbacks := makeHandler[corev1.Namespace](tt.err)
 			watcher := processor.WatchNamespaces(nil, handler)
 			stopCh := make(chan struct{})
@@ -255,7 +255,7 @@ func TestNodeWatcher(t *testing.T) {
 			if err != nil {
 				assert.Assert(t, err)
 			}
-			processor := NewEventProcessor("tester", client)
+			processor := NewEventProcessor("tester", client, nil)
 			handler, getCallbacks := makeHandler[corev1.Node](tt.err)
 			watcher := processor.WatchNodes(handler)
 			stopCh := make(chan struct{})
@@ -321,10 +321,13 @@ func (s *stubErrResourceChangeHandler) Handle(e ResourceChange) error {
 func (stubErrResourceChangeHandler) Describe(e ResourceChange) string {
 	return fmt.Sprintf("StubHandler:%s", e.Key)
 }
+func (stubErrResourceChangeHandler) Kind() string {
+	return "stub"
+}
 
 func TestProcessRequeueLimit(t *testing.T) {
 	client, _ := fakeclient.NewFakeClient("test", nil, nil, "")
-	processor := NewEventProcessor("tester", client)
+	processor := NewEventProcessor("tester", client, nil)
 	processor.queue = workqueue.NewNamedRateLimitingQueue(workqueue.NewItemFastSlowRateLimiter(0, time.Microsecond, 10), "testing")
 	stubHandler := stubErrResourceChangeHandler{}
 	eventsIn := processor.newEventHandler(&stubHandler)

@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/informers/internalinterfaces"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/grants"
@@ -83,9 +84,13 @@ func labelling() internalinterfaces.TweakListOptionsFunc {
 	}
 }
 
-func NewController(cli internalclient.Clients, config *Config) (*Controller, error) {
+func NewController(cli internalclient.Clients, config *Config, reg *prometheus.Registry) (*Controller, error) {
+	var metricsProvider watchers.MetricsProvider
+	if reg != nil {
+		metricsProvider = watchers.PrometheusMetrics(reg)
+	}
 	controller := &Controller{
-		eventProcessor:       watchers.NewEventProcessor("Controller", cli),
+		eventProcessor:       watchers.NewEventProcessor("Controller", cli, metricsProvider),
 		sites:                map[string]*site.Site{},
 		siteSizing:           sizing.NewRegistry(),
 		labelling:            labels.NewLabelsAndAnnotations(config.Namespace),
