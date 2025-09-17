@@ -35,7 +35,7 @@ func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor
 }
 
 func NewConfigSync(cli internalclient.Clients, namespace string, path string, routerConfigMap string) *ConfigSync {
-	controller := watchers.NewEventProcessor("config-sync", cli)
+	controller := watchers.NewEventProcessor("config-sync", cli, nil)
 	configSync := &ConfigSync{
 		agentPool:       qdr.NewAgentPool("amqp://localhost:5672", nil),
 		controller:      controller,

@@ -83,7 +83,7 @@ func Test_Initialise(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-			controller := watchers.NewEventProcessor("Controller", client)
+			controller := watchers.NewEventProcessor("Controller", client, nil)
 
 			start := Initialise(controller, "test", metav1.NamespaceAll, &tt.config, nil, nil)
 			if tt.endpoint != nil {

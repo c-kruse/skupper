@@ -329,7 +329,7 @@ func TestCertificateManager(t *testing.T) {
 			if err != nil {
 				assert.Assert(t, err)
 			}
-			processor := watchers.NewEventProcessor("Controller", client)
+			processor := watchers.NewEventProcessor("Controller", client, nil)
 			mgr := NewCertificateManager(processor)
 			if tt.context != nil {
 				mgr.SetControllerContext(tt.context)

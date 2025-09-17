@@ -202,7 +202,7 @@ func Test_newAutoconfigure(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-			controller := watchers.NewEventProcessor("Controller", client)
+			controller := watchers.NewEventProcessor("Controller", client, nil)
 
 			config := &GrantConfig{
 				Port:     9090,
