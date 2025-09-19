@@ -125,8 +125,7 @@ type EventProcessor struct {
 	queue           workqueue.RateLimitingInterface
 	resync          time.Duration
 	watchers        []Watcher
-	metricsProvider MetricsProvider
-	metrics         map[string]metricsSet
+	metrics         *metricsQueue
 }
 
 // Creates a properly initialised EventProcessor instance.
@@ -143,7 +142,11 @@ func NewEventProcessor(name string, clients internalclient.Clients, metrics Metr
 		skupperClient:   clients.GetSkupperClient(),
 		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), name),
 		resync:          time.Minute * 5,
-		metricsProvider: metrics,
+		metrics: &metricsQueue{
+			provider: metrics,
+			metrics:  make(map[string]metricsSet),
+			pending:  make(map[ResourceChange]time.Time),
+		},
 	}
 }
 
@@ -209,21 +212,6 @@ func (c *EventProcessor) TestProcessAll() {
 	}
 }
 
-func (c *EventProcessor) metricsFor(kind string) metricsSet {
-	if c.metrics == nil {
-		c.metrics = map[string]metricsSet{}
-	}
-	if m, ok := c.metrics[kind]; ok {
-		return m
-	}
-	m := metricsSet{
-		WorkDuration: c.metricsProvider.NewWorkDurationMetric(kind),
-		Retries:      c.metricsProvider.NewRetriesMetric(kind),
-	}
-	c.metrics[kind] = m
-	return m
-}
-
 // The process method is the heart of the event processing loop.
 func (c *EventProcessor) process() bool {
 	obj, shutdown := c.queue.Get()
@@ -232,32 +220,27 @@ func (c *EventProcessor) process() bool {
 		return false
 	}
 
-	retry := false
-	kind := ""
-	start := time.Now()
-	defer func() {
-		if kind == "" {
-			return
-		}
-		metrics := c.metricsFor(kind)
-		metrics.WorkDuration.Observe(time.Since(start).Seconds())
-		if retry {
-			metrics.Retries.Inc()
-		}
-	}()
+	var (
+		hasError bool = false
+		isRetry  bool = false
+	)
 	defer c.queue.Done(obj)
 	if evt, ok := obj.(ResourceChange); ok {
-		kind = evt.Handler.Kind()
+		done := c.metrics.get(evt)
+		defer func() {
+			done(evt, isRetry)
+		}()
 		err := evt.Handler.Handle(evt)
 		if err != nil {
-			retry = true
+			hasError = true
 			log.Printf("[%s] Error while handling %s: %s", c.errorKey, evt.Handler.Describe(evt), err)
 		}
 	} else {
 		log.Printf("Invalid object on event queue for %q: %#v", c.errorKey, obj)
 	}
 
-	if retry && c.queue.NumRequeues(obj) < 5 {
+	if hasError && c.queue.NumRequeues(obj) < 5 {
+		isRetry = true
 		c.queue.AddRateLimited(obj)
 		return true
 	}
@@ -285,6 +268,7 @@ func (c *EventProcessor) newEventHandler(handler ResourceChangeHandler) *cache.R
 				utilruntime.HandleError(err)
 			} else {
 				evt.Key = key
+				c.metrics.add(evt)
 				c.queue.Add(evt)
 			}
 		},
@@ -294,6 +278,7 @@ func (c *EventProcessor) newEventHandler(handler ResourceChangeHandler) *cache.R
 				utilruntime.HandleError(err)
 			} else {
 				evt.Key = key
+				c.metrics.add(evt)
 				c.queue.Add(evt)
 			}
 		},
@@ -303,6 +288,7 @@ func (c *EventProcessor) newEventHandler(handler ResourceChangeHandler) *cache.R
 				utilruntime.HandleError(err)
 			} else {
 				evt.Key = key
+				c.metrics.add(evt)
 				c.queue.Add(evt)
 			}
 		},
