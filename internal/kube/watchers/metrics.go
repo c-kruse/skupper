@@ -1,6 +1,7 @@
 package watchers
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -8,6 +9,7 @@ import (
 
 type MetricsProvider interface {
 	NewAddedMetric(kind string) CounterMetric
+	NewDepthMetric(kind string) GaugeMetric
 	NewDelayedMetric(kind string) ObservableMetric
 	NewWorkDurationMetric(kind string) ObservableMetric
 	NewRetriesMetric(kind string) CounterMetric
@@ -16,6 +18,10 @@ type MetricsProvider interface {
 type CounterMetric interface {
 	Inc()
 }
+type GaugeMetric interface {
+	CounterMetric
+	Dec()
+}
 type ObservableMetric interface {
 	Observe(float64)
 }
@@ -23,17 +29,20 @@ type ObservableMetric interface {
 type noopMetric struct{}
 
 func (noopMetric) Inc()            {}
+func (noopMetric) Dec()            {}
 func (noopMetric) Observe(float64) {}
 
 type noopMetricsProvider struct{}
 
 func (noopMetricsProvider) NewAddedMetric(kind string) CounterMetric           { return noopMetric{} }
+func (noopMetricsProvider) NewDepthMetric(kind string) GaugeMetric             { return noopMetric{} }
 func (noopMetricsProvider) NewDelayedMetric(kind string) ObservableMetric      { return noopMetric{} }
 func (noopMetricsProvider) NewWorkDurationMetric(kind string) ObservableMetric { return noopMetric{} }
 func (noopMetricsProvider) NewRetriesMetric(kind string) CounterMetric         { return noopMetric{} }
 
 type metricsSet struct {
 	Added        CounterMetric
+	Depth        GaugeMetric
 	Delayed      ObservableMetric
 	WorkDuration ObservableMetric
 	Retries      CounterMetric
@@ -46,6 +55,12 @@ func PrometheusMetrics(registry *prometheus.Registry) MetricsProvider {
 			Subsystem: "watcher",
 			Name:      "adds_total",
 			Help:      "Total number of events queued.",
+		}, []string{"kind"}),
+		depth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "skupper",
+			Subsystem: "watcher",
+			Name:      "depth",
+			Help:      "Current dpeth of event queue.",
 		}, []string{"kind"}),
 		delayDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "skupper",
@@ -68,12 +83,13 @@ func PrometheusMetrics(registry *prometheus.Registry) MetricsProvider {
 			Help:      "Total number of retries queued.",
 		}, []string{"kind"}),
 	}
-	registry.MustRegister(provider.workDuration, provider.retries)
+	registry.MustRegister(provider.adds, provider.depth, provider.delayDuration, provider.workDuration, provider.retries)
 	return provider
 }
 
 type prometheusProvider struct {
 	adds          *prometheus.CounterVec
+	depth         *prometheus.GaugeVec
 	delayDuration *prometheus.HistogramVec
 	workDuration  *prometheus.HistogramVec
 	retries       *prometheus.CounterVec
@@ -81,6 +97,9 @@ type prometheusProvider struct {
 
 func (p prometheusProvider) NewAddedMetric(kind string) CounterMetric {
 	return p.adds.WithLabelValues(kind)
+}
+func (p prometheusProvider) NewDepthMetric(kind string) GaugeMetric {
+	return p.depth.WithLabelValues(kind)
 }
 func (p prometheusProvider) NewDelayedMetric(kind string) ObservableMetric {
 	return p.delayDuration.WithLabelValues(kind)
@@ -95,21 +114,30 @@ func (p prometheusProvider) NewRetriesMetric(kind string) CounterMetric {
 
 type metricsQueue struct {
 	provider MetricsProvider
-	metrics  map[string]metricsSet
-	pending  map[ResourceChange]time.Time
+
+	metricsMu sync.Mutex
+	metrics   map[string]metricsSet
+	pendingMu sync.Mutex
+	pending   map[ResourceChange]time.Time
 }
 
 func (q *metricsQueue) add(evt ResourceChange) {
+	q.pendingMu.Lock()
+	defer q.pendingMu.Unlock()
 	if _, ok := q.pending[evt]; ok {
 		return
 	}
 	q.pending[evt] = time.Now()
-	q.metricsFor(evt.Handler.Kind()).Added.Inc()
+	ms := q.metricsFor(evt.Handler.Kind())
+	ms.Added.Inc()
+	ms.Depth.Inc()
 }
 
 type metricsClose func(evt ResourceChange, retry bool)
 
 func (q *metricsQueue) get(evt ResourceChange) metricsClose {
+	q.pendingMu.Lock()
+	defer q.pendingMu.Unlock()
 	queuedAt, ok := q.pending[evt]
 	if !ok {
 		return q.done(time.Now())
@@ -123,6 +151,7 @@ func (q *metricsQueue) done(startTime time.Time) metricsClose {
 	return func(evt ResourceChange, retry bool) {
 		ms := q.metricsFor(evt.Handler.Kind())
 		ms.WorkDuration.Observe(time.Since(startTime).Seconds())
+		ms.Depth.Dec()
 		if retry {
 			ms.Retries.Inc()
 			q.add(evt)
@@ -131,6 +160,8 @@ func (q *metricsQueue) done(startTime time.Time) metricsClose {
 }
 
 func (q *metricsQueue) metricsFor(kind string) metricsSet {
+	q.metricsMu.Lock()
+	defer q.metricsMu.Unlock()
 	if q.metrics == nil {
 		q.metrics = map[string]metricsSet{}
 	}
@@ -139,6 +170,7 @@ func (q *metricsQueue) metricsFor(kind string) metricsSet {
 	}
 	m := metricsSet{
 		Added:        q.provider.NewAddedMetric(kind),
+		Depth:        q.provider.NewDepthMetric(kind),
 		Delayed:      q.provider.NewDelayedMetric(kind),
 		WorkDuration: q.provider.NewWorkDurationMetric(kind),
 		Retries:      q.provider.NewRetriesMetric(kind),
