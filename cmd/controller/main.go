@@ -75,6 +75,8 @@ func main() {
 	if err != nil {
 		log.Fatal("Error getting new site controller ", err.Error())
 	}
+	// register kubernetes client metrics
+	metrics.MustRegisterClientGoMetrics(reg)
 	server := metrics.NewServer(config.MetricsConfig, reg)
 	if err = server.Start(stopCh); err != nil {
 		log.Fatal("Error starting metrics server: ", err.Error())

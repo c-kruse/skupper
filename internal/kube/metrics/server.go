@@ -67,5 +67,6 @@ func (s *Server) Start(stopCh <-chan struct{}) error {
 			log.Printf("metrics server error: %s", err)
 		}
 	}()
+	log.Printf("Started metrics server at: %s", s.config.Address)
 	return nil
 }
