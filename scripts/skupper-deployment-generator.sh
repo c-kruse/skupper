@@ -119,6 +119,11 @@ spec:
           imagePullPolicy: Always
           command: ["/app/controller"]
           args: ["-enable-grants", "-grant-server-autoconfigure"]
+          ports:
+          - name: grants
+            containerPort: 9090
+          - name: metrics
+            containerPort: 9000
           env:
             - name: SKUPPER_KUBE_ADAPTOR_IMAGE
               value: ${SKUPPER_KUBE_ADAPTOR_IMAGE}
@@ -181,6 +186,11 @@ spec:
           imagePullPolicy: Always
           command: ["/app/controller"]
           args: ["-enable-grants", "-grant-server-autoconfigure"]
+          ports:
+          - name: grants
+            containerPort: 9090
+          - name: metrics
+            containerPort: 9000
           env:
             - name: WATCH_NAMESPACE
               valueFrom:
