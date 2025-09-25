@@ -1,0 +1,15 @@
+kube-prometheus-stack:
+  grafana:
+    sidecar:
+      dashboards:
+        enabled: true
+        label: skupper-monitoring-dashboard
+        labelValue: "true"
+  prometheus:
+    prometheusSpec:
+      podMonitorSelector:
+        matchLabels:
+          skupper-monitoring: "true"
+      serviceMonitorSelector:
+        matchLabels:
+          skupper-monitoring: "true"
