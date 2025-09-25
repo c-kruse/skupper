@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/prometheus/client_golang/prometheus"
 	iflag "github.com/skupperproject/skupper/internal/flag"
 	"github.com/skupperproject/skupper/internal/kube/adaptor"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
+	"github.com/skupperproject/skupper/internal/kube/metrics"
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/version"
 )
@@ -85,6 +87,12 @@ func main() {
 	log.Println("Starting collector...")
 	go adaptor.StartCollector(cli)
 
+	reg := prometheus.NewRegistry()
+	metrics.MustRegisterClientGoMetrics(reg)
+	server := metrics.NewServer(&metrics.Config{Address: ":9000"}, reg)
+	if err = server.Start(stopCh); err != nil {
+		log.Fatal("Error starting metrics server: ", err.Error())
+	}
 	//start health check
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -92,7 +100,7 @@ func main() {
 	})
 	go http.ListenAndServe(":9191", nil)
 
-	configSync := adaptor.NewConfigSync(cli, cli.GetNamespace(), configDir, configMapName)
+	configSync := adaptor.NewConfigSync(cli, cli.GetNamespace(), configDir, configMapName, reg)
 	log.Println("Starting controller loop...")
 	configSync.Start(stopCh)
 

@@ -125,6 +125,13 @@ spec:
         image: {{ .AdaptorImage.Name }}
         imagePullPolicy: {{ .AdaptorImage.PullPolicy }}
         name: kube-adaptor
+        ports:
+        - containerPort: 9191
+          name: health
+          protocol: TCP
+        - containerPort: 9000
+          name: metrics
+          protocol: TCP
         readinessProbe:
           failureThreshold: 3
           httpGet:
