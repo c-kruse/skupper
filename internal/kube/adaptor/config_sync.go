@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/prometheus/client_golang/prometheus"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/secrets"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
@@ -34,8 +35,12 @@ func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor
 	}
 }
 
-func NewConfigSync(cli internalclient.Clients, namespace string, path string, routerConfigMap string) *ConfigSync {
-	controller := watchers.NewEventProcessor("config-sync", cli, nil)
+func NewConfigSync(cli internalclient.Clients, namespace string, path string, routerConfigMap string, registry *prometheus.Registry) *ConfigSync {
+	var metricsProvider watchers.MetricsProvider
+	if registry != nil {
+		metricsProvider = watchers.PrometheusMetrics(registry)
+	}
+	controller := watchers.NewEventProcessor("config-sync", cli, metricsProvider)
 	configSync := &ConfigSync{
 		agentPool:       qdr.NewAgentPool("amqp://localhost:5672", nil),
 		controller:      controller,
