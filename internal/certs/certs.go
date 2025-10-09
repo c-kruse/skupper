@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -74,7 +75,7 @@ func getCAFromSecret(secret *corev1.Secret) (*CertificateAuthority, error) {
 		return nil, err
 	}
 
-	cert, err := x509.ParseCertificate(certBytes)
+	cert, err := x509compat.ParseCertificate(certBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -196,5 +197,5 @@ func DecodeCertificate(data []byte) (*x509.Certificate, error) {
 	if b == nil {
 		return nil, fmt.Errorf("Could not decode PEM block from data")
 	}
-	return x509.ParseCertificate(b.Bytes)
+	return x509compat.ParseCertificate(b.Bytes)
 }
