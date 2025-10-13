@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"testing"
 	"time"
 )
@@ -22,7 +23,7 @@ func TestParseCertificate(t *testing.T) {
 		_, err := ParseCertificate(FixtureCert(t, dnsNamesMalformed))
 		if err == nil {
 			t.Errorf("expected MalformedSANs")
-		} else if _, ok := err.(ErrorMalformedSAN); !ok {
+		} else if !errors.Is(err, ErrorMalformedSAN{}) {
 			t.Errorf("got error %s of type %T but expected MalformedSANs", err, err)
 		}
 		t.Logf("parse error: %s", err)

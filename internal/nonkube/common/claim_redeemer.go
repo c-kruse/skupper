@@ -3,7 +3,6 @@ package common
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	"github.com/skupperproject/skupper/pkg/nonkube/api"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -53,8 +53,10 @@ func RedeemClaims(siteState *api.SiteState) error {
 func RedeemAccessToken(claim *skupperv2alpha1.AccessToken, subject string) (*LinkDecoder, error) {
 	transport := &http.Transport{}
 	if claim.Spec.Ca != "" {
-		caPool := x509.NewCertPool()
-		caPool.AppendCertsFromPEM([]byte(claim.Spec.Ca))
+		caPool, err := x509compat.CertPoolFromPEM([]byte(claim.Spec.Ca))
+		if err != nil {
+			return nil, err
+		}
 		transport.TLSClientConfig = &tls.Config{
 			RootCAs: caPool,
 		}

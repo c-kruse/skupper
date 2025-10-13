@@ -2,11 +2,11 @@ package runtime
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"os"
 	"path"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	"github.com/skupperproject/skupper/pkg/nonkube/api"
 )
 
@@ -79,12 +79,14 @@ func getTlsConfig(verify bool, cert, key, ca string) (*tls.Config, error) {
 	var config tls.Config
 	config.InsecureSkipVerify = true
 	if verify {
-		certPool := x509.NewCertPool()
 		file, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, err
 		}
-		certPool.AppendCertsFromPEM(file)
+		certPool, err := x509compat.CertPoolFromPEM(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+		}
 		config.RootCAs = certPool
 		config.InsecureSkipVerify = false
 	}

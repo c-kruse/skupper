@@ -3,12 +3,12 @@ package api
 import (
 	"bufio"
 	"bytes"
-	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"slices"
 	"strconv"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	"github.com/skupperproject/skupper/internal/utils"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	v1 "k8s.io/api/core/v1"
@@ -111,7 +111,7 @@ func CreateTokens(routerAccess v2alpha1.RouterAccess, serverSecret *v1.Secret, c
 		serverCertificateData := serverSecret.Data["tls.crt"]
 		serverCertificateBlk, _ := pem.Decode(serverCertificateData)
 		if serverCertificateBlk != nil {
-			serverCertificate, err := x509.ParseCertificate(serverCertificateBlk.Bytes)
+			serverCertificate, err := x509compat.ParseCertificate(serverCertificateBlk.Bytes)
 			if err == nil {
 				for _, ipAddr := range serverCertificate.IPAddresses {
 					if ipAddr.String() != "" && !slices.Contains(hosts, ipAddr.String()) {

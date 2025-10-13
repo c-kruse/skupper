@@ -2,12 +2,11 @@ package main
 
 import (
 	"crypto/tls"
-	"crypto/x509"
-	"fmt"
 	"net/url"
 	"os"
 	"time"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	"github.com/skupperproject/skupper/internal/utils/tlscfg"
 )
 
@@ -47,13 +46,13 @@ func (t TLSSpec) config() (*tls.Config, error) {
 	config.InsecureSkipVerify = t.SkipVerify
 
 	if len(t.CA) > 0 && !t.SkipVerify {
-		certPool := x509.NewCertPool()
 		file, err := os.ReadFile(t.CA)
 		if err != nil {
 			return nil, err
 		}
-		if ok := certPool.AppendCertsFromPEM(file); !ok {
-			return nil, fmt.Errorf("failed to add CA to certificate pool")
+		certPool, err := x509compat.CertPoolFromPEM(file)
+		if err != nil {
+			return nil, err
 		}
 		config.RootCAs = certPool
 	}

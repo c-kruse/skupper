@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -16,13 +15,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
+	"github.com/skupperproject/skupper/internal/certs/x509compat"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
 func RedeemAccessToken(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients) error {
+	tlsCfg, err := tlsConfig(token)
+	if err != nil {
+		return updateAccessTokenStatus(token, err, clients)
+	}
 	transport := &http.Transport{
-		TLSClientConfig: tlsConfig(token),
+		TLSClientConfig: tlsCfg,
 	}
 	body, err := postTokenRequest(token, site, transport)
 	if err != nil {
@@ -32,15 +36,14 @@ func RedeemAccessToken(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1
 	return handleTokenResponse(body, token, site, clients)
 }
 
-func tlsConfig(token *skupperv2alpha1.AccessToken) *tls.Config {
+func tlsConfig(token *skupperv2alpha1.AccessToken) (*tls.Config, error) {
 	if token.Spec.Ca == "" {
-		return nil
+		return nil, nil
 	}
-	caPool := x509.NewCertPool()
-	caPool.AppendCertsFromPEM([]byte(token.Spec.Ca))
+	caPool, err := x509compat.CertPoolFromPEM([]byte(token.Spec.Ca))
 	return &tls.Config{
 		RootCAs: caPool,
-	}
+	}, err
 }
 
 func postTokenRequest(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, transport http.RoundTripper) (io.Reader, error) {
