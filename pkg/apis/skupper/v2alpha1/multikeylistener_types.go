@@ -37,7 +37,7 @@ type MultiKeyListenerStatus struct {
 	//
 	// - `Configured`: The multikeylistener configuration has been applied to the router.
 	// - `Operational`: There is at least one connector corresponding to the multikeylistener strategy.
-	// - `Operational`: The multikeylistener is ready to use. All other conditions are true..
+	// - `Ready`: The multikeylistener is ready to use. All other conditions are true..
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// The current state of the resource.
 	// - `Pending`: The resource is being processed.

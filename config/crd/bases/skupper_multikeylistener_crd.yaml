@@ -140,7 +140,7 @@ spec:
 
                   - `Configured`: The multikeylistener configuration has been applied to the router.
                   - `Operational`: There is at least one connector corresponding to the multikeylistener strategy.
-                  - `Operational`: The multikeylistener is ready to use. All other conditions are true..
+                  - `Ready`: The multikeylistener is ready to use. All other conditions are true..
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
