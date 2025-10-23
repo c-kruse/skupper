@@ -32,71 +32,71 @@ import (
 	cache "k8s.io/client-go/tools/cache"
 )
 
-// AttachedConnectorInformer provides access to a shared informer and lister for
-// AttachedConnectors.
-type AttachedConnectorInformer interface {
+// MultiKeyListenerInformer provides access to a shared informer and lister for
+// MultiKeyListeners.
+type MultiKeyListenerInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() skupperv2alpha1.AttachedConnectorLister
+	Lister() skupperv2alpha1.MultiKeyListenerLister
 }
 
-type attachedConnectorInformer struct {
+type multiKeyListenerInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
 	namespace        string
 }
 
-// NewAttachedConnectorInformer constructs a new informer for AttachedConnector type.
+// NewMultiKeyListenerInformer constructs a new informer for MultiKeyListener type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewAttachedConnectorInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredAttachedConnectorInformer(client, namespace, resyncPeriod, indexers, nil)
+func NewMultiKeyListenerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredMultiKeyListenerInformer(client, namespace, resyncPeriod, indexers, nil)
 }
 
-// NewFilteredAttachedConnectorInformer constructs a new informer for AttachedConnector type.
+// NewFilteredMultiKeyListenerInformer constructs a new informer for MultiKeyListener type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewFilteredAttachedConnectorInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
+func NewFilteredMultiKeyListenerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.SkupperV2alpha1().AttachedConnectors(namespace).List(context.Background(), options)
+				return client.SkupperV2alpha1().MultiKeyListeners(namespace).List(context.Background(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.SkupperV2alpha1().AttachedConnectors(namespace).Watch(context.Background(), options)
+				return client.SkupperV2alpha1().MultiKeyListeners(namespace).Watch(context.Background(), options)
 			},
 			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.SkupperV2alpha1().AttachedConnectors(namespace).List(ctx, options)
+				return client.SkupperV2alpha1().MultiKeyListeners(namespace).List(ctx, options)
 			},
 			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.SkupperV2alpha1().AttachedConnectors(namespace).Watch(ctx, options)
+				return client.SkupperV2alpha1().MultiKeyListeners(namespace).Watch(ctx, options)
 			},
 		},
-		&apisskupperv2alpha1.AttachedConnector{},
+		&apisskupperv2alpha1.MultiKeyListener{},
 		resyncPeriod,
 		indexers,
 	)
 }
 
-func (f *attachedConnectorInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredAttachedConnectorInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+func (f *multiKeyListenerInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	return NewFilteredMultiKeyListenerInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
-func (f *attachedConnectorInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&apisskupperv2alpha1.AttachedConnector{}, f.defaultInformer)
+func (f *multiKeyListenerInformer) Informer() cache.SharedIndexInformer {
+	return f.factory.InformerFor(&apisskupperv2alpha1.MultiKeyListener{}, f.defaultInformer)
 }
 
-func (f *attachedConnectorInformer) Lister() skupperv2alpha1.AttachedConnectorLister {
-	return skupperv2alpha1.NewAttachedConnectorLister(f.Informer().GetIndexer())
+func (f *multiKeyListenerInformer) Lister() skupperv2alpha1.MultiKeyListenerLister {
+	return skupperv2alpha1.NewMultiKeyListenerLister(f.Informer().GetIndexer())
 }

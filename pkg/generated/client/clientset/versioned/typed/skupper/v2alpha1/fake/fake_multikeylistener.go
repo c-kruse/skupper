@@ -24,26 +24,26 @@ import (
 	gentype "k8s.io/client-go/gentype"
 )
 
-// fakeRouterAccesses implements RouterAccessInterface
-type fakeRouterAccesses struct {
-	*gentype.FakeClientWithList[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList]
+// fakeMultiKeyListeners implements MultiKeyListenerInterface
+type fakeMultiKeyListeners struct {
+	*gentype.FakeClientWithList[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeRouterAccesses(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.RouterAccessInterface {
-	return &fakeRouterAccesses{
-		gentype.NewFakeClientWithList[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList](
+func newFakeMultiKeyListeners(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.MultiKeyListenerInterface {
+	return &fakeMultiKeyListeners{
+		gentype.NewFakeClientWithList[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList](
 			fake.Fake,
 			namespace,
-			v2alpha1.SchemeGroupVersion.WithResource("routeraccesses"),
-			v2alpha1.SchemeGroupVersion.WithKind("RouterAccess"),
-			func() *v2alpha1.RouterAccess { return &v2alpha1.RouterAccess{} },
-			func() *v2alpha1.RouterAccessList { return &v2alpha1.RouterAccessList{} },
-			func(dst, src *v2alpha1.RouterAccessList) { dst.ListMeta = src.ListMeta },
-			func(list *v2alpha1.RouterAccessList) []*v2alpha1.RouterAccess {
+			v2alpha1.SchemeGroupVersion.WithResource("multikeylisteners"),
+			v2alpha1.SchemeGroupVersion.WithKind("MultiKeyListener"),
+			func() *v2alpha1.MultiKeyListener { return &v2alpha1.MultiKeyListener{} },
+			func() *v2alpha1.MultiKeyListenerList { return &v2alpha1.MultiKeyListenerList{} },
+			func(dst, src *v2alpha1.MultiKeyListenerList) { dst.ListMeta = src.ListMeta },
+			func(list *v2alpha1.MultiKeyListenerList) []*v2alpha1.MultiKeyListener {
 				return gentype.ToPointerSlice(list.Items)
 			},
-			func(list *v2alpha1.RouterAccessList, items []*v2alpha1.RouterAccess) {
+			func(list *v2alpha1.MultiKeyListenerList, items []*v2alpha1.MultiKeyListener) {
 				list.Items = gentype.FromPointerSlice(items)
 			},
 		),
