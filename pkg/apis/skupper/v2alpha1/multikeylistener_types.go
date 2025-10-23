@@ -3,8 +3,7 @@ package v2alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // +genclient
-// +kubebuilder:object:root
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name=Status,JSONPath=.status.status,description="The status of the multikeylistener",type=string
 // +kubebuilder:printcolumn:name=Message,JSONPath=.status.message,description="Any human reandable message relevant to the multikeylistener",type=string
