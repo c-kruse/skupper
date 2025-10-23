@@ -104,7 +104,10 @@ spec:
                     - routingKeys
                     type: object
                   type:
-                    description: type of the strategy
+                    description: |-
+                      type of the strategy. Must be one of the following:
+
+                      - PriorityFailover
                     enum:
                     - PriorityFailover
                     - RoundRobin

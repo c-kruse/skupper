@@ -98,7 +98,9 @@ type MultiKeyListenerSpec struct {
 type MultiKeyListenerStrategy struct {
 	// +kubebuilder:validation:Enum=PriorityFailover;RoundRobin;
 	//
-	// type of the strategy
+	// type of the strategy. Must be one of the following:
+	//
+	// - PriorityFailover
 	Type string `json:"type"`
 	// priorityFailover configuration. Valid only when type == PriorityFailover
 	PriorityFailover *PriorityFailoverStrategySpec `json:"priorityFailover,omitempty"`
