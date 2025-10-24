@@ -86,40 +86,27 @@ spec:
                   more connector instances by routing key.
                 properties:
                   priorityFailover:
-                    description: priorityFailover configuration. Valid only when type
-                      == PriorityFailover
+                    description: |-
+                      PriorityFailoverStrategySpec specifies an ordered set of routing keys to
+                      route traffic to.
+
+                      With this strategy 100% of traffic will be directed to the first routing key
+                      with a reachable connector.
                     properties:
                       routingKeys:
-                        description: |-
-                          routingKeys to route traffic to in priority order.
-
-                          With this strategy 100% of traffic will be directed to the first
-                          routingKey with a reachable connector.
+                        description: routingKeys to route traffic to in order of highest
+                          to lowest priority.
                         items:
                           type: string
+                        maxItems: 256
                         minItems: 1
                         type: array
                         x-kubernetes-list-type: set
                     required:
                     - routingKeys
                     type: object
-                  type:
-                    description: |-
-                      type of the strategy. Must be one of the following:
-
-                      - PriorityFailover
-                    enum:
-                    - PriorityFailover
-                    - RoundRobin
-                    type: string
-                required:
-                - type
                 type: object
                 x-kubernetes-validations:
-                - message: field priorityFailover is not allowed for types other than
-                    `PriorityFailover`
-                  rule: '(has(self.priorityFailover) ? self.type == ''PriorityFailover''
-                    : true)'
                 - message: exactly one of the fields in [priorityFailover] must be
                     set
                   rule: '[has(self.priorityFailover)].filter(x,x==true).size() ==

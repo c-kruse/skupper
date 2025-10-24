@@ -4,6 +4,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // +genclient
 // +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name=Status,JSONPath=.status.status,description="The status of the multikeylistener",type=string
 // +kubebuilder:printcolumn:name=Message,JSONPath=.status.message,description="Any human reandable message relevant to the multikeylistener",type=string
@@ -24,6 +25,7 @@ type MultiKeyListener struct {
 }
 
 // +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // MultiKeyListenerList contains a list of MultiKeyListener
 type MultiKeyListenerList struct {
@@ -90,28 +92,26 @@ type MultiKeyListenerSpec struct {
 	Strategy MultiKeyListenerStrategy `json:"strategy"`
 }
 
-// MultiKeyListenerStrategy contains configuration for each strategy type.
+// MultiKeyListenerStrategy contains configuration for each strategy. Only one
+// strategy can be specified at a time.
+//
+// Presently Priority Failover is the only strategy available.
 //
 // +kubebuilder:validation:ExactlyOneOf=priorityFailover
-// +kubebuilder:validation:XValidation:rule="(has(self.priorityFailover) ? self.type == 'PriorityFailover' : true)",message="field priorityFailover is not allowed for types other than `PriorityFailover`"
 type MultiKeyListenerStrategy struct {
-	// +kubebuilder:validation:Enum=PriorityFailover;RoundRobin;
-	//
-	// type of the strategy. Must be one of the following:
-	//
-	// - PriorityFailover
-	Type string `json:"type"`
-	// priorityFailover configuration. Valid only when type == PriorityFailover
 	PriorityFailover *PriorityFailoverStrategySpec `json:"priorityFailover,omitempty"`
 }
 
+// PriorityFailoverStrategySpec specifies an ordered set of routing keys to
+// route traffic to.
+//
+// With this strategy 100% of traffic will be directed to the first routing key
+// with a reachable connector.
 type PriorityFailoverStrategySpec struct {
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
 	// +listType=set
 
-	// routingKeys to route traffic to in priority order.
-	//
-	// With this strategy 100% of traffic will be directed to the first
-	// routingKey with a reachable connector.
+	// routingKeys to route traffic to in order of highest to lowest priority.
 	RoutingKeys []string `json:"routingKeys"`
 }
