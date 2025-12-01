@@ -1,6 +1,6 @@
 module github.com/skupperproject/skupper
 
-go 1.22
+go 1.23
 
 require (
 	github.com/Azure/go-amqp v1.0.5
