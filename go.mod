@@ -3,7 +3,7 @@ module github.com/skupperproject/skupper
 go 1.22
 
 require (
-	github.com/Azure/go-amqp v1.0.5
+	github.com/Azure/go-amqp v1.5.1
 	github.com/briandowns/spinner v1.23.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/fsnotify/fsnotify v1.6.0
