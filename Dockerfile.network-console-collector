@@ -13,7 +13,7 @@ COPY . .
 
 RUN make GOOS=$TARGETOS GOARCH=$TARGETARCH build-network-console-collector
 
-FROM --platform=$BUILDPLATFORM node:18.18.2 AS console-builder
+FROM --platform=$BUILDPLATFORM node:24.13.0 AS console-builder
 
 WORKDIR /skupper-console/
 ADD https://github.com/skupperproject/skupper-console/archive/v2.tar.gz .
