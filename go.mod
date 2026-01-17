@@ -33,7 +33,7 @@ require (
 	k8s.io/api v0.20.0
 	k8s.io/apimachinery v0.20.0
 	k8s.io/client-go v0.20.0
-	sigs.k8s.io/yaml v1.2.0
+	sigs.k8s.io/yaml v1.6.0
 )
 
 replace github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
@@ -100,6 +100,7 @@ require (
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	go.mongodb.org/mongo-driver v1.10.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/oauth2 v0.7.0 // indirect
