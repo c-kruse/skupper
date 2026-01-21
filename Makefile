@@ -157,16 +157,13 @@ generate-manifest: skupper
 generate-docs: generate-doc
 	./generate-doc ./doc/cli
 
-generate-skupper-helm-chart:
-	./scripts/skupper-helm-chart-generator.sh ${IMAGE_TAG} ${ROUTER_IMAGE_TAG}
-
 generate-skupper-deployment-cluster-scoped:
-	./scripts/skupper-deployment-generator.sh cluster ${IMAGE_TAG} ${ROUTER_IMAGE_TAG} false > skupper-cluster-scope.yaml
+	./scripts/skupper-deployment-generator.sh cluster ${IMAGE_TAG} ${ROUTER_IMAGE_TAG} > skupper-cluster-scope.yaml
 
 generate-skupper-deployment-namespace-scoped:
-	./scripts/skupper-deployment-generator.sh namespace ${IMAGE_TAG} ${ROUTER_IMAGE_TAG} false > skupper-namespace-scope.yaml
+	./scripts/skupper-deployment-generator.sh namespace ${IMAGE_TAG} ${ROUTER_IMAGE_TAG} > skupper-namespace-scope.yaml
 
-pack-skupper-helm-chart: generate-skupper-helm-chart
+pack-skupper-helm-chart:
 	helm package ./charts/skupper
 
 pack-network-observer-helm-chart:
@@ -205,11 +202,21 @@ generate-network-observer-devel:
 		--set extraArgs={"-cors-allow-all"} \
 		--set skipManagementLabels=true > skupper-network-observer-devel.yaml
 
+generate-skupper-crds:
+	kubectl kustomize config/crd > skupper-crds.yaml
+
+generate-skupper-crds-chart:
+	./scripts/skupper-crds-chart-generator.sh
+
+pack-skupper-crds-helm-chart: generate-skupper-crds-chart
+	helm package ./charts/skupper-crds
+
 clean:
 	rm -rf skupper controller kube-adaptor \
 		network-observer generate-doc \
 		cover.out oci-archives bundle bundle.Dockerfile \
 		skupper-*.tgz artifacthub-repo.yml \
 		network-observer-*.tgz  skupper-*-scope.yaml \
+		skupper-crds.yaml skupper-crds-*.tgz charts/skupper-crds/templates \
 		network-observer-operator \
 		must-gather.local.*
