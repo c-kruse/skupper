@@ -177,8 +177,29 @@ metadata:
 EOF
 }
 
-skupper::cluster::controller() {
-	SKUPPER_TESTING=true "${REPO_ROOT}/scripts/skupper-deployment-generator.sh" cluster ${IMAGE_TAG} ${ROUTER_IMAGE_TAG} false
+get_oci_repo() {
+    local full_ref="$1"
+	# strip potential digest @sha256:*
+    local no_digest="${full_ref%%@*}"
+    local maybe_tag="${no_digest##*:}"
+    if [[ "$maybe_tag" =~ / ]] || [[ "$maybe_tag" == "$no_digest" ]]; then
+		# maybe_tag is part of registry port i.e. localhost:5000/img
+        echo "$no_digest"
+    else
+        echo "${no_digest%:*}"
+    fi
+}
+get_oci_tag() {
+    local full_ref="$1"
+    local repo
+    repo=$(get_oci_repo "$full_ref")
+
+    local remainder="${full_ref:${#repo}}"
+	if [[ -z "$remainder" ]]; then
+        echo "latest"
+    else
+        echo "${remainder#:}"
+    fi
 }
 
 main () {
@@ -283,7 +304,26 @@ main () {
 		"${KUBECTL}" apply -f <(metallb::l2::config "$kind_subnet" "$SUBNET")
 	fi
 
-	echo "(skdev) configuring controller deployment"
-	skupper::cluster::controller | "${KUBECTL}" apply -f -
+	echo "(skdev) installing skupper CRDs"
+	"${KUBECTL}" kustomize "${REPO_ROOT}/config/crd" | "${KUBECTL}" apply -f -
+	echo "(skdev) installing skupper controller"
+	controller_repo=$(get_oci_repo "$SKUPPER_CONTROLLER_IMAGE")
+	controller_tag=$(get_oci_tag "$SKUPPER_CONTROLLER_IMAGE")
+	kubeadaptor_repo=$(get_oci_repo "$SKUPPER_KUBE_ADAPTOR_IMAGE")
+	kubeadaptor_tag=$(get_oci_tag "$SKUPPER_KUBE_ADAPTOR_IMAGE")
+	router_repo=$(get_oci_repo "$SKUPPER_ROUTER_IMAGE")
+	router_tag=$(get_oci_tag "$SKUPPER_ROUTER_IMAGE")
+	"${HELM}" upgrade --install skupper "${REPO_ROOT}/charts/skupper" \
+		--namespace skupper --create-namespace \
+		--set "controller.repository=$controller_repo" \
+		--set "controller.tag=$controller_tag" \
+		--set "controller.pullPolicy=Never" \
+		--set "kubeAdaptor.repository=$kubeadaptor_repo" \
+		--set "kubeAdaptor.tag=$kubeadaptor_tag" \
+		--set "kubeAdaptor.pullPolicy=Never" \
+		--set "skupperRouter.repository=$router_repo" \
+		--set "skupperRouter.tag=$router_tag" \
+		--set "skupperRouter.pullPolicy=IfNotPresent" \
+		--wait
 }
 main "$@"
