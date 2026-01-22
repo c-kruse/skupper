@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/Azure/go-amqp"
-	"github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v5"
 )
 
 type ReceiverOptions struct {
