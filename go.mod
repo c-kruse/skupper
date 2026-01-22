@@ -25,7 +25,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/crypto v0.23.0
 	golang.org/x/sync v0.7.0
-	golang.org/x/sys v0.20.0
+	golang.org/x/sys v0.25.0
 	golang.org/x/text v0.15.0
 	golang.org/x/time v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -60,7 +60,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/evanphx/json-patch v4.9.0+incompatible // indirect
-	github.com/fatih/color v1.7.0 // indirect
+	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/form3tech-oss/jwt-go v3.2.2+incompatible // indirect
 	github.com/getkin/kin-openapi v0.124.0 // indirect
