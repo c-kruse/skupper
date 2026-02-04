@@ -463,6 +463,15 @@ func (c *EventProcessor) WatchListeners(namespace string, handler ListenerHandle
 	return addEventProcessorWatcher(c, handler, v2alpha1.SchemeGroupVersion, informer)
 }
 
+func (c *EventProcessor) WatchMultiKeyListeners(namespace string, handler MultiKeyListenerHandler) *MultiKeyListenerWatcher {
+	informer := skupperv2alpha1informer.NewMultiKeyListenerInformer(
+		c.skupperClient,
+		namespace,
+		c.resyncShort,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	return addEventProcessorWatcher(c, handler, v2alpha1.SchemeGroupVersion, informer)
+}
+
 func (c *EventProcessor) WatchConnectors(namespace string, handler ConnectorHandler) *ConnectorWatcher {
 	informer := skupperv2alpha1informer.NewConnectorInformer(
 		c.skupperClient,
