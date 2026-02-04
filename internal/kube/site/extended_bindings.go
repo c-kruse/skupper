@@ -373,6 +373,10 @@ func (b *ExtendedBindings) Map(cf site.ConnectorFunction, lf site.ListenerFuncti
 	b.bindings.Map(cf, lf)
 }
 
+func (b *ExtendedBindings) MapOverMultiKeyListeners(mkf site.MultiKeyListenerFunction) {
+	b.bindings.MapOverMultiKeyListeners(mkf)
+}
+
 type AttachedConnectorFunction func(*AttachedConnector)
 
 func (b *ExtendedBindings) MapOverAttachedConnectors(cf AttachedConnectorFunction) {
