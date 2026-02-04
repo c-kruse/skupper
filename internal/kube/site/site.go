@@ -958,6 +958,35 @@ func (s *Site) CheckListener(name string, listener *skupperv2alpha1.Listener, sv
 	return s.updateListenerStatus(listener, stderrors.Join(err1, err2))
 }
 
+func (s *Site) CheckMultiKeyListener(name string, mkl *skupperv2alpha1.MultiKeyListener) error {
+	update, err1 := s.bindings.UpdateMultiKeyListener(name, mkl)
+	if s.site == nil {
+		if mkl == nil {
+			return nil
+		}
+		return s.updateMultiKeyListenerStatus(mkl, stderrors.New("No active site in namespace"))
+	}
+	if update == nil {
+		return nil
+	}
+	err2 := s.updateRouterConfig(update)
+	if mkl == nil {
+		return stderrors.Join(err1, err2)
+	}
+	return s.updateMultiKeyListenerStatus(mkl, stderrors.Join(err1, err2))
+}
+
+func (s *Site) updateMultiKeyListenerStatus(mkl *skupperv2alpha1.MultiKeyListener, err error) error {
+	if mkl.SetConfigured(err) {
+		updated, updateErr := s.clients.GetSkupperClient().SkupperV2alpha1().MultiKeyListeners(mkl.ObjectMeta.Namespace).UpdateStatus(context.TODO(), mkl, metav1.UpdateOptions{})
+		if updateErr != nil {
+			return updateErr
+		}
+		s.bindings.UpdateMultiKeyListener(updated.Name, updated)
+	}
+	return nil
+}
+
 func (s *Site) setBindingsConfiguredStatus(err error) {
 	lf := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		if listener.SetConfigured(nil) {
