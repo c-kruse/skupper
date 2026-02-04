@@ -1198,6 +1198,7 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 
 	bindingStatus := newBindingStatus(s.clients, network)
 	s.bindings.Map(bindingStatus.updateMatchingListenerCount, bindingStatus.updateMatchingConnectorCount)
+	s.bindings.MapOverMultiKeyListeners(bindingStatus.updateMultiKeyListenerDestination)
 	s.logger.Debug("Updating matching listeners for attached connectors")
 	s.bindings.MapOverAttachedConnectors(bindingStatus.updateMatchingListenerCountForAttachedConnector)
 	return bindingStatus.error()
@@ -1468,6 +1469,10 @@ func updateConnectorStatus(client internalclient.Clients, connector *skupperv2al
 
 func updateListenerStatus(client internalclient.Clients, listener *skupperv2alpha1.Listener) (*skupperv2alpha1.Listener, error) {
 	return client.GetSkupperClient().SkupperV2alpha1().Listeners(listener.ObjectMeta.Namespace).UpdateStatus(context.TODO(), listener, metav1.UpdateOptions{})
+}
+
+func updateMultiKeyListenerStatus(client internalclient.Clients, mkl *skupperv2alpha1.MultiKeyListener) (*skupperv2alpha1.MultiKeyListener, error) {
+	return client.GetSkupperClient().SkupperV2alpha1().MultiKeyListeners(mkl.ObjectMeta.Namespace).UpdateStatus(context.TODO(), mkl, metav1.UpdateOptions{})
 }
 
 func getLabelsForRouter() map[string]string {

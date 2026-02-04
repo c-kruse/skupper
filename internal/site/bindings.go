@@ -20,6 +20,7 @@ type BindingEventHandler interface {
 
 type ConnectorFunction func(*skupperv2alpha1.Connector) *skupperv2alpha1.Connector
 type ListenerFunction func(*skupperv2alpha1.Listener) *skupperv2alpha1.Listener
+type MultiKeyListenerFunction func(*skupperv2alpha1.MultiKeyListener) *skupperv2alpha1.MultiKeyListener
 
 type Bindings struct {
 	SiteId            string
@@ -82,6 +83,16 @@ func (b *Bindings) Map(cf ConnectorFunction, lf ListenerFunction) {
 		for key, listener := range b.listeners {
 			if updated := lf(listener); updated != nil {
 				b.listeners[key] = updated
+			}
+		}
+	}
+}
+
+func (b *Bindings) MapOverMultiKeyListeners(mkf MultiKeyListenerFunction) {
+	if mkf != nil {
+		for key, mkl := range b.multiKeyListeners {
+			if updated := mkf(mkl); updated != nil {
+				b.multiKeyListeners[key] = updated
 			}
 		}
 	}

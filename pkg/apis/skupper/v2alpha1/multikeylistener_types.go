@@ -1,8 +1,10 @@
 package v2alpha1
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"reflect"
+
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // +genclient
@@ -190,4 +192,28 @@ func (m *MultiKeyListener) SetHasDestination(value bool) bool {
 		return true
 	}
 	return false
+}
+
+func (m *MultiKeyListener) SetRoutingKeysReachable(keys []string) bool {
+	if m.Status.Strategy == nil {
+		m.Status.Strategy = &StrategyStatus{}
+	}
+	if m.Status.Strategy.Priority == nil {
+		m.Status.Strategy.Priority = &PriorityStrategyStatus{}
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	if !reflect.DeepEqual(m.Status.Strategy.Priority.RoutingKeysReachable, keys) {
+		m.Status.Strategy.Priority.RoutingKeysReachable = keys
+		return true
+	}
+	return false
+}
+
+func (m *MultiKeyListener) GetRoutingKeys() []string {
+	if m.Spec.Strategy.Priority != nil {
+		return m.Spec.Strategy.Priority.RoutingKeys
+	}
+	return nil
 }
