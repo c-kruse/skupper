@@ -7,8 +7,6 @@ import (
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
-const unusedAddressSentinel = "_unused_"
-
 // multiAddressTcpListenerName returns the tcpListener name for a MultiKeyListener.
 // The format "multiAddress/<name>" avoids collisions with regular Listener resources.
 func multiAddressTcpListenerName(name string) string {
@@ -35,7 +33,6 @@ func UpdateBridgeConfigForMultiKeyListenerWithHostAndPort(siteId string, mkl *sk
 
 	config.AddTcpListener(qdr.TcpEndpoint{
 		Name:                 tcpListenerName,
-		Address:              unusedAddressSentinel, // TODO (ck) this address is unused but required for now
 		SiteId:               siteId,
 		Host:                 host,
 		Port:                 strconv.Itoa(port),
