@@ -590,6 +590,7 @@ type TcpEndpoint struct {
 	VerifyHostname       *bool  `json:"verifyHostname,omitempty"`
 	ProcessID            string `json:"processId,omitempty"`
 	MultiAddressStrategy string `json:"multiAddressStrategy,omitempty"`
+	AuthenticatePeer     bool   `json:"authenticatePeer,omitempty"`
 }
 
 type ListenerAddress struct {
@@ -645,6 +646,9 @@ func (e TcpEndpoint) toRecord() Record {
 	}
 	if e.MultiAddressStrategy != "" {
 		result["multiAddressStrategy"] = e.MultiAddressStrategy
+	}
+	if e.AuthenticatePeer {
+		result["authenticatePeer"] = true
 	}
 	return result
 }
@@ -1037,7 +1041,7 @@ func (a TcpEndpoint) Equivalent(b TcpEndpoint) bool {
 	}
 	if !equivalentHost(a.Host, b.Host) || a.Port != b.Port || a.Address != b.Address ||
 		a.SiteId != b.SiteId || a.ProcessID != b.ProcessID || !a.equivalentVerifyHostname(b) ||
-		obsA != obsB {
+		obsA != obsB || a.AuthenticatePeer != b.AuthenticatePeer || a.SslProfile != b.SslProfile {
 		return false
 	}
 	return true
@@ -1089,6 +1093,36 @@ func (a *BridgeConfig) Difference(b *BridgeConfig) *BridgeConfigDifference {
 		TcpConnectors:     a.TcpConnectors.Difference(b.TcpConnectors),
 		TcpListeners:      a.TcpListeners.Difference(b.TcpListeners),
 		ListenerAddresses: a.ListenerAddresses.Difference(b.ListenerAddresses),
+	}
+
+	// When a tcpListener is being replaced (deleted then re-added), the
+	// router requires all referencing listenerAddresses to be deleted
+	// before the tcpListener can be deleted. Ensure those dependent
+	// listenerAddresses are included in the diff even if they themselves
+	// haven't changed.
+	deletedListeners := make(map[string]bool, len(result.TcpListeners.Deleted))
+	for _, name := range result.TcpListeners.Deleted {
+		deletedListeners[name] = true
+	}
+	if len(deletedListeners) > 0 {
+		alreadyDeletedLA := make(map[string]bool, len(result.ListenerAddresses.Deleted))
+		for _, name := range result.ListenerAddresses.Deleted {
+			alreadyDeletedLA[name] = true
+		}
+		alreadyAddedLA := make(map[string]bool, len(result.ListenerAddresses.Added))
+		for _, la := range result.ListenerAddresses.Added {
+			alreadyAddedLA[la.Name] = true
+		}
+		for _, la := range a.ListenerAddresses {
+			if deletedListeners[la.ListenerRef] && !alreadyDeletedLA[la.Name] {
+				result.ListenerAddresses.Deleted = append(result.ListenerAddresses.Deleted, la.Name)
+			}
+		}
+		for _, la := range b.ListenerAddresses {
+			if deletedListeners[la.ListenerRef] && !alreadyAddedLA[la.Name] {
+				result.ListenerAddresses.Added = append(result.ListenerAddresses.Added, la)
+			}
+		}
 	}
 
 	result.AddedSslProfiles, result.DeletedSSlProfiles = getSslProfilesDifference(a, b)

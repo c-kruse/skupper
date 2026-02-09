@@ -135,6 +135,7 @@ func asTcpEndpoint(record Record) TcpEndpoint {
 		Observer:             record.AsString("observer"),
 		ProcessID:            record.AsString("processId"),
 		MultiAddressStrategy: record.AsString("multiAddressStrategy"),
+		AuthenticatePeer:     record.AsBool("authenticatePeer"),
 	}
 	if value, ok := record["verifyHostname"]; ok {
 		if verify, ok := value.(bool); ok {
