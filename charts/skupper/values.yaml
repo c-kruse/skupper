@@ -24,7 +24,7 @@ rbac:
 controller:
   # image repository
   repository: quay.io/skupper/controller
-  # overries the image tag from its default value Chart AppVersion.
+  # overrides the image tag from its default value Chart AppVersion.
   tag: ""
   # Digest for the image. When set, digest overrides the tag.
   digest: ""
@@ -48,7 +48,7 @@ controller:
 kubeAdaptor:
   # image repository
   repository: quay.io/skupper/kube-adaptor
-  # overries the image tag from its default value Chart AppVersion.
+  # overrides the image tag from its default value Chart AppVersion.
   tag: ""
   # Digest for the image. When set, digest overrides the tag.
   digest: ""
