@@ -154,6 +154,10 @@ func (c *EventProcessor) HasTlsRoute() bool {
 	return resource.IsResourceAvailable(c.discoveryClient, resource.TlsRouteResource())
 }
 
+func (c *EventProcessor) HasMultiKeyListener() bool {
+	return resource.IsResourceAvailable(c.discoveryClient, resource.MultiKeyListenerResource())
+}
+
 func (c *EventProcessor) GetRouteInterface() openshiftroute.Interface {
 	return c.routeClient
 }
@@ -464,6 +468,10 @@ func (c *EventProcessor) WatchListeners(namespace string, handler ListenerHandle
 }
 
 func (c *EventProcessor) WatchMultiKeyListeners(namespace string, handler MultiKeyListenerHandler) *MultiKeyListenerWatcher {
+	if !c.HasMultiKeyListener() {
+		c.logger.Warn("Cannot watch MultiKeyListeners; resource not installed")
+		return nil
+	}
 	informer := skupperv2alpha1informer.NewMultiKeyListenerInformer(
 		c.skupperClient,
 		namespace,

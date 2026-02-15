@@ -291,16 +291,18 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		_, svcExists := c.observedServices[listener.ObjectMeta.Namespace+"/"+listener.Spec.Host]
 		site.CheckListener(listener.ObjectMeta.Name, listener, svcExists)
 	}
-	for _, mkl := range c.multiKeyListenerWatcher.List() {
-		if !c.namespaces.isControlled(mkl.Namespace) {
-			continue
+	if c.multiKeyListenerWatcher != nil {
+		for _, mkl := range c.multiKeyListenerWatcher.List() {
+			if !c.namespaces.isControlled(mkl.Namespace) {
+				continue
+			}
+			site := c.getSite(mkl.ObjectMeta.Namespace)
+			c.log.Info("Recovering multikeylistener",
+				slog.String("namespace", mkl.Namespace),
+				slog.String("name", mkl.Name),
+			)
+			site.CheckMultiKeyListener(mkl.ObjectMeta.Name, mkl)
 		}
-		site := c.getSite(mkl.ObjectMeta.Namespace)
-		c.log.Info("Recovering multikeylistener",
-			slog.String("namespace", mkl.Namespace),
-			slog.String("name", mkl.Name),
-		)
-		site.CheckMultiKeyListener(mkl.ObjectMeta.Name, mkl)
 	}
 	for _, la := range c.linkAccessWatcher.List() {
 		if !c.namespaces.isControlled(la.Namespace) {
