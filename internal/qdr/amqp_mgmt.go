@@ -147,10 +147,10 @@ func asTcpEndpoint(record Record) TcpEndpoint {
 
 func asListenerAddress(record Record) ListenerAddress {
 	return ListenerAddress{
-		Name:        record.AsString("name"),
-		Address:     record.AsString("address"),
-		Value:       record.AsInt("value"),
-		ListenerRef: record.AsString("listenerRef"),
+		Name:     record.AsString("name"),
+		Address:  record.AsString("address"),
+		Value:    record.AsInt("value"),
+		Listener: record.AsString("listener"),
 	}
 }
 

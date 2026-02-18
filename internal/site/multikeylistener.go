@@ -37,7 +37,7 @@ func UpdateBridgeConfigForMultiKeyListenerWithHostAndPort(siteId string, mkl *sk
 		Host:                 host,
 		Port:                 strconv.Itoa(port),
 		SslProfile:           mkl.Spec.TlsCredentials,
-		MultiAddressStrategy: "priorityFailover",
+		MultiAddressStrategy: "priority",
 		AuthenticatePeer:     mkl.Spec.RequireClientCert,
 	})
 
@@ -47,10 +47,10 @@ func UpdateBridgeConfigForMultiKeyListenerWithHostAndPort(siteId string, mkl *sk
 		for i, routingKey := range mkl.Spec.Strategy.Priority.RoutingKeys {
 			laName := listenerAddressName(name, routingKey)
 			config.AddListenerAddress(qdr.ListenerAddress{
-				Name:        laName,
-				Address:     routingKey,
-				Value:       numKeys - 1 - i, // higher value = higher priority
-				ListenerRef: tcpListenerName,
+				Name:     laName,
+				Address:  routingKey,
+				Value:    numKeys - 1 - i, // higher value = higher priority
+				Listener: tcpListenerName,
 			})
 		}
 	}
@@ -63,7 +63,7 @@ func RemoveBridgeConfigForMultiKeyListener(name string, config *qdr.BridgeConfig
 	tcpListenerName := multiAddressTcpListenerName(name)
 	// Remove all listenerAddresses that reference this listener
 	for laName, la := range config.ListenerAddresses {
-		if la.ListenerRef == tcpListenerName {
+		if la.Listener == tcpListenerName {
 			config.RemoveListenerAddress(laName)
 		}
 	}

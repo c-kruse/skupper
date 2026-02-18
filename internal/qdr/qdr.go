@@ -594,10 +594,10 @@ type TcpEndpoint struct {
 }
 
 type ListenerAddress struct {
-	Name        string `json:"name,omitempty"`
-	Address     string `json:"address,omitempty"`
-	Value       int    `json:"value"`
-	ListenerRef string `json:"listenerRef,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Address  string `json:"address,omitempty"`
+	Value    int    `json:"value"`
+	Listener string `json:"listener,omitempty"`
 }
 
 func (e ListenerAddress) toRecord() Record {
@@ -609,8 +609,8 @@ func (e ListenerAddress) toRecord() Record {
 		result["address"] = e.Address
 	}
 	result["value"] = e.Value
-	if e.ListenerRef != "" {
-		result["listenerRef"] = e.ListenerRef
+	if e.Listener != "" {
+		result["listener"] = e.Listener
 	}
 	return result
 }
@@ -1114,12 +1114,12 @@ func (a *BridgeConfig) Difference(b *BridgeConfig) *BridgeConfigDifference {
 			alreadyAddedLA[la.Name] = true
 		}
 		for _, la := range a.ListenerAddresses {
-			if deletedListeners[la.ListenerRef] && !alreadyDeletedLA[la.Name] {
+			if deletedListeners[la.Listener] && !alreadyDeletedLA[la.Name] {
 				result.ListenerAddresses.Deleted = append(result.ListenerAddresses.Deleted, la.Name)
 			}
 		}
 		for _, la := range b.ListenerAddresses {
-			if deletedListeners[la.ListenerRef] && !alreadyAddedLA[la.Name] {
+			if deletedListeners[la.Listener] && !alreadyAddedLA[la.Name] {
 				result.ListenerAddresses.Added = append(result.ListenerAddresses.Added, la)
 			}
 		}
