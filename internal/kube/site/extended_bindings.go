@@ -194,7 +194,7 @@ func (a *ExtendedBindings) updateBridgeConfigForMultiKeyListener(siteId string, 
 	if a.mapping == nil {
 		a.mapping = qdr.RecoverPortMapping(nil)
 	}
-	port, err := a.mapping.GetPortForKey(mkl.Name)
+	port, err := a.mapping.GetPortForKey(multiKeyListenerPortName(mkl.Name))
 	if err != nil {
 		bindings_logger.Error("Could not allocate port for multikeylistener",
 			slog.String("namespace", mkl.Namespace),
@@ -204,8 +204,12 @@ func (a *ExtendedBindings) updateBridgeConfigForMultiKeyListener(siteId string, 
 	site.UpdateBridgeConfigForMultiKeyListenerWithHostAndPort(siteId, mkl, "", port, config)
 }
 
+func multiKeyListenerPortName(name string) string {
+	return "multiaddress-" + name
+}
+
 func (a *ExtendedBindings) multiKeyListenerUpdated(mkl *skupperv2alpha1.MultiKeyListener) {
-	allocatedRouterPort, err := a.mapping.GetPortForKey(mkl.Name)
+	allocatedRouterPort, err := a.mapping.GetPortForKey(multiKeyListenerPortName(mkl.Name))
 	if err != nil {
 		bindings_logger.Error("Unable to get port for multikeylistener",
 			slog.String("namespace", mkl.Namespace),
@@ -215,7 +219,7 @@ func (a *ExtendedBindings) multiKeyListenerUpdated(mkl *skupperv2alpha1.MultiKey
 		return
 	}
 	port := Port{
-		Name:       mkl.Name,
+		Name:       multiKeyListenerPortName(mkl.Name),
 		Port:       mkl.Spec.Port,
 		TargetPort: allocatedRouterPort,
 		Protocol:   corev1.ProtocolTCP,
@@ -236,11 +240,11 @@ func (a *ExtendedBindings) multiKeyListenerUpdated(mkl *skupperv2alpha1.MultiKey
 
 func (a *ExtendedBindings) multiKeyListenerDeleted(mkl *skupperv2alpha1.MultiKeyListener) {
 
-	exposed := a.exposed.Unexpose(mkl.Spec.Host, mkl.Name)
+	exposed := a.exposed.Unexpose(mkl.Spec.Host, multiKeyListenerPortName(mkl.Name))
 	if exposed == nil {
 		return
 	}
-	a.mapping.ReleasePortForKey(mkl.Name)
+	a.mapping.ReleasePortForKey(multiKeyListenerPortName(mkl.Name))
 	if exposed.empty() {
 		if err := a.context.Unexpose(mkl.Spec.Host); err != nil {
 			bindings_logger.Error("Error unexposing multikeylistener",
@@ -328,7 +332,7 @@ func (b *ExtendedBindings) UpdateMultiKeyListener(name string, mkl *skupperv2alp
 	if mkl != nil {
 		// Handle host change - unexpose previous host if changed
 		if previousHost, ok := b.multiKeyListenerHosts[name]; ok && previousHost != mkl.Spec.Host {
-			if exposed := b.exposed.Unexpose(previousHost, name); exposed != nil && exposed.empty() {
+			if exposed := b.exposed.Unexpose(previousHost, multiKeyListenerPortName(name)); exposed != nil && exposed.empty() {
 				if err := b.context.Unexpose(previousHost); err != nil {
 					errs = append(errs, err)
 				}
@@ -344,7 +348,7 @@ func (b *ExtendedBindings) UpdateMultiKeyListener(name string, mkl *skupperv2alp
 				b.multiKeyListenerDeleted(existingMkl)
 			}
 			delete(b.multiKeyListenerHosts, name)
-			if exposed := b.exposed.Unexpose(previousHost, name); exposed != nil && exposed.empty() {
+			if exposed := b.exposed.Unexpose(previousHost, multiKeyListenerPortName(name)); exposed != nil && exposed.empty() {
 				if err := b.context.Unexpose(previousHost); err != nil {
 					errs = append(errs, err)
 				}
