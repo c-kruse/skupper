@@ -1091,6 +1091,7 @@ func GetBridgeConfigFromConfigMap(configmap *corev1.ConfigMap) (*BridgeConfig, e
 type ConnectorDifference struct {
 	Deleted            []Connector
 	Added              []Connector
+	Updated            []Connector
 	AddedSslProfiles   map[string]SslProfile
 	AddedProxyProfiles map[string]ProxyProfile
 }
@@ -1323,8 +1324,12 @@ func ConnectorsDifference(actual map[string]Connector, desired *RouterConfig, ig
 
 		//in case the link connector exists but has changed some of its values, it needs to be recreated again
 		if ok && v1.IsLinkConnector() && !v1.Equivalent(actualValue) {
-			result.Deleted = append(result.Deleted, v1)
-			result.Added = append(result.Added, v1)
+			if v1.DiffersOnlyByCost(actualValue) {
+				result.Updated = append(result.Updated, v1)
+			} else {
+				result.Deleted = append(result.Deleted, v1)
+				result.Added = append(result.Added, v1)
+			}
 		}
 	}
 	for key, v1 := range actual {
@@ -1343,7 +1348,7 @@ func ConnectorsDifference(actual map[string]Connector, desired *RouterConfig, ig
 }
 
 func (a *ConnectorDifference) Empty() bool {
-	return len(a.Deleted) == 0 && len(a.Added) == 0
+	return len(a.Deleted) == 0 && len(a.Added) == 0 && len(a.Updated) == 0
 }
 
 func (desired Connector) IsLinkConnector() bool {
@@ -1361,6 +1366,22 @@ func (desired Connector) Equivalent(actual Connector) bool {
 		desired.Host == actual.Host &&
 		desired.Port == actual.Port &&
 		normaliseCost(desired.Cost) == normaliseCost(actual.Cost) &&
+		desired.SslProfile == actual.SslProfile
+}
+
+func (desired Connector) DiffersOnlyByCost(actual Connector) bool {
+	normaliseCost := func(c int32) int32 {
+		if c < 1 {
+			return 1
+		}
+		return c
+	}
+	if normaliseCost(desired.Cost) == normaliseCost(actual.Cost) {
+		return false
+	}
+	return desired.Name == actual.Name &&
+		desired.Host == actual.Host &&
+		desired.Port == actual.Port &&
 		desired.SslProfile == actual.SslProfile
 }
 

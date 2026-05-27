@@ -1330,6 +1330,12 @@ func (a *Agent) UpdateConnectorConfig(changes *ConnectorDifference, checkCertFil
 
 	}
 
+	for _, updated := range changes.Updated {
+		if err := a.Update("io.skupper.router.connector", updated.Name, updated); err != nil {
+			return fmt.Errorf("Error updating connector: %s", err)
+		}
+	}
+
 	return nil
 }
 
