@@ -55,7 +55,8 @@ type MultiKeyListenerStatus struct {
 	Message string `json:"message,omitempty"`
 	// hasDestination is set true when there is at least one connector in the
 	// network with a routing key matched by the strategy.
-	HasDestination bool `json:"hasDestination,omitempty"`
+	// +optional
+	HasDestination bool `json:"hasDestination"`
 
 	Strategy *StrategyStatus `json:"strategy,omitempty"`
 }

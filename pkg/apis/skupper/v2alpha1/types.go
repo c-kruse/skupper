@@ -419,7 +419,7 @@ type ListenerSpec struct {
 
 type ListenerStatus struct {
 	Status               `json:",inline"`
-	HasMatchingConnector bool `json:"hasMatchingConnector,omitempty"`
+	HasMatchingConnector bool `json:"hasMatchingConnector"`
 }
 
 type ServicePort struct {
