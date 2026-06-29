@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,7 +22,6 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
-	"github.com/skupperproject/skupper/internal/network"
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -63,12 +61,6 @@ func skupperRouterConfig() internalinterfaces.TweakListOptionsFunc {
 		options.LabelSelector = "internal.skupper.io/router-config"
 	}
 }
-func skupperNetworkStatus() internalinterfaces.TweakListOptionsFunc {
-	return func(options *metav1.ListOptions) {
-		options.FieldSelector = "metadata.name=skupper-network-status"
-	}
-}
-
 func listenerServices() internalinterfaces.TweakListOptionsFunc {
 	return func(options *metav1.ListOptions) {
 		options.LabelSelector = "internal.skupper.io/listener"
@@ -139,7 +131,6 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.eventProcessor.WatchAttachedConnectors(config.WatchNamespace, filter(controller, controller.checkAttachedConnector))
 	controller.eventProcessor.WatchAttachedConnectorBindings(config.WatchNamespace, filter(controller, controller.checkAttachedConnectorBinding))
 	controller.eventProcessor.WatchLinks(config.WatchNamespace, filter(controller, controller.checkLink))
-	controller.eventProcessor.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
 	controller.eventProcessor.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
 	controller.eventProcessor.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
 	controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
@@ -374,9 +365,15 @@ func (c *Controller) checkSite(key string, site *skupperv2alpha1.Site) error {
 			return nil
 		}
 		site.Status.Controller = &c.self
-		err := c.getSite(site.ObjectMeta.Namespace).Reconcile(site)
-		if err != nil {
+		s := c.getSite(site.ObjectMeta.Namespace)
+		if err := s.Reconcile(site); err != nil {
 			c.log.Info("Error initialising site",
+				slog.String("key", key),
+				slog.Any("error", err),
+			)
+		}
+		if err := s.NetworkStatusUpdated(site.Status.Network); err != nil {
+			c.log.Error("Error updating site network status",
 				slog.String("key", key),
 				slog.Any("error", err),
 			)
@@ -562,25 +559,6 @@ func (c *Controller) routerConfigUpdate(_ string, cm *corev1.ConfigMap) error {
 	}
 	c.getSite(cm.Namespace).CheckSslAndProxyProfiles(config)
 	return nil
-}
-
-func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error {
-	if cm == nil {
-		return nil
-	}
-	encoded := cm.Data["NetworkStatus"]
-	if encoded == "" {
-		c.log.Info("No network status found", slog.String("site", key))
-		return nil
-	}
-	var status network.NetworkStatusInfo
-	err := json.Unmarshal([]byte(encoded), &status)
-	if err != nil {
-		c.log.Error("Error unmarshalling network status", slog.String("site", key), slog.Any("error", err))
-		return nil
-	}
-	c.log.Debug("Updating network status", slog.String("site", key))
-	return c.getSite(cm.ObjectMeta.Namespace).NetworkStatusUpdated(network.ExtractSiteRecords(status))
 }
 
 func filter[V any](controller *Controller, handler func(string, V) error) func(string, V) error {

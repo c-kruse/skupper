@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeListeners implements ListenerInterface
 type fakeListeners struct {
-	*gentype.FakeClientWithList[*v2alpha1.Listener, *v2alpha1.ListenerList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.Listener, *v2alpha1.ListenerList, *skupperv2alpha1.ListenerApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeListeners(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.ListenerInterface {
+func newFakeListeners(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.ListenerInterface {
 	return &fakeListeners{
-		gentype.NewFakeClientWithList[*v2alpha1.Listener, *v2alpha1.ListenerList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.Listener, *v2alpha1.ListenerList, *skupperv2alpha1.ListenerApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("listeners"),

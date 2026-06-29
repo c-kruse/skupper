@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"reflect"
@@ -132,16 +131,14 @@ func TestGeneral(t *testing.T) {
 		{
 			name: "site with network status",
 			k8sObjects: []runtime.Object{
-				f.skupperNetworkStatus("test", fakeNetworkStatus.info()),
 				f.pod("skupper-router-1", "test", map[string]string{"skupper.io/component": "router", "skupper.io/type": "site"}, nil,
 					f.podStatus("10.1.1.10", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 			},
 			skupperObjects: []runtime.Object{
-				f.site("mysite", "test", "", false, false),
+				f.addNetworkStatus(f.site("mysite", "test", "", false, false), fakeNetworkStatus),
 			},
 			waitFunctions: []WaitFunction{
 				isSiteStatusConditionTrue("mysite", "test", skupperv2alpha1.CONDITION_TYPE_RUNNING),
-				isSiteNetworkStatusSet("mysite", "test"),
 			},
 			expectedSiteStatuses: []*skupperv2alpha1.Site{
 				f.addNetworkStatus(f.siteStatus("mysite", "test", skupperv2alpha1.StatusReady, "OK"), fakeNetworkStatus),
@@ -271,12 +268,11 @@ func TestGeneral(t *testing.T) {
 		{
 			name: "expose pods by name",
 			k8sObjects: []runtime.Object{
-				f.skupperNetworkStatus("test", f.networkStatusInfo("mysite", "test", nil, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"}).info()),
 				f.pod("mypod-1", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.10", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 				f.pod("mypod-2", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.11", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 			},
 			skupperObjects: []runtime.Object{
-				f.site("mysite", "test", "", false, false),
+				f.addNetworkStatus(f.site("mysite", "test", "", false, false), f.networkStatusInfo("mysite", "test", nil, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"})),
 				f.connectorWithExposePodsByName("myconnector", "test", "mysvc", "app=foo", 8080),
 				f.listenerWithExposePodsByName("mylistener", "test", "mysvc", "mysvc", 8080),
 			},
@@ -319,12 +315,11 @@ func TestGeneral(t *testing.T) {
 		{
 			name: "expose pods by name with same name",
 			k8sObjects: []runtime.Object{
-				f.skupperNetworkStatus("test", f.networkStatusInfo("mysite", "test", nil, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"}).info()),
 				f.pod("mypod-1", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.10", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 				f.pod("mypod-2", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.11", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 			},
 			skupperObjects: []runtime.Object{
-				f.site("mysite", "test", "", false, false),
+				f.addNetworkStatus(f.site("mysite", "test", "", false, false), f.networkStatusInfo("mysite", "test", nil, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"})),
 				f.connectorWithExposePodsByName("backend", "test", "mysvc", "app=foo", 8080),
 				f.listenerWithExposePodsByName("backend", "test", "mysvc", "mysvc", 8080),
 			},
@@ -704,12 +699,11 @@ func TestUpdate(t *testing.T) {
 		}, {
 			name: "exposePodsByName handles pod delete",
 			k8sObjects: []runtime.Object{
-				f.skupperNetworkStatus("test", f.networkStatusInfo("mysite", "test", map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "mysvc@mypod-1", "mysvc.mypod-2": "mysvc@mypod-2"}, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"}).info()),
 				f.pod("mypod-1", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.10", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 				f.pod("mypod-2", "test", map[string]string{"app": "foo"}, nil, f.podStatus("10.1.1.11", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue))),
 			},
 			skupperObjects: []runtime.Object{
-				f.site("mysite", "test", "", false, false),
+				f.addNetworkStatus(f.site("mysite", "test", "", false, false), f.networkStatusInfo("mysite", "test", map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "mysvc@mypod-1", "mysvc.mypod-2": "mysvc@mypod-2"}, map[string]string{"mysvc": "mysvc", "mysvc.mypod-1": "10.1.1.10", "mysvc.mypod-2": "10.1.1.11"})),
 				f.connectorWithExposePodsByName("myconnector", "test", "mysvc", "app=foo", 8080),
 				f.listenerWithExposePodsByName("mylistener", "test", "mysvc", "mysvc", 8080),
 			},
@@ -1448,18 +1442,9 @@ func (*factory) podCondition(conditionType corev1.PodConditionType, status corev
 }
 
 func (*factory) addNetworkStatus(site *skupperv2alpha1.Site, status *NetworkStatus) *skupperv2alpha1.Site {
-	//add equivalent data to that generated in networkStatusInfo
 	site.Status.Network = network.ExtractSiteRecords(*status.info())
+	site.Status.SitesInNetwork = len(site.Status.Network)
 	return site
-}
-
-func (*factory) skupperNetworkStatus(namespace string, status *network.NetworkStatusInfo) *corev1.ConfigMap {
-	data, _ := json.Marshal(status)
-	cm := fixtures.ConfigMap("skupper-network-status", namespace)
-	cm.Data = map[string]string{
-		"NetworkStatus": string(data),
-	}
-	return cm
 }
 
 func (*factory) siteSizing(name string, namespace string, data map[string]string) *corev1.ConfigMap {
@@ -1716,14 +1701,6 @@ func isSiteStatusConditionTrue(name string, namespace string, condition string) 
 	}
 }
 
-func isSiteNetworkStatusSet(name string, namespace string) WaitFunction {
-	return func(t *testing.T, clients internalclient.Clients) bool {
-		site, err := clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Get(context.Background(), name, metav1.GetOptions{})
-		assert.Assert(t, err)
-		return site.Status.Network != nil
-	}
-}
-
 func isConnectorStatusConditionTrue(name string, namespace string, condition string) WaitFunction {
 	return func(t *testing.T, clients internalclient.Clients) bool {
 		connector, err := clients.GetSkupperClient().SkupperV2alpha1().Connectors(namespace).Get(context.Background(), name, metav1.GetOptions{})
@@ -1932,27 +1909,20 @@ func deleteTargetPod(name string, namespace string) WaitFunction {
 		ctxt := context.Background()
 		err := clients.GetKubeClient().CoreV1().Pods(namespace).Delete(ctxt, name, metav1.DeleteOptions{})
 		assert.Assert(t, err)
-		cm, err := clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctxt, "skupper-network-status", metav1.GetOptions{})
+		site, err := clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Get(ctxt, "mysite", metav1.GetOptions{})
 		assert.Assert(t, err)
-		cm = cm.DeepCopy()
-		var status network.NetworkStatusInfo
-		assert.Assert(t, json.Unmarshal([]byte(cm.Data["NetworkStatus"]), &status))
+		site = site.DeepCopy()
 		suffix := "." + name
-		for sIdx := range status.SiteStatus {
-			for rIdx, rs := range status.SiteStatus[sIdx].RouterStatus {
-				connectors := rs.Connectors[:0]
-				for _, c := range rs.Connectors {
-					if !strings.HasSuffix(c.Address, suffix) {
-						connectors = append(connectors, c)
-					}
+		for i := range site.Status.Network {
+			services := site.Status.Network[i].Services[:0]
+			for _, svc := range site.Status.Network[i].Services {
+				if !strings.HasSuffix(svc.RoutingKey, suffix) {
+					services = append(services, svc)
 				}
-				status.SiteStatus[sIdx].RouterStatus[rIdx].Connectors = connectors
 			}
+			site.Status.Network[i].Services = services
 		}
-		sb, err := json.Marshal(status)
-		assert.Assert(t, err)
-		cm.Data["NetworkStatus"] = string(sb)
-		_, err = clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Update(ctxt, cm, metav1.UpdateOptions{})
+		_, err = clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).UpdateStatus(ctxt, site, metav1.UpdateOptions{})
 		assert.Assert(t, err)
 		return true
 	}

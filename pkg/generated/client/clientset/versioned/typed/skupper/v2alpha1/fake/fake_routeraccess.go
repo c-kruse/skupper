@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeRouterAccesses implements RouterAccessInterface
 type fakeRouterAccesses struct {
-	*gentype.FakeClientWithList[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList, *skupperv2alpha1.RouterAccessApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeRouterAccesses(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.RouterAccessInterface {
+func newFakeRouterAccesses(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.RouterAccessInterface {
 	return &fakeRouterAccesses{
-		gentype.NewFakeClientWithList[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.RouterAccess, *v2alpha1.RouterAccessList, *skupperv2alpha1.RouterAccessApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("routeraccesses"),

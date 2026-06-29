@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type AccessTokenInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.AccessTokenList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.AccessToken, err error)
+	Apply(ctx context.Context, accessToken *applyconfigurationskupperv2alpha1.AccessTokenApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AccessToken, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, accessToken *applyconfigurationskupperv2alpha1.AccessTokenApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AccessToken, err error)
 	AccessTokenExpansion
 }
 
 // accessTokens implements AccessTokenInterface
 type accessTokens struct {
-	*gentype.ClientWithList[*skupperv2alpha1.AccessToken, *skupperv2alpha1.AccessTokenList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.AccessToken, *skupperv2alpha1.AccessTokenList, *applyconfigurationskupperv2alpha1.AccessTokenApplyConfiguration]
 }
 
 // newAccessTokens returns a AccessTokens
 func newAccessTokens(c *SkupperV2alpha1Client, namespace string) *accessTokens {
 	return &accessTokens{
-		gentype.NewClientWithList[*skupperv2alpha1.AccessToken, *skupperv2alpha1.AccessTokenList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.AccessToken, *skupperv2alpha1.AccessTokenList, *applyconfigurationskupperv2alpha1.AccessTokenApplyConfiguration](
 			"accesstokens",
 			c.RESTClient(),
 			scheme.ParameterCodec,

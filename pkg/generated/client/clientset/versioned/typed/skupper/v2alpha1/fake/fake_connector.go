@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeConnectors implements ConnectorInterface
 type fakeConnectors struct {
-	*gentype.FakeClientWithList[*v2alpha1.Connector, *v2alpha1.ConnectorList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.Connector, *v2alpha1.ConnectorList, *skupperv2alpha1.ConnectorApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeConnectors(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.ConnectorInterface {
+func newFakeConnectors(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.ConnectorInterface {
 	return &fakeConnectors{
-		gentype.NewFakeClientWithList[*v2alpha1.Connector, *v2alpha1.ConnectorList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.Connector, *v2alpha1.ConnectorList, *skupperv2alpha1.ConnectorApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("connectors"),

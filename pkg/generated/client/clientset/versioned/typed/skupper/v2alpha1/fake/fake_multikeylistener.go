@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeMultiKeyListeners implements MultiKeyListenerInterface
 type fakeMultiKeyListeners struct {
-	*gentype.FakeClientWithList[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList, *skupperv2alpha1.MultiKeyListenerApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeMultiKeyListeners(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.MultiKeyListenerInterface {
+func newFakeMultiKeyListeners(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.MultiKeyListenerInterface {
 	return &fakeMultiKeyListeners{
-		gentype.NewFakeClientWithList[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.MultiKeyListener, *v2alpha1.MultiKeyListenerList, *skupperv2alpha1.MultiKeyListenerApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("multikeylisteners"),

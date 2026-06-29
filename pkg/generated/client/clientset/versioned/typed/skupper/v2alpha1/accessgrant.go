@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type AccessGrantInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.AccessGrantList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.AccessGrant, err error)
+	Apply(ctx context.Context, accessGrant *applyconfigurationskupperv2alpha1.AccessGrantApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AccessGrant, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, accessGrant *applyconfigurationskupperv2alpha1.AccessGrantApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AccessGrant, err error)
 	AccessGrantExpansion
 }
 
 // accessGrants implements AccessGrantInterface
 type accessGrants struct {
-	*gentype.ClientWithList[*skupperv2alpha1.AccessGrant, *skupperv2alpha1.AccessGrantList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.AccessGrant, *skupperv2alpha1.AccessGrantList, *applyconfigurationskupperv2alpha1.AccessGrantApplyConfiguration]
 }
 
 // newAccessGrants returns a AccessGrants
 func newAccessGrants(c *SkupperV2alpha1Client, namespace string) *accessGrants {
 	return &accessGrants{
-		gentype.NewClientWithList[*skupperv2alpha1.AccessGrant, *skupperv2alpha1.AccessGrantList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.AccessGrant, *skupperv2alpha1.AccessGrantList, *applyconfigurationskupperv2alpha1.AccessGrantApplyConfiguration](
 			"accessgrants",
 			c.RESTClient(),
 			scheme.ParameterCodec,

@@ -1126,20 +1126,19 @@ func Test_NetworkStatusUpdate(t *testing.T) {
 		skupperErrorMessage string
 	}{
 		{
-			name: "no site",
+			name: "no matching site record",
 			args: args{
 				siteRecord: []skupperv2alpha1.SiteRecord{
 					{
-						Id:        "",
-						Name:      "site1",
+						Id:        "some-other-site",
+						Name:      "other",
 						Namespace: "test",
 						Platform:  "kubernetes",
 						Version:   "1.8.0",
 					},
 				},
 			},
-			wantErr:             true,
-			skupperErrorMessage: "NotFound",
+			wantErr: false,
 		},
 		{
 			name: "site1",
@@ -1197,19 +1196,13 @@ func Test_NetworkStatusUpdate(t *testing.T) {
 				t.Errorf("Site.NetworkStatusUpdated() error = %v, wantErr %v", err, tt.wantErr)
 			}
 
-			if tt.wantErr == false {
-				// verify network was updated
-				foundConfig := false
-				for _, network := range s.site.Status.Network {
-					if network.Platform == "podman" && network.Version == "1.8.0" {
-						foundConfig = true
-					}
-					if network.Platform == "kubernetes" && network.Version == "1.8.0" {
-						foundConfig = true
-					}
+			if tt.wantErr == false && tt.linkconfig != nil {
+				link, ok := s.links[tt.linkconfig.ObjectMeta.Name]
+				if !ok {
+					t.Fatalf("expected link %q to be tracked", tt.linkconfig.ObjectMeta.Name)
 				}
-				if foundConfig == false {
-					t.Errorf("Site.NetworkStatusUpdated() network not updated")
+				if got := link.Definition().Status.RemoteSiteName; got != "east" {
+					t.Errorf("Site.NetworkStatusUpdated() link remote site name = %q, want %q", got, "east")
 				}
 			}
 		})

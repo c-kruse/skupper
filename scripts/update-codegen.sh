@@ -31,6 +31,7 @@ kube::codegen::gen_helpers \
 
 kube::codegen::gen_client \
     --with-watch \
+    --with-applyconfig \
     --output-dir "${SCRIPT_ROOT}/pkg/generated/client" \
     --output-pkg "github.com/skupperproject/skupper/pkg/generated/client" \
     --boilerplate "${SCRIPT_ROOT}/scripts/boilerplate.go.txt" \

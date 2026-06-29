@@ -14,42 +14,21 @@ import (
 	"github.com/skupperproject/skupper/internal/flow"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	kubeflow "github.com/skupperproject/skupper/internal/kube/flow"
+	"github.com/skupperproject/skupper/internal/network"
 	"github.com/skupperproject/skupper/internal/version"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	skupperclient "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned"
 	"github.com/skupperproject/skupper/pkg/vanflow"
 	"github.com/skupperproject/skupper/pkg/vanflow/session"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1informer "k8s.io/client-go/informers/core/v1"
-	"k8s.io/client-go/kubernetes"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
 
-type StatusSyncClient struct {
-	client typedcorev1.ConfigMapInterface
-}
-
-func (s *StatusSyncClient) Logger() *slog.Logger {
-	logger := slog.New(slog.Default().Handler()).With(
-		slog.String("component", "kube.flow.statusSync"),
-	)
-	return logger
-}
-
-func (s *StatusSyncClient) Get(ctx context.Context) (*corev1.ConfigMap, error) {
-	return s.client.Get(ctx, types.NetworkStatusConfigMapName, metav1.GetOptions{})
-}
-
-func (s *StatusSyncClient) Update(ctx context.Context, latest *corev1.ConfigMap) error {
-	_, err := s.client.Update(ctx, latest, metav1.UpdateOptions{})
-	return err
-}
-
 func siteCollector(ctx context.Context, cli *internalclient.KubeClient) {
-	siteData := map[string]string{}
 	platform := config.GetPlatform()
 	if platform != types.PlatformKubernetes {
 		return
@@ -59,27 +38,63 @@ func siteCollector(ctx context.Context, cli *internalclient.KubeClient) {
 		slog.Error("Failed to get transport deployment", slog.Any("error", err))
 		os.Exit(1)
 	}
-
-	owner := metav1.OwnerReference{
-		APIVersion: "apps/v1",
-		Kind:       "Deployment",
-		Name:       current.ObjectMeta.Name,
-		UID:        current.ObjectMeta.UID,
-	}
-
-	existing, err := newConfigMap(types.NetworkStatusConfigMapName, &siteData, nil, nil, &owner, cli.Namespace, cli.Kube)
-	if err != nil && existing == nil {
-		slog.Error("Failed to create site status config map", slog.Any("error", err))
+	if len(current.OwnerReferences) < 1 {
+		slog.Error("transport deployment had no owner required to infer site name")
 		os.Exit(1)
 	}
+	siteName := current.OwnerReferences[0].Name
 
 	factory := session.NewContainerFactory("amqp://localhost:5672", session.ContainerConfig{ContainerID: "kube-flow-collector"})
-	statusSyncClient := &StatusSyncClient{
-		client: cli.Kube.CoreV1().ConfigMaps(cli.Namespace),
+	publishSiteStatus := func(ctx context.Context, info network.NetworkStatusInfo) error {
+		return applySiteNetworkStatus(ctx, cli.GetSkupperClient(), cli.Namespace, siteName, info)
 	}
-	statusSync := flow.NewStatusSync(factory, nil, statusSyncClient, types.NetworkStatusConfigMapName)
+	statusSync := flow.NewStatusSync(factory, nil, nil, "", flow.WithPublishHandler(publishSiteStatus))
 	go statusSync.Run(ctx)
+}
 
+const fieldManagerNetworkStatus = "skupper-kube-adaptor"
+
+func applySiteNetworkStatus(ctx context.Context, client skupperclient.Interface, namespace, siteName string, info network.NetworkStatusInfo) error {
+	records := network.ExtractSiteRecords(info)
+	status := applyconfigurationskupperv2alpha1.SiteStatus().
+		WithSitesInNetwork(len(records))
+	for _, record := range records {
+		status.WithNetwork(siteRecordApplyConfiguration(record))
+	}
+	site := applyconfigurationskupperv2alpha1.Site(siteName, namespace).WithStatus(status)
+	_, err := client.SkupperV2alpha1().Sites(namespace).ApplyStatus(ctx, site, metav1.ApplyOptions{
+		FieldManager: fieldManagerNetworkStatus,
+		Force:        true,
+	})
+	return err
+}
+
+func siteRecordApplyConfiguration(record skupperv2alpha1.SiteRecord) *applyconfigurationskupperv2alpha1.SiteRecordApplyConfiguration {
+	rec := applyconfigurationskupperv2alpha1.SiteRecord().
+		WithId(record.Id).
+		WithName(record.Name).
+		WithNamespace(record.Namespace).
+		WithPlatform(record.Platform).
+		WithVersion(record.Version)
+	for _, link := range record.Links {
+		rec.WithLinks(applyconfigurationskupperv2alpha1.LinkRecord().
+			WithName(link.Name).
+			WithRemoteSiteId(link.RemoteSiteId).
+			WithRemoteSiteName(link.RemoteSiteName).
+			WithOperational(link.Operational))
+	}
+	for _, service := range record.Services {
+		svc := applyconfigurationskupperv2alpha1.ServiceRecord().
+			WithRoutingKey(service.RoutingKey)
+		if len(service.Connectors) > 0 {
+			svc.WithConnectors(service.Connectors...)
+		}
+		if len(service.Listeners) > 0 {
+			svc.WithListeners(service.Listeners...)
+		}
+		rec.WithServices(svc)
+	}
+	return rec
 }
 
 func startFlowController(ctx context.Context, cli *internalclient.KubeClient) error {
@@ -235,47 +250,3 @@ func deploymentName() string {
 
 }
 
-func newConfigMap(name string, data *map[string]string, labels *map[string]string, annotations *map[string]string, owner *metav1.OwnerReference, namespace string, kubeclient kubernetes.Interface) (*corev1.ConfigMap, error) {
-	configMaps := kubeclient.CoreV1().ConfigMaps(namespace)
-	existing, err := configMaps.Get(context.TODO(), name, metav1.GetOptions{})
-	if err == nil {
-		//TODO:  already exists
-		return existing, nil
-	} else if errors.IsNotFound(err) {
-		cm := &corev1.ConfigMap{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "v1",
-				Kind:       "ConfigMap",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name,
-			},
-		}
-
-		if data != nil {
-			cm.Data = *data
-		}
-		if labels != nil {
-			cm.ObjectMeta.Labels = *labels
-		}
-		if annotations != nil {
-			cm.ObjectMeta.Annotations = *annotations
-		}
-		if owner != nil {
-			cm.ObjectMeta.OwnerReferences = []metav1.OwnerReference{
-				*owner,
-			}
-		}
-
-		created, err := configMaps.Create(context.TODO(), cm, metav1.CreateOptions{})
-
-		if err != nil {
-			return nil, fmt.Errorf("Failed to create config map: %w", err)
-		} else {
-			return created, nil
-		}
-	} else {
-		cm := &corev1.ConfigMap{}
-		return cm, fmt.Errorf("Failed to check existing config maps: %w", err)
-	}
-}

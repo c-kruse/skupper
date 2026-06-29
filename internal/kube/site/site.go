@@ -14,8 +14,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/skupperproject/skupper/api/types"
@@ -31,6 +31,7 @@ import (
 	"github.com/skupperproject/skupper/internal/version"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 )
 
 type SecuredAccessFactory interface {
@@ -66,6 +67,7 @@ type Site struct {
 	profiles      *secrets.ProfilesWatcher
 	disableSecCtx bool
 	leadListeners map[string]string
+	lastNetwork   []skupperv2alpha1.SiteRecord
 }
 
 func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling, disableSecCtx bool) *Site {
@@ -523,6 +525,12 @@ func (s *Site) checkRole(ctxt context.Context) error {
 			Verbs:     []string{"get", "list", "watch", "create", "update", "delete"},
 			APIGroups: []string{"coordination.k8s.io"},
 			Resources: []string{"leases"},
+		},
+		//needed for the kube-adaptor to publish observed network status to the site
+		{
+			Verbs:     []string{"get", "patch"},
+			APIGroups: []string{"skupper.io"},
+			Resources: []string{"sites/status"},
 		},
 	}
 	desired := &rbacv1.Role{
@@ -1314,12 +1322,8 @@ func (s *Site) updateResolved() error {
 }
 
 func (s *Site) updateSiteStatus() error {
-	updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Sites(s.site.ObjectMeta.Namespace).UpdateStatus(context.TODO(), s.site, metav1.UpdateOptions{})
-	if err != nil {
-		return err
-	}
-	s.site = updated
-	return nil
+	_, err := s.UpdateSiteStatus(s.site)
+	return err
 }
 
 func (s *Site) updateAccessTokensForDeletedSite(namespace string) {
@@ -1379,40 +1383,10 @@ func (s *Site) CheckSslAndProxyProfiles(config *qdr.RouterConfig) error {
 }
 
 func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error {
-	if s.site == nil || reflect.DeepEqual(s.site.Status.Network, network) {
+	if s.site == nil || reflect.DeepEqual(s.lastNetwork, network) {
 		return nil
 	}
-	prev := s.site.DeepCopy()
-	s.site.Status.Network = network
-	s.site.Status.SitesInNetwork = len(network)
-	updated, err := s.UpdateSiteStatus(s.site)
-	if err != nil {
-		return err
-	}
-	s.site = updated
-	// UpdateStatus on fake clients (and some responses) can drop unrelated conditions.
-	if meta.FindStatusCondition(s.site.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_RUNNING) == nil ||
-		(len(s.site.Status.Network) == 0 && len(network) > 0) {
-		for _, typ := range []string{
-			skupperv2alpha1.CONDITION_TYPE_CONFIGURED,
-			skupperv2alpha1.CONDITION_TYPE_RUNNING,
-			skupperv2alpha1.CONDITION_TYPE_RESOLVED,
-		} {
-			if meta.FindStatusCondition(s.site.Status.Conditions, typ) == nil {
-				if old := meta.FindStatusCondition(prev.Status.Conditions, typ); old != nil {
-					meta.SetStatusCondition(&s.site.Status.Conditions, *old)
-				}
-			}
-		}
-		s.site.Status.Network = network
-		s.site.Status.SitesInNetwork = len(network)
-		s.site.RefreshAggregatedStatus()
-		updated, err = s.UpdateSiteStatus(s.site)
-		if err != nil {
-			return err
-		}
-		s.site = updated
-	}
+	s.lastNetwork = network
 
 	// find the site record for this site, then process the link records it contains
 	linkRecords := internalnetwork.GetLinkRecordsForSite(s.site.GetSiteId(), network)
@@ -1456,11 +1430,53 @@ func (s *Site) markSiteInactive(site *skupperv2alpha1.Site, err error) error {
 }
 
 func (s *Site) UpdateSiteStatus(site *skupperv2alpha1.Site) (*skupperv2alpha1.Site, error) {
-	updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Sites(site.ObjectMeta.Namespace).UpdateStatus(context.TODO(), site, metav1.UpdateOptions{})
+	updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Sites(site.ObjectMeta.Namespace).ApplyStatus(
+		context.TODO(),
+		siteStatusApplyConfiguration(site),
+		metav1.ApplyOptions{FieldManager: "skupper-controller", Force: true},
+	)
 	if err != nil {
 		return nil, err
 	}
 	return updated, nil
+}
+
+func siteStatusApplyConfiguration(site *skupperv2alpha1.Site) *applyconfigurationskupperv2alpha1.SiteApplyConfiguration {
+	status := applyconfigurationskupperv2alpha1.SiteStatus().
+		WithStatusType(site.Status.StatusType).
+		WithMessage(site.Status.Message)
+
+	for _, condition := range site.Status.Conditions {
+		status.WithConditions(metav1apply.Condition().
+			WithType(condition.Type).
+			WithStatus(condition.Status).
+			WithReason(condition.Reason).
+			WithMessage(condition.Message).
+			WithObservedGeneration(condition.ObservedGeneration).
+			WithLastTransitionTime(condition.LastTransitionTime))
+	}
+
+	for _, endpoint := range site.Status.Endpoints {
+		status.WithEndpoints(applyconfigurationskupperv2alpha1.Endpoint().
+			WithName(endpoint.Name).
+			WithHost(endpoint.Host).
+			WithPort(endpoint.Port).
+			WithGroup(endpoint.Group))
+	}
+
+	if site.Status.DefaultIssuer != "" {
+		status.WithDefaultIssuer(site.Status.DefaultIssuer)
+	}
+
+	if site.Status.Controller != nil {
+		status.WithController(applyconfigurationskupperv2alpha1.Controller().
+			WithName(site.Status.Controller.Name).
+			WithNamespace(site.Status.Controller.Namespace).
+			WithVersion(site.Status.Controller.Version))
+	}
+
+	return applyconfigurationskupperv2alpha1.Site(site.Name, site.Namespace).
+		WithStatus(status)
 }
 
 func (s *Site) CheckSecuredAccess(name string, sa *skupperv2alpha1.SecuredAccess) error {

@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeAttachedConnectors implements AttachedConnectorInterface
 type fakeAttachedConnectors struct {
-	*gentype.FakeClientWithList[*v2alpha1.AttachedConnector, *v2alpha1.AttachedConnectorList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.AttachedConnector, *v2alpha1.AttachedConnectorList, *skupperv2alpha1.AttachedConnectorApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeAttachedConnectors(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.AttachedConnectorInterface {
+func newFakeAttachedConnectors(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.AttachedConnectorInterface {
 	return &fakeAttachedConnectors{
-		gentype.NewFakeClientWithList[*v2alpha1.AttachedConnector, *v2alpha1.AttachedConnectorList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.AttachedConnector, *v2alpha1.AttachedConnectorList, *skupperv2alpha1.AttachedConnectorApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("attachedconnectors"),

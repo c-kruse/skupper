@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeCertificates implements CertificateInterface
 type fakeCertificates struct {
-	*gentype.FakeClientWithList[*v2alpha1.Certificate, *v2alpha1.CertificateList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.Certificate, *v2alpha1.CertificateList, *skupperv2alpha1.CertificateApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeCertificates(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.CertificateInterface {
+func newFakeCertificates(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.CertificateInterface {
 	return &fakeCertificates{
-		gentype.NewFakeClientWithList[*v2alpha1.Certificate, *v2alpha1.CertificateList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.Certificate, *v2alpha1.CertificateList, *skupperv2alpha1.CertificateApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("certificates"),

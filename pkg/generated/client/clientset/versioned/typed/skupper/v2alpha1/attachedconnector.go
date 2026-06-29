@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type AttachedConnectorInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.AttachedConnectorList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.AttachedConnector, err error)
+	Apply(ctx context.Context, attachedConnector *applyconfigurationskupperv2alpha1.AttachedConnectorApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AttachedConnector, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, attachedConnector *applyconfigurationskupperv2alpha1.AttachedConnectorApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.AttachedConnector, err error)
 	AttachedConnectorExpansion
 }
 
 // attachedConnectors implements AttachedConnectorInterface
 type attachedConnectors struct {
-	*gentype.ClientWithList[*skupperv2alpha1.AttachedConnector, *skupperv2alpha1.AttachedConnectorList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.AttachedConnector, *skupperv2alpha1.AttachedConnectorList, *applyconfigurationskupperv2alpha1.AttachedConnectorApplyConfiguration]
 }
 
 // newAttachedConnectors returns a AttachedConnectors
 func newAttachedConnectors(c *SkupperV2alpha1Client, namespace string) *attachedConnectors {
 	return &attachedConnectors{
-		gentype.NewClientWithList[*skupperv2alpha1.AttachedConnector, *skupperv2alpha1.AttachedConnectorList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.AttachedConnector, *skupperv2alpha1.AttachedConnectorList, *applyconfigurationskupperv2alpha1.AttachedConnectorApplyConfiguration](
 			"attachedconnectors",
 			c.RESTClient(),
 			scheme.ParameterCodec,

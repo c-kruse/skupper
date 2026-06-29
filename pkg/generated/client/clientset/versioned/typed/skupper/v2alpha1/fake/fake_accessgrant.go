@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeAccessGrants implements AccessGrantInterface
 type fakeAccessGrants struct {
-	*gentype.FakeClientWithList[*v2alpha1.AccessGrant, *v2alpha1.AccessGrantList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.AccessGrant, *v2alpha1.AccessGrantList, *skupperv2alpha1.AccessGrantApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeAccessGrants(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.AccessGrantInterface {
+func newFakeAccessGrants(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.AccessGrantInterface {
 	return &fakeAccessGrants{
-		gentype.NewFakeClientWithList[*v2alpha1.AccessGrant, *v2alpha1.AccessGrantList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.AccessGrant, *v2alpha1.AccessGrantList, *skupperv2alpha1.AccessGrantApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("accessgrants"),

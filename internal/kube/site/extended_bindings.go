@@ -26,6 +26,7 @@ type ExtendedBindings struct {
 	controller            *watchers.EventProcessor
 	site                  *Site
 	logger                *slog.Logger
+	network               []skupperv2alpha1.SiteRecord
 }
 
 func NewExtendedBindings(controller *watchers.EventProcessor, profilePath string) *ExtendedBindings {
@@ -299,7 +300,13 @@ func (b *ExtendedBindings) UpdateListener(name string, listener *skupperv2alpha1
 				updateConfig = true
 			}
 		} else {
-			b.perTargetListeners[name] = newPerTargetListener(listener, b.logger)
+			ptl := newPerTargetListener(listener, b.logger)
+			b.perTargetListeners[name] = ptl
+			if update, err := ptl.extractTargets(b.network, b.mapping, b.exposed, b.context); err != nil {
+				errs = append(errs, err)
+			} else if update {
+				updateConfig = true
+			}
 		}
 	} else {
 		if existing, ok := b.perTargetListeners[name]; ok {
@@ -525,6 +532,7 @@ func (b *ExtendedBindings) attachedConnectorUnreferenced(namespace string, name 
 }
 
 func (b *ExtendedBindings) networkUpdated(network []skupperv2alpha1.SiteRecord) qdr.ConfigUpdate {
+	b.network = network
 	changed := false
 	for _, ptl := range b.perTargetListeners {
 		update, err := ptl.extractTargets(network, b.mapping, b.exposed, b.context)

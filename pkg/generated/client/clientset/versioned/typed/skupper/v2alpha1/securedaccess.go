@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type SecuredAccessInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.SecuredAccessList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.SecuredAccess, err error)
+	Apply(ctx context.Context, securedAccess *applyconfigurationskupperv2alpha1.SecuredAccessApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.SecuredAccess, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, securedAccess *applyconfigurationskupperv2alpha1.SecuredAccessApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.SecuredAccess, err error)
 	SecuredAccessExpansion
 }
 
 // securedAccesses implements SecuredAccessInterface
 type securedAccesses struct {
-	*gentype.ClientWithList[*skupperv2alpha1.SecuredAccess, *skupperv2alpha1.SecuredAccessList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.SecuredAccess, *skupperv2alpha1.SecuredAccessList, *applyconfigurationskupperv2alpha1.SecuredAccessApplyConfiguration]
 }
 
 // newSecuredAccesses returns a SecuredAccesses
 func newSecuredAccesses(c *SkupperV2alpha1Client, namespace string) *securedAccesses {
 	return &securedAccesses{
-		gentype.NewClientWithList[*skupperv2alpha1.SecuredAccess, *skupperv2alpha1.SecuredAccessList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.SecuredAccess, *skupperv2alpha1.SecuredAccessList, *applyconfigurationskupperv2alpha1.SecuredAccessApplyConfiguration](
 			"securedaccesses",
 			c.RESTClient(),
 			scheme.ParameterCodec,

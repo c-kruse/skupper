@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type ConnectorInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.ConnectorList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.Connector, err error)
+	Apply(ctx context.Context, connector *applyconfigurationskupperv2alpha1.ConnectorApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.Connector, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, connector *applyconfigurationskupperv2alpha1.ConnectorApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.Connector, err error)
 	ConnectorExpansion
 }
 
 // connectors implements ConnectorInterface
 type connectors struct {
-	*gentype.ClientWithList[*skupperv2alpha1.Connector, *skupperv2alpha1.ConnectorList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.Connector, *skupperv2alpha1.ConnectorList, *applyconfigurationskupperv2alpha1.ConnectorApplyConfiguration]
 }
 
 // newConnectors returns a Connectors
 func newConnectors(c *SkupperV2alpha1Client, namespace string) *connectors {
 	return &connectors{
-		gentype.NewClientWithList[*skupperv2alpha1.Connector, *skupperv2alpha1.ConnectorList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.Connector, *skupperv2alpha1.ConnectorList, *applyconfigurationskupperv2alpha1.ConnectorApplyConfiguration](
 			"connectors",
 			c.RESTClient(),
 			scheme.ParameterCodec,

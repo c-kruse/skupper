@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeSites implements SiteInterface
 type fakeSites struct {
-	*gentype.FakeClientWithList[*v2alpha1.Site, *v2alpha1.SiteList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.Site, *v2alpha1.SiteList, *skupperv2alpha1.SiteApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeSites(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.SiteInterface {
+func newFakeSites(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.SiteInterface {
 	return &fakeSites{
-		gentype.NewFakeClientWithList[*v2alpha1.Site, *v2alpha1.SiteList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.Site, *v2alpha1.SiteList, *skupperv2alpha1.SiteApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("sites"),

@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeAccessTokens implements AccessTokenInterface
 type fakeAccessTokens struct {
-	*gentype.FakeClientWithList[*v2alpha1.AccessToken, *v2alpha1.AccessTokenList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.AccessToken, *v2alpha1.AccessTokenList, *skupperv2alpha1.AccessTokenApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeAccessTokens(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.AccessTokenInterface {
+func newFakeAccessTokens(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.AccessTokenInterface {
 	return &fakeAccessTokens{
-		gentype.NewFakeClientWithList[*v2alpha1.AccessToken, *v2alpha1.AccessTokenList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.AccessToken, *v2alpha1.AccessTokenList, *skupperv2alpha1.AccessTokenApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("accesstokens"),

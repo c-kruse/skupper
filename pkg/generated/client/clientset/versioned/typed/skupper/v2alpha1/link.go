@@ -22,6 +22,7 @@ import (
 	context "context"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	applyconfigurationskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
 	scheme "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -47,18 +48,21 @@ type LinkInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*skupperv2alpha1.LinkList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *skupperv2alpha1.Link, err error)
+	Apply(ctx context.Context, link *applyconfigurationskupperv2alpha1.LinkApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.Link, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, link *applyconfigurationskupperv2alpha1.LinkApplyConfiguration, opts v1.ApplyOptions) (result *skupperv2alpha1.Link, err error)
 	LinkExpansion
 }
 
 // links implements LinkInterface
 type links struct {
-	*gentype.ClientWithList[*skupperv2alpha1.Link, *skupperv2alpha1.LinkList]
+	*gentype.ClientWithListAndApply[*skupperv2alpha1.Link, *skupperv2alpha1.LinkList, *applyconfigurationskupperv2alpha1.LinkApplyConfiguration]
 }
 
 // newLinks returns a Links
 func newLinks(c *SkupperV2alpha1Client, namespace string) *links {
 	return &links{
-		gentype.NewClientWithList[*skupperv2alpha1.Link, *skupperv2alpha1.LinkList](
+		gentype.NewClientWithListAndApply[*skupperv2alpha1.Link, *skupperv2alpha1.LinkList, *applyconfigurationskupperv2alpha1.LinkApplyConfiguration](
 			"links",
 			c.RESTClient(),
 			scheme.ParameterCodec,

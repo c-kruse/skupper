@@ -119,7 +119,7 @@ func (cmd *CmdDebug) InputToOptions() {
 }
 
 func (cmd *CmdDebug) Run() error {
-	configMaps := []string{"skupper-router", "skupper-network-status", "prometheus-server-config"}
+	configMaps := []string{"skupper-router", "prometheus-server-config"}
 	routerServices := []string{"skupper", "skupper-router", "skupper-router-local", "network-observer", "network-observer-prometheus", "skupper-grant-server"} //, "skupper-prometheus"}
 	controllerServices := []string{"skupper-grant-server"}
 	//routes := []string{"claims", "skupper", "skupper-edge", "skupper-inter-router"}

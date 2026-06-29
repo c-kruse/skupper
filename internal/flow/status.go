@@ -36,10 +36,11 @@ type StatusSync struct {
 	records       store.Interface
 	recordMapping eventsource.RecordStoreMap
 
-	session       session.Container
-	discovery     *eventsource.Discovery
-	client        StatusSyncClient
-	configMapName string
+	session         session.Container
+	discovery       *eventsource.Discovery
+	client          StatusSyncClient
+	configMapName   string
+	publishHandlers []PublishHandler
 
 	logger *slog.Logger
 	ctx    context.Context
@@ -59,9 +60,26 @@ type StatusSyncClient interface {
 	Update(ctx context.Context, latest *corev1.ConfigMap) error
 }
 
-func NewStatusSync(factory session.ContainerFactory, localSources map[string][]store.Interface, client StatusSyncClient, configMap string) *StatusSync {
+// PublishHandler runs on every published network status change, alongside the
+// configmap publish.
+type PublishHandler func(ctx context.Context, info network.NetworkStatusInfo) error
 
-	logger := client.Logger()
+type StatusSyncOption func(*StatusSync)
+
+func WithPublishHandler(handler PublishHandler) StatusSyncOption {
+	return func(s *StatusSync) {
+		s.publishHandlers = append(s.publishHandlers, handler)
+	}
+}
+
+func NewStatusSync(factory session.ContainerFactory, localSources map[string][]store.Interface, client StatusSyncClient, configMap string, opts ...StatusSyncOption) *StatusSync {
+
+	var logger *slog.Logger
+	if client != nil {
+		logger = client.Logger()
+	} else {
+		logger = slog.New(slog.Default().Handler()).With(slog.String("component", "kube.flow.statusSync"))
+	}
 	sessionCtr := factory.Create()
 	sessionCtr.OnSessionError(func(err error) {
 		logger.Error("session error on discovery container", slog.Any("error", err))
@@ -103,6 +121,10 @@ func NewStatusSync(factory session.ContainerFactory, localSources map[string][]s
 	}
 
 	s.records = recordsStore
+
+	for _, opt := range opts {
+		opt(s)
+	}
 
 	return s
 }
@@ -311,26 +333,32 @@ func (s *StatusSync) build() network.NetworkStatusInfo {
 func (s *StatusSync) publish(info network.NetworkStatusInfo) error {
 	ctx, cancel := context.WithTimeout(s.ctx, time.Second*10)
 	defer cancel()
-	bs, err := json.Marshal(info)
-	if err != nil {
-		return fmt.Errorf("failed to marshal network info: %s", err)
-	}
-	networkStatus := string(bs)
-	data := map[string]string{"NetworkStatus": networkStatus}
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.client.Get(ctx)
+	if s.client != nil {
+		bs, err := json.Marshal(info)
 		if err != nil {
+			return fmt.Errorf("failed to marshal network info: %s", err)
+		}
+		data := map[string]string{"NetworkStatus": string(bs)}
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current, err := s.client.Get(ctx)
+			if err != nil {
+				return err
+			}
+			current.Data = data
+			err = s.client.Update(ctx, current)
+			if err != nil {
+				s.logger.Error("updating network status", slog.Any("error", err))
+			}
 			return err
-		}
-		current.Data = data
-		err = s.client.Update(ctx, current)
+		})
 		if err != nil {
-			s.logger.Error("updating network status", slog.Any("error", err))
+			return fmt.Errorf("failed to update configmap: %s", err)
 		}
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("failed to update configmap: %s", err)
+	}
+	for _, handler := range s.publishHandlers {
+		if err := handler(ctx, info); err != nil {
+			return fmt.Errorf("failed to publish network status: %s", err)
+		}
 	}
 	return nil
 }

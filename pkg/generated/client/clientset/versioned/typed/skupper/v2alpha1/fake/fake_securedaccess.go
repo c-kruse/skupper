@@ -20,19 +20,20 @@ package fake
 
 import (
 	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
-	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/applyconfiguration/skupper/v2alpha1"
+	typedskupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 
 // fakeSecuredAccesses implements SecuredAccessInterface
 type fakeSecuredAccesses struct {
-	*gentype.FakeClientWithList[*v2alpha1.SecuredAccess, *v2alpha1.SecuredAccessList]
+	*gentype.FakeClientWithListAndApply[*v2alpha1.SecuredAccess, *v2alpha1.SecuredAccessList, *skupperv2alpha1.SecuredAccessApplyConfiguration]
 	Fake *FakeSkupperV2alpha1
 }
 
-func newFakeSecuredAccesses(fake *FakeSkupperV2alpha1, namespace string) skupperv2alpha1.SecuredAccessInterface {
+func newFakeSecuredAccesses(fake *FakeSkupperV2alpha1, namespace string) typedskupperv2alpha1.SecuredAccessInterface {
 	return &fakeSecuredAccesses{
-		gentype.NewFakeClientWithList[*v2alpha1.SecuredAccess, *v2alpha1.SecuredAccessList](
+		gentype.NewFakeClientWithListAndApply[*v2alpha1.SecuredAccess, *v2alpha1.SecuredAccessList, *skupperv2alpha1.SecuredAccessApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v2alpha1.SchemeGroupVersion.WithResource("securedaccesses"),
