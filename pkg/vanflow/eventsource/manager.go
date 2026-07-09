@@ -13,6 +13,15 @@ import (
 	"github.com/skupperproject/skupper/pkg/vanflow/store"
 )
 
+const (
+	defaultRecordSendTimeout = 5 * time.Second
+	defaultRecordSendRetries = 5
+	// record send retry interval: .25s, .5s, 1s, 2s, 2s...
+	recordSendRetryInterval    = 250 * time.Millisecond
+	recordSendRetryIntervalMax = 2 * time.Second
+	recordSendRetryFactor      = 2
+)
+
 type ManagerConfig struct {
 	Source Info
 
@@ -22,6 +31,13 @@ type ManagerConfig struct {
 	HeartbeatInterval time.Duration
 	// BeaconInterval defaults to 10 seconds
 	BeaconInterval time.Duration
+
+	// RecordSendTimeout is the timeout for a single attempt to send a record
+	// message. Defaults to 5 seconds.
+	RecordSendTimeout time.Duration
+	// RecordSendRetries is the number of retry attempts sending a record
+	// message. Defaults to 5. Set to a negative value to disable retries.
+	RecordSendRetries int
 
 	// UseAlternateHeartbeatAddress indicates that the manager should send
 	// heartbeat messages to the source address with the `.heartbeats` suffix.
@@ -40,6 +56,20 @@ type ManagerConfig struct {
 	// UpdateBatchSize is the maximum number of record updates that will be
 	// sent in a single record message. Defaults to 1.
 	UpdateBatchSize int
+}
+
+func (c ManagerConfig) recordSendTimeout() time.Duration {
+	if c.RecordSendTimeout <= 0 {
+		return defaultRecordSendTimeout
+	}
+	return c.RecordSendTimeout
+}
+
+func (c ManagerConfig) recordSendRetries() int {
+	if c.RecordSendRetries == 0 {
+		return defaultRecordSendRetries
+	}
+	return c.RecordSendRetries
 }
 
 type RecordUpdate struct {
@@ -96,12 +126,44 @@ func (m *Manager) sendRecords(ctx context.Context) {
 				m.logger.Error("skipping record message after encoding error:", slog.Any("error", err))
 				continue
 			}
-			if err := sender.Send(ctx, msg); err != nil {
-				m.logger.Error("error sending event source record", slog.Any("error", err))
+			if err := m.sendRecordMessage(ctx, sender, msg); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.logger.Error("dropping record message after exhausting send retries",
+					slog.Any("error", err),
+					slog.Int("record_count", len(record.Records)))
 				continue
 			}
 			m.logger.Info("record message sent", slog.Int("record_count", len(record.Records)))
 		}
+	}
+}
+
+func (m *Manager) sendRecordMessage(ctx context.Context, sender session.Sender, msg *amqp.Message) error {
+	timeout, retries := m.recordSendTimeout(), m.recordSendRetries()
+	delay := recordSendRetryInterval
+	for attempt := 0; ; attempt++ {
+		err := sendWithTimeout(ctx, timeout, sender, msg)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt >= retries {
+			return err
+		}
+		m.logger.Error("error sending event source record. retrying",
+			slog.Any("error", err),
+			slog.Int("attempt", attempt+1),
+			slog.Duration("delay", delay))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay = min(delay*recordSendRetryFactor, recordSendRetryIntervalMax)
 	}
 }
 
@@ -335,10 +397,14 @@ func sendWithTimeout(ctx context.Context, timeout time.Duration, sender session.
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := sender.Send(requestCtx, msg)
-	if err != nil {
-		if errors.Is(err, requestCtx.Err()) {
-			return errSendTimeoutExceeded
-		}
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errSendTimeoutExceeded
 	}
 	return err
 }

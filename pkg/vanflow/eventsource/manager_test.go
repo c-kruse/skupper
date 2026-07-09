@@ -2,10 +2,14 @@ package eventsource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
+	amqp "github.com/Azure/go-amqp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/skupperproject/skupper/pkg/vanflow"
@@ -91,6 +95,165 @@ func TestManagerClient(t *testing.T) {
 		}, poll.WithDelay(rtt), poll.WithTimeout(100*rtt))
 	})
 
+}
+
+type flakySender struct {
+	failures int
+	attempts int
+}
+
+func (s *flakySender) Send(ctx context.Context, _ *amqp.Message) error {
+	s.attempts++
+	if s.attempts <= s.failures {
+		return errors.New("send error: session closed")
+	}
+	return nil
+}
+
+func (s *flakySender) Close(context.Context) error { return nil }
+
+func TestManagerSendRecordMessageRetries(t *testing.T) {
+	testcases := []struct {
+		name            string
+		retries         int
+		failures        int
+		expectErr       bool
+		expectedAttempt int
+		expectedElapsed time.Duration
+	}{
+		{name: "sent on first attempt", expectedAttempt: 1},
+		{name: "sent after transient failure", failures: 1, expectedAttempt: 2,
+			expectedElapsed: recordSendRetryInterval},
+		{name: "sent on final attempt", failures: defaultRecordSendRetries, expectedAttempt: defaultRecordSendRetries + 1,
+			expectedElapsed: recordSendRetryInterval*7 + recordSendRetryIntervalMax*2}, // 250ms + 500ms + 1s, then capped at 2s
+		{name: "dropped when retries exhausted", failures: defaultRecordSendRetries + 1, expectErr: true, expectedAttempt: defaultRecordSendRetries + 1,
+			expectedElapsed: recordSendRetryInterval*7 + recordSendRetryIntervalMax*2},
+		{name: "retries can be disabled", retries: -1, failures: 1, expectErr: true, expectedAttempt: 1},
+	}
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sender := &flakySender{failures: tc.failures}
+				manager := NewManager(nil, ManagerConfig{RecordSendRetries: tc.retries})
+
+				start := time.Now()
+				err := manager.sendRecordMessage(t.Context(), sender, vanflow.HeartbeatMessage{}.Encode())
+				elapsed := time.Since(start)
+
+				if tc.expectErr && err == nil {
+					t.Error("expected send to return an error")
+				}
+				if !tc.expectErr && err != nil {
+					t.Errorf("expected send to succeed: got %s", err)
+				}
+				if sender.attempts != tc.expectedAttempt {
+					t.Errorf("expected %d send attempts: got %d", tc.expectedAttempt, sender.attempts)
+				}
+				if elapsed != tc.expectedElapsed {
+					t.Errorf("expected retries to back off for %s: got %s", tc.expectedElapsed, elapsed)
+				}
+			})
+		})
+	}
+}
+
+func TestManagerSendRecordMessageBackoffIsCapped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const retries = 8
+		sender := &flakySender{failures: retries + 1}
+		manager := NewManager(nil, ManagerConfig{RecordSendRetries: retries})
+
+		start := time.Now()
+		manager.sendRecordMessage(t.Context(), sender, vanflow.HeartbeatMessage{}.Encode())
+
+		// 250ms + 500ms + 1s, then capped at 2s for the remaining 5 retries
+		expected := recordSendRetryInterval*7 + recordSendRetryIntervalMax*5
+		if elapsed := time.Since(start); elapsed != expected {
+			t.Errorf("expected backoff to be capped at %s, totalling %s: got %s", recordSendRetryIntervalMax, expected, elapsed)
+		}
+	})
+}
+
+type blockingSender struct{}
+
+func (blockingSender) Send(ctx context.Context, _ *amqp.Message) error {
+	<-ctx.Done()
+	return fmt.Errorf("send error: %w", ctx.Err())
+}
+
+func (blockingSender) Close(context.Context) error { return nil }
+
+func TestSendWithTimeout(t *testing.T) {
+	t.Run("timeout is reported as a send timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			err := sendWithTimeout(t.Context(), time.Minute, blockingSender{}, vanflow.HeartbeatMessage{}.Encode())
+			if !errors.Is(err, errSendTimeoutExceeded) {
+				t.Errorf("expected send timeout: got %v", err)
+			}
+			if elapsed := time.Since(start); elapsed != time.Minute {
+				t.Errorf("expected the send to be given the full timeout: got %s", elapsed)
+			}
+		})
+	})
+	t.Run("cancellation is not reported as a send timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			go func() {
+				// resumes once the send is durably blocked on the context
+				synctest.Wait()
+				cancel()
+			}()
+
+			err := sendWithTimeout(ctx, time.Minute, blockingSender{}, vanflow.HeartbeatMessage{}.Encode())
+			if errors.Is(err, errSendTimeoutExceeded) {
+				t.Error("expected cancellation to not be reported as a send timeout")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("expected context cancellation: got %v", err)
+			}
+		})
+	})
+	t.Run("deadline on the parent context is not reported as a send timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+
+			err := sendWithTimeout(ctx, time.Minute, blockingSender{}, vanflow.HeartbeatMessage{}.Encode())
+			if errors.Is(err, errSendTimeoutExceeded) {
+				t.Error("expected parent deadline to not be reported as a send timeout")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("expected context deadline exceeded: got %v", err)
+			}
+		})
+	})
+	t.Run("send errors are returned as is", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			sender := &flakySender{failures: 1}
+			err := sendWithTimeout(t.Context(), time.Minute, sender, vanflow.HeartbeatMessage{}.Encode())
+			if err == nil || errors.Is(err, errSendTimeoutExceeded) {
+				t.Errorf("expected the sender's error: got %v", err)
+			}
+		})
+	})
+}
+
+func TestManagerSendRecordMessageCancelled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		sender := &flakySender{failures: 1}
+		manager := NewManager(nil, ManagerConfig{})
+
+		cancel()
+		err := manager.sendRecordMessage(ctx, sender, vanflow.HeartbeatMessage{}.Encode())
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context cancellation to stop retries: got %v", err)
+		}
+		if sender.attempts != 1 {
+			t.Errorf("expected a single send attempt: got %d", sender.attempts)
+		}
+	})
 }
 
 var ignoreLastUpdateAndOrder = []cmp.Option{
