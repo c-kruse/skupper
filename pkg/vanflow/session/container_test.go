@@ -87,22 +87,19 @@ func TestContainerPing(t *testing.T) {
 
 // publishSession mimics the container's run loop publishing a newly dialed
 // session, so that invalidation can be exercised without a live router.
-func publishSession(c *container, sess *amqp.Session) int {
+func publishSession(c *container, sess *amqp.Session) *sessionState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	close(c.hasNext)
-	c.gen++
-	c.sess, c.sessErr = sess, nil
-	c.hasNext, c.invalidated = make(chan struct{}), make(chan struct{})
-	return c.gen
+	prev := c.state
+	c.state = &sessionState{sess: sess, done: make(chan struct{})}
+	close(prev.done)
+	return c.state
 }
 
-func containerWoken(c *container) bool {
-	c.mu.Lock()
-	invalidated := c.invalidated
-	c.mu.Unlock()
+// containerWoken reports whether a published state has been invalidated.
+func containerWoken(state *sessionState) bool {
 	select {
-	case <-invalidated:
+	case <-state.done:
 		return true
 	default:
 		return false
@@ -121,79 +118,77 @@ func testContainer(t *testing.T) *container {
 func TestContainerInvalidate(t *testing.T) {
 	c := testContainer(t)
 	sess := &amqp.Session{}
-	gen := publishSession(c, sess)
+	state := publishSession(c, sess)
 
-	if got, gotGen, _ := c.currentSession(); got != sess || gotGen != gen {
-		t.Fatalf("expected the published session at generation %d: got %v at %d", gen, got, gotGen)
+	if got := c.current(); got != state || got.sess != sess {
+		t.Fatalf("expected the published session state: got %v", got)
 	}
-	if containerWoken(c) {
+	if containerWoken(state) {
 		t.Error("expected a freshly published session to be valid")
 	}
 
 	boom := errors.New("boom")
-	c.invalidate(gen, boom)
+	c.invalidate(state, boom)
 
-	got, gotGen, _ := c.currentSession()
-	if got != nil {
+	got := c.current()
+	if got.sess != nil {
 		t.Error("expected the invalidated session to be withheld from links")
 	}
-	if gotGen != gen {
-		t.Errorf("expected the generation to be retained until a session is published: got %d", gotGen)
+	if got.err != boom {
+		t.Errorf("expected the error to be retained until a session is published: got %v", got.err)
 	}
-	if !containerWoken(c) {
+	if !containerWoken(state) {
 		t.Error("expected invalidation to wake the container to reconnect")
 	}
 
 	// a second link failing on the same session must not double close
-	c.invalidate(gen, boom)
+	c.invalidate(state, boom)
 }
 
-func TestContainerInvalidateIgnoresStaleGeneration(t *testing.T) {
+func TestContainerInvalidateIgnoresStaleState(t *testing.T) {
 	c := testContainer(t)
 	boom := errors.New("boom")
 
-	failed := &amqp.Session{}
-	staleGen := publishSession(c, failed)
-	c.invalidate(staleGen, boom)
+	failed := publishSession(c, &amqp.Session{})
+	c.invalidate(failed, boom)
 
-	// the container reconnects while a link is still holding the old generation
-	healthy := &amqp.Session{}
-	publishSession(c, healthy)
+	// the container reconnects while a link is still holding the old state
+	healthy := publishSession(c, &amqp.Session{})
 
-	c.invalidate(staleGen, boom)
+	c.invalidate(failed, boom)
 
-	if got, _, _ := c.currentSession(); got != healthy {
+	if got := c.current(); got != healthy {
 		t.Error("expected a late failure on an old session to leave the new one alone")
 	}
-	if containerWoken(c) {
+	if containerWoken(healthy) {
 		t.Error("expected a late failure on an old session to not trigger a second reconnect")
 	}
 }
 
 func TestContainerInvalidateIsSingleWake(t *testing.T) {
 	c := testContainer(t)
-	gen := publishSession(c, &amqp.Session{})
+	state := publishSession(c, &amqp.Session{})
 
 	// every link attached to the session fails at once
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
-			c.invalidate(gen, fmt.Errorf("link %d failed", i))
+			c.invalidate(state, fmt.Errorf("link %d failed", i))
 		})
 	}
 	wg.Wait()
 
-	if !containerWoken(c) {
+	if !containerWoken(state) {
 		t.Error("expected the container to be woken")
 	}
-	if got, _, _ := c.currentSession(); got != nil {
+	if got := c.current(); got.sess != nil {
 		t.Error("expected the session to be invalidated")
 	}
 }
 
 // TestLinkSessionWakesOnReconnect races links awaiting a session against the
-// container publishing one. A link that reads the invalidated session and the
-// hasNext channel separately can observe the session before publication and the
+// container publishing one. A link that reads the session and its done channel
+// as separate snapshots can observe the session before publication and the
 // channel after it, and then wait for a wakeup that has already happened.
 func TestLinkSessionWakesOnReconnect(t *testing.T) {
 	c := testContainer(t)
@@ -203,16 +198,13 @@ func TestLinkSessionWakesOnReconnect(t *testing.T) {
 	defer cancel()
 
 	for range 500 {
-		c.mu.Lock()
-		gen := c.gen
-		c.mu.Unlock()
-		c.invalidate(gen, errors.New("boom"))
+		c.invalidate(c.current(), errors.New("boom"))
 
 		var wg sync.WaitGroup
 		for range 4 {
 			wg.Go(func() {
 				l := c.newLink("test", ReceiverOptions{}, SenderOptions{})
-				if _, _, err := l.session(ctx); err != nil {
+				if _, err := l.session(ctx); err != nil {
 					t.Errorf("link never saw the replacement session: %v", err)
 				}
 			})
@@ -226,49 +218,46 @@ func TestLinkSessionWakesOnReconnect(t *testing.T) {
 func TestLinkSessionWaitsForReconnect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := testContainer(t)
-		failed := &amqp.Session{}
-		failedGen := publishSession(c, failed)
+		failed := publishSession(c, &amqp.Session{})
 		l := c.newLink("test", ReceiverOptions{}, SenderOptions{})
 
-		sess, gen, err := l.session(t.Context())
-		if err != nil || sess != failed || gen != failedGen {
-			t.Fatalf("expected a healthy session to be returned immediately: got %v at %d: %v", sess, gen, err)
+		state, err := l.session(t.Context())
+		if err != nil || state != failed {
+			t.Fatalf("expected a healthy session to be returned immediately: got %v: %v", state, err)
 		}
 
 		// a sibling link fails, invalidating the session out from under this one
-		c.invalidate(failedGen, errors.New("boom"))
+		c.invalidate(failed, errors.New("boom"))
 
-		healthy := &amqp.Session{}
 		type result struct {
-			sess *amqp.Session
-			gen  int
-			err  error
+			state *sessionState
+			err   error
 		}
 		results := make(chan result, 1)
 		go func() {
-			sess, gen, err := l.session(t.Context())
-			results <- result{sess, gen, err}
+			state, err := l.session(t.Context())
+			results <- result{state, err}
 		}()
 
 		synctest.Wait() // the link is now durably blocked awaiting a session
 		select {
 		case got := <-results:
-			t.Fatalf("expected session to block while the container reconnects: got %v at %d: %v", got.sess, got.gen, got.err)
+			t.Fatalf("expected session to block while the container reconnects: got %v: %v", got.state, got.err)
 		default:
 		}
 
-		healthyGen := publishSession(c, healthy)
+		healthy := publishSession(c, &amqp.Session{})
 		got := <-results
 		if got.err != nil {
 			t.Fatalf("expected the replacement session: %v", got.err)
 		}
-		if got.sess != healthy || got.gen != healthyGen {
-			t.Errorf("expected the link to adopt the replacement session at generation %d: got %v at %d", healthyGen, got.sess, got.gen)
+		if got.state != healthy {
+			t.Errorf("expected the link to adopt the replacement session: got %v", got.state)
 		}
 	})
 }
 
-func TestLinkSessionAdoptsNewGenerationWithoutFailing(t *testing.T) {
+func TestLinkSessionAdoptsNewSessionWithoutFailing(t *testing.T) {
 	c := testContainer(t)
 	l := c.newLink("test", ReceiverOptions{}, SenderOptions{})
 	ctx := t.Context()
@@ -276,15 +265,14 @@ func TestLinkSessionAdoptsNewGenerationWithoutFailing(t *testing.T) {
 	publishSession(c, &amqp.Session{})
 
 	// the container reconnects without this link ever failing an operation
-	healthy := &amqp.Session{}
-	healthyGen := publishSession(c, healthy)
+	healthy := publishSession(c, &amqp.Session{})
 
-	sess, gen, err := l.session(ctx)
+	state, err := l.session(ctx)
 	if err != nil {
 		t.Fatalf("expected a session: %v", err)
 	}
-	if sess != healthy || gen != healthyGen {
-		t.Errorf("expected an idle link to adopt the current session at generation %d: got %v at %d", healthyGen, sess, gen)
+	if state != healthy {
+		t.Errorf("expected an idle link to adopt the current session: got %v", state)
 	}
 }
 
@@ -296,7 +284,7 @@ func TestLinkSessionClosed(t *testing.T) {
 	if err := l.Close(t.Context()); err != nil {
 		t.Fatalf("expected close to succeed: %v", err)
 	}
-	if _, _, err := l.session(t.Context()); !errors.Is(err, errLinkClosed) {
+	if _, err := l.session(t.Context()); !errors.Is(err, errLinkClosed) {
 		t.Errorf("expected a closed link to stop awaiting sessions: got %v", err)
 	}
 	if err := l.Accept(t.Context(), nil); !errors.Is(err, errLinkClosed) {
@@ -312,6 +300,35 @@ func TestLinkAcceptStaleDelivery(t *testing.T) {
 	// no receiver is attached: the session that delivered the message is gone
 	if err := l.Accept(t.Context(), nil); !errors.Is(err, errStaleDelivery) {
 		t.Errorf("expected accept on a replaced session to report a stale delivery: got %v", err)
+	}
+}
+
+// TestLinkHandleErrorDetachesStaleAttachments exercises a link that failed to
+// attach to the current session while still caching a receiver from an older
+// one: handleError must drop the stale receiver so that Accept reports a stale
+// delivery instead of settling on a dead session.
+func TestLinkHandleErrorDetachesStaleAttachments(t *testing.T) {
+	c := testContainer(t)
+	l := c.newLink("test", ReceiverOptions{}, SenderOptions{})
+
+	stale := publishSession(c, &amqp.Session{})
+	l.mu.Lock()
+	l.rcv, l.rcvState = &amqp.Receiver{}, stale
+	l.mu.Unlock()
+	c.invalidate(stale, errors.New("boom"))
+
+	// the link fails to attach to the replacement session
+	next := publishSession(c, &amqp.Session{})
+	l.handleError(t.Context(), next, errors.New("receiver create error"))
+
+	l.mu.Lock()
+	rcv := l.rcv
+	l.mu.Unlock()
+	if rcv != nil {
+		t.Error("expected handleError to detach the receiver cached from an older session")
+	}
+	if err := l.Accept(t.Context(), nil); !errors.Is(err, errStaleDelivery) {
+		t.Errorf("expected accept after the failure to report a stale delivery: got %v", err)
 	}
 }
 

@@ -105,13 +105,18 @@ func (cfg ContainerConfig) toAmqp() *amqp.ConnOptions {
 // strategy.
 func NewContainer(address string, config ContainerConfig) Container {
 	c := &container{
-		address:     address,
-		config:      config,
-		hasNext:     make(chan struct{}),
-		invalidated: make(chan struct{}),
-		notifyOK:    make(chan int, 32),
+		address:  address,
+		config:   config,
+		state:    &sessionState{done: make(chan struct{})},
+		notifyOK: make(chan *sessionState, 32),
 	}
 	return c
+}
+
+type sessionState struct {
+	sess *amqp.Session
+	err  error
+	done chan struct{}
 }
 
 type container struct {
@@ -119,18 +124,10 @@ type container struct {
 	config  ContainerConfig
 
 	mu            sync.Mutex
-	sess          *amqp.Session
-	gen           int
-	hasNext       chan struct{}
+	state         *sessionState
 	errorHandlers []func(error)
 
-	// invalidated is closed when sess is invalidated. Replaced along with sess
-	// each time a session is published.
-	invalidated chan struct{}
-	// sessErr is the error that invalidated sess.
-	sessErr error
-
-	notifyOK chan int
+	notifyOK chan *sessionState
 }
 
 func (c *container) OnSessionError(handler func(error)) {
@@ -139,31 +136,25 @@ func (c *container) OnSessionError(handler func(error)) {
 	c.errorHandlers = append(c.errorHandlers, handler)
 }
 
-// currentSession returns the container's session and its generation, or a nil
-// session and a channel that is closed once the next session is published. A
-// nil session means the previous one was invalidated and a reconnect is in
-// flight. All three values are read together so that a caller cannot observe a
-// nil session and then wait on a hasNext that has already been closed.
-func (c *container) currentSession() (*amqp.Session, int, chan struct{}) {
+// current returns the state as a single snapshot so that a caller cannot
+// observe a nil session and then wait on a done channel already closed.
+func (c *container) current() *sessionState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sess, c.gen, c.hasNext
+	return c.state
 }
 
-// invalidate discards the session at generation gen, so that the container's
-// links stop using it before they discover the failure themselves, and wakes
-// the container to reconnect. Invalidating is idempotent: the generation check
-// discards a report for a session that has already been replaced, so a link
-// failing late cannot tear down the healthy session that succeeded it, and
-// concurrent failures on the same session cause a single reconnect.
-func (c *container) invalidate(gen int, err error) {
+// invalidate discards the session held by state and wakes the container to
+// reconnect. The identity check makes this idempotent: a link failing late
+// cannot tear down the healthy session that succeeded it.
+func (c *container) invalidate(state *sessionState, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.gen != gen || c.sess == nil {
+	if c.state != state || state.sess == nil {
 		return
 	}
-	c.sess, c.sessErr = nil, err
-	close(c.invalidated)
+	c.state = &sessionState{err: err, done: make(chan struct{})}
+	close(state.done)
 }
 
 // Start the container. It will run until the context is cancelled or until the
@@ -179,7 +170,6 @@ func (c *container) Start(ctx context.Context) {
 	}
 
 	go func() {
-		var generation int
 		var prevSessionTeardown func() = func() {}
 		b := backoff.WithContext(c.config.BackOff, ctx)
 		err := backoff.RetryNotify(
@@ -192,14 +182,12 @@ func (c *container) Start(ctx context.Context) {
 				if err != nil {
 					return fmt.Errorf("session create error: %s", err)
 				}
-				generation++
 
+				published := &sessionState{sess: sess, done: make(chan struct{})}
 				c.mu.Lock()
-				close(c.hasNext)
-				c.sess, c.gen = sess, generation
-				c.hasNext, c.invalidated = make(chan struct{}), make(chan struct{})
-				c.sessErr = nil
-				invalidated := c.invalidated
+				prev := c.state
+				c.state = published
+				close(prev.done)
 				c.mu.Unlock()
 
 				prevSessionTeardown()
@@ -212,13 +200,15 @@ func (c *container) Start(ctx context.Context) {
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
-					case gen := <-c.notifyOK:
-						if gen == generation {
+					case state := <-c.notifyOK:
+						if state == published {
 							b.Reset()
 						}
-					case <-invalidated:
+					case <-published.done:
+						// only invalidate can supersede the state this loop
+						// published, so the current state carries the error
 						c.mu.Lock()
-						sessErr := c.sessErr
+						sessErr := c.state.err
 						c.mu.Unlock()
 						return fmt.Errorf("session receiver error: %s", sessErr)
 					}
@@ -281,23 +271,23 @@ func (c *container) newLink(address string, r ReceiverOptions, s SenderOptions) 
 }
 
 // link holds no session of its own. It attaches its sender or receiver to
-// whichever session the container has published, remembering the generation it
+// whichever session the container has published, remembering the state it
 // attached to so that it can tell when the container has moved on.
 type link struct {
 	address      string
 	receiverOpts amqp.ReceiverOptions
 	senderOpts   amqp.SenderOptions
 
-	reportOK chan<- int
+	reportOK chan<- *sessionState
 
 	container *container
 
-	mu     sync.Mutex
-	closed bool
-	rcvGen int
-	rcv    *amqp.Receiver
-	sndGen int
-	snd    *amqp.Sender
+	mu       sync.Mutex
+	closed   bool
+	rcvState *sessionState
+	rcv      *amqp.Receiver
+	sndState *sessionState
+	snd      *amqp.Sender
 }
 
 var (
@@ -305,33 +295,31 @@ var (
 	errStaleDelivery = errors.New("delivery belongs to a closed session")
 )
 
-// session waits for the container to have a valid session and returns it along
-// with its generation. Blocks for the duration of a reconnect rather than
-// handing back a session known to be dead.
-func (r *link) session(ctx context.Context) (*amqp.Session, int, error) {
+// session blocks for the duration of a reconnect rather than handing back a
+// session known to be dead.
+func (r *link) session(ctx context.Context) (*sessionState, error) {
 	for {
 		r.mu.Lock()
 		closed := r.closed
 		r.mu.Unlock()
 		if closed {
-			return nil, 0, errLinkClosed
+			return nil, errLinkClosed
 		}
-		sess, gen, hasNext := r.container.currentSession()
-		if sess != nil {
-			return sess, gen, nil
+		state := r.container.current()
+		if state.sess != nil {
+			return state, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		case <-hasNext: // re-read: the new session may already be invalid
+			return nil, ctx.Err()
+		case <-state.done: // re-read: the new state may already be invalid
 		}
 	}
 }
 
-// handleError detaches whatever this link had attached to the failed session
-// and invalidates that session on the container, so that the container's other
-// links stop using it without each having to fail first.
-func (r *link) handleError(ctx context.Context, gen int, err error) error {
+// handleError detaches from the failed session and invalidates it on the
+// container, so that sibling links stop using it without each failing first.
+func (r *link) handleError(ctx context.Context, state *sessionState, err error) error {
 	if errors.Is(err, ctx.Err()) {
 		return err
 	}
@@ -339,69 +327,64 @@ func (r *link) handleError(ctx context.Context, gen int, err error) error {
 		return err
 	}
 	r.mu.Lock()
-	// only drop links attached to the failing session. A concurrent operation
-	// may have already reattached this link to a newer one.
-	if r.sndGen == gen {
-		r.snd = nil
-	}
-	if r.rcvGen == gen {
-		r.rcv = nil
-	}
+	r.rcv, r.rcvState = nil, nil
+	r.snd, r.sndState = nil, nil
 	r.mu.Unlock()
 
-	r.container.invalidate(gen, err)
+	r.container.invalidate(state, err)
 	return err
 }
 
-func (r *link) getReceiver(ctx context.Context, sess *amqp.Session, gen int) (*amqp.Receiver, error) {
+
+func (r *link) getReceiver(ctx context.Context, state *sessionState) (*amqp.Receiver, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return nil, errLinkClosed
 	}
-	if r.rcv != nil && r.rcvGen == gen {
+	if r.rcv != nil && r.rcvState == state {
 		return r.rcv, nil
 	}
-	rcv, err := sess.NewReceiver(ctx, r.address, &amqp.ReceiverOptions{Credit: int32(r.receiverOpts.Credit)})
+	rcv, err := state.sess.NewReceiver(ctx, r.address, &amqp.ReceiverOptions{Credit: int32(r.receiverOpts.Credit)})
 	if err != nil {
 		return nil, err
 	}
-	r.rcv, r.rcvGen = rcv, gen
+	r.rcv, r.rcvState = rcv, state
 	return r.rcv, nil
 }
 
-func (r *link) getSender(ctx context.Context, sess *amqp.Session, gen int) (*amqp.Sender, error) {
+func (r *link) getSender(ctx context.Context, state *sessionState) (*amqp.Sender, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return nil, errLinkClosed
 	}
-	if r.snd != nil && r.sndGen == gen {
+	if r.snd != nil && r.sndState == state {
 		return r.snd, nil
 	}
-	snd, err := sess.NewSender(ctx, r.address, &r.senderOpts)
+	snd, err := state.sess.NewSender(ctx, r.address, &r.senderOpts)
 	if err != nil {
 		return nil, err
 	}
-	r.snd, r.sndGen = snd, gen
+	r.snd, r.sndState = snd, state
 	return r.snd, nil
 }
 
 func (r *link) Next(ctx context.Context) (*amqp.Message, error) {
 	for {
-		sess, gen, err := r.session(ctx)
+		state, err := r.session(ctx)
 		if err != nil {
 			return nil, err
 		}
-		rcv, err := r.getReceiver(ctx, sess, gen)
+		rcv, err := r.getReceiver(ctx, state)
 		if err != nil {
-			err = r.handleError(ctx, gen, fmt.Errorf("receiver create error: %w", err))
+			err = r.handleError(ctx, state, fmt.Errorf("receiver create error: %w", err))
 		} else {
 			var msg *amqp.Message
 			if msg, err = rcv.Receive(ctx, nil); err == nil {
 				return msg, nil
 			}
-			err = r.handleError(ctx, gen, fmt.Errorf("receive error: %w", err))
+			err = r.handleError(ctx, state, fmt.Errorf("receive error: %w", err))
 		}
 		if ctx.Err() != nil || errors.Is(err, errLinkClosed) {
 			return nil, err
@@ -412,7 +395,7 @@ func (r *link) Next(ctx context.Context) (*amqp.Message, error) {
 
 func (r *link) Accept(ctx context.Context, msg *amqp.Message) error {
 	r.mu.Lock()
-	rcv, gen, closed := r.rcv, r.rcvGen, r.closed
+	rcv, state, closed := r.rcv, r.rcvState, r.closed
 	r.mu.Unlock()
 	if closed {
 		return errLinkClosed
@@ -424,26 +407,26 @@ func (r *link) Accept(ctx context.Context, msg *amqp.Message) error {
 		return err
 	}
 	select {
-	case r.reportOK <- gen:
+	case r.reportOK <- state:
 	default:
 	}
 	return nil
 }
 
 func (r *link) Send(ctx context.Context, msg *amqp.Message) error {
-	sess, gen, err := r.session(ctx)
+	state, err := r.session(ctx)
 	if err != nil {
 		return err
 	}
-	snd, err := r.getSender(ctx, sess, gen)
+	snd, err := r.getSender(ctx, state)
 	if err != nil {
-		return r.handleError(ctx, gen, fmt.Errorf("sender create error: %w", err))
+		return r.handleError(ctx, state, fmt.Errorf("sender create error: %w", err))
 	}
 	if err := snd.Send(ctx, msg, nil); err != nil {
-		return r.handleError(ctx, gen, fmt.Errorf("send error: %w", err))
+		return r.handleError(ctx, state, fmt.Errorf("send error: %w", err))
 	}
 	select {
-	case r.reportOK <- gen:
+	case r.reportOK <- state:
 	default:
 	}
 	return nil
@@ -454,7 +437,8 @@ func (r *link) Close(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.closed = true
 	rcv, snd := r.rcv, r.snd
-	r.rcv, r.snd = nil, nil
+	r.rcv, r.rcvState = nil, nil
+	r.snd, r.sndState = nil, nil
 	var errs []error
 	if rcv != nil {
 		errs = append(errs, rcv.Close(ctx))
