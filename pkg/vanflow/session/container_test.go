@@ -295,10 +295,6 @@ func TestLinkAcceptStaleDelivery(t *testing.T) {
 	}
 }
 
-// TestLinkHandleErrorDetachesStaleAttachments exercises a link that failed to
-// attach to the current session while still caching a receiver from an older
-// one: handleError must drop the stale receiver so that Accept reports a stale
-// delivery instead of settling on a dead session.
 func TestLinkHandleErrorDetachesStaleAttachments(t *testing.T) {
 	c := testContainer(t)
 	l := c.newLink("test", ReceiverOptions{}, SenderOptions{})
