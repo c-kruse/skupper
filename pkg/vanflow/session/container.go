@@ -51,19 +51,13 @@ type RetryableError interface {
 	Retry() time.Duration
 }
 
-// Receiver is not safe for concurrent use.
 type Receiver interface {
-	// Next blocks until a message is received, retrying across session
-	// restarts.
 	Next(context.Context) (*amqp.Message, error)
-	// Accept settles a message returned by Next.
 	Accept(context.Context, *amqp.Message) error
 	Close(context.Context) error
 }
 
-// Sender is not safe for concurrent use.
 type Sender interface {
-	// Send blocks until the message is sent or an error is encountered.
 	Send(context.Context, *amqp.Message) error
 	Close(context.Context) error
 }
@@ -136,8 +130,6 @@ func (c *container) OnSessionError(handler func(error)) {
 	c.errorHandlers = append(c.errorHandlers, handler)
 }
 
-// current returns the state as a single snapshot so that a caller cannot
-// observe a nil session and then wait on a done channel already closed.
 func (c *container) current() *sessionState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -145,8 +137,7 @@ func (c *container) current() *sessionState {
 }
 
 // invalidate discards the session held by state and wakes the container to
-// reconnect. The identity check makes this idempotent: a link failing late
-// cannot tear down the healthy session that succeeded it.
+// reconnect.
 func (c *container) invalidate(state *sessionState, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -270,9 +261,6 @@ func (c *container) newLink(address string, r ReceiverOptions, s SenderOptions) 
 	}
 }
 
-// link holds no session of its own. It attaches its sender or receiver to
-// whichever session the container has published, remembering the state it
-// attached to so that it can tell when the container has moved on.
 type link struct {
 	address      string
 	receiverOpts amqp.ReceiverOptions
@@ -295,8 +283,7 @@ var (
 	errStaleDelivery = errors.New("delivery belongs to a closed session")
 )
 
-// session blocks for the duration of a reconnect rather than handing back a
-// session known to be dead.
+// session blocks for a live session.
 func (r *link) session(ctx context.Context) (*sessionState, error) {
 	for {
 		r.mu.Lock()
@@ -317,8 +304,6 @@ func (r *link) session(ctx context.Context) (*sessionState, error) {
 	}
 }
 
-// handleError detaches from the failed session and invalidates it on the
-// container, so that sibling links stop using it without each failing first.
 func (r *link) handleError(ctx context.Context, state *sessionState, err error) error {
 	if errors.Is(err, ctx.Err()) {
 		return err
@@ -334,7 +319,6 @@ func (r *link) handleError(ctx context.Context, state *sessionState, err error) 
 	r.container.invalidate(state, err)
 	return err
 }
-
 
 func (r *link) getReceiver(ctx context.Context, state *sessionState) (*amqp.Receiver, error) {
 	r.mu.Lock()

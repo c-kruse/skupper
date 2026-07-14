@@ -85,8 +85,6 @@ func TestContainerPing(t *testing.T) {
 
 }
 
-// publishSession mimics the container's run loop publishing a newly dialed
-// session, so that invalidation can be exercised without a live router.
 func publishSession(c *container, sess *amqp.Session) *sessionState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -96,7 +94,6 @@ func publishSession(c *container, sess *amqp.Session) *sessionState {
 	return c.state
 }
 
-// containerWoken reports whether a published state has been invalidated.
 func containerWoken(state *sessionState) bool {
 	select {
 	case <-state.done:
@@ -169,7 +166,6 @@ func TestContainerInvalidateIsSingleWake(t *testing.T) {
 	c := testContainer(t)
 	state := publishSession(c, &amqp.Session{})
 
-	// every link attached to the session fails at once
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
@@ -186,10 +182,6 @@ func TestContainerInvalidateIsSingleWake(t *testing.T) {
 	}
 }
 
-// TestLinkSessionWakesOnReconnect races links awaiting a session against the
-// container publishing one. A link that reads the session and its done channel
-// as separate snapshots can observe the session before publication and the
-// channel after it, and then wait for a wakeup that has already happened.
 func TestLinkSessionWakesOnReconnect(t *testing.T) {
 	c := testContainer(t)
 	publishSession(c, &amqp.Session{})
