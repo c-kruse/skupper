@@ -1,0 +1,66 @@
+schemaCommit: 84aa0b7b5774b84edcadc712751fe887e4883f6f
+
+skip:
+  - entity
+  - org.amqp.management
+  - management
+  - configurationEntity
+  - operationalEntity
+  - dummy
+  - tcpConnection
+  - policy
+  - vhost*
+
+core:
+  - connection
+  - router.link
+  - router.address
+  - router.config.address
+  - router.config.autoLink
+  - routerMetrics
+
+goNames:
+  router.config.address: ConfigAddress
+  router.config.autoLink: AutoLink
+  router.link: RouterLink
+  router.address: RouterAddress
+  router.node: RouterNode
+
+types:
+  sslProfile.ordinal: uint64
+  sslProfile.oldestValidOrdinal: uint64
+  connection.tlsOrdinal: uint64
+  connection.groupOrdinal: uint64
+  routerMetrics.connectionCount: uint64
+  tcpListener.connectionsOpened: uint64
+  tcpListener.connectionsClosed: uint64
+  tcpListener.bytesIn: uint64
+  tcpListener.bytesOut: uint64
+  tcpConnector.connectionsOpened: uint64
+  tcpConnector.connectionsClosed: uint64
+  tcpConnector.bytesIn: uint64
+  tcpConnector.bytesOut: uint64
+  listenerAddress.connectionsOpened: uint64
+  router.node.validOrigins: "[]string"
+  router.node.linkState: "[]int64"
+  router.link.ingressHistogram: "[]int64"
+  router.address.remoteHostRouters: "[]string"
+  router.address.transitOutstanding: "[]int64"
+
+enumTypes:
+  router.mode: RouterMode
+  router.defaultDistribution: Distribution
+  listener.socketAddressFamily: SocketAddressFamily
+  listener.role: Role
+  listener.stripAnnotations: StripAnnotations
+  tcpListener.multiAddressStrategy: MultiAddressStrategy
+  tcpListener.operStatus: TcpOperStatus
+  tcpListener.observer: Observer
+  log.module: LogModule
+  router.config.autoLink.direction: Direction
+  router.config.autoLink.operStatus: AutoLinkOperStatus
+  router.link.operStatus: LinkOperStatus
+  router.link.linkType: LinkType
+  router.address.distribution: RouterDistribution
+  connection.adminStatus: AdminStatus
+  connection.operStatus: ConnectionOperStatus
