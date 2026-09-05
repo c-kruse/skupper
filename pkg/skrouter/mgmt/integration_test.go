@@ -17,8 +17,10 @@ import (
 	"time"
 
 	amqp "github.com/Azure/go-amqp"
+	"github.com/skupperproject/skupper/pkg/skrouter/config"
 	"github.com/skupperproject/skupper/pkg/skrouter/mgmt"
 	"github.com/skupperproject/skupper/pkg/skrouter/mgmt/entities"
+	"github.com/skupperproject/skupper/pkg/skrouter/reconcile"
 )
 
 //go:embed entities/skrouter.json
@@ -93,6 +95,48 @@ func TestRouterIntegration(t *testing.T) {
 		t.Fatalf("delete tcpConnector: %v", err)
 	}
 
+	t.Run("reconcile", func(t *testing.T) {
+		doc, err := config.Parse([]byte(`[["tcpConnector",{"name":"reconcile-test","address":"test","host":"127.0.0.1","port":"1","verifyHostname":false}]]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := reconcile.Options[entities.TcpConnector]{Owned: func(e entities.TcpConnector) bool { return e.Name == "reconcile-test" }}
+		for _, action := range []string{"create", "unchanged", "replace", "delete"} {
+			if action == "replace" {
+				doc.TcpConnectors[0].Value.Port = "2"
+			}
+			if action == "delete" {
+				doc.TcpConnectors = nil
+			}
+			report, err := reconcile.Sync[entities.TcpConnector](ctx, target, doc.TcpConnectors, opts)
+			if err != nil {
+				t.Fatalf("%s: %v", action, err)
+			}
+			count := map[string]int{"create": report.Created, "unchanged": report.Unchanged, "replace": report.Replaced, "delete": report.Deleted}[action]
+			if count != 1 {
+				t.Fatalf("%s: %+v", action, report)
+			}
+		}
+		// Ordinal exercises an in-place update, including an explicit zero.
+		profiles := []mgmt.Partial[entities.SslProfile]{{Value: entities.SslProfile{Name: "reconcile-profile", Ordinal: 1}, Fields: mgmt.Fields(entities.SslProfileName, entities.SslProfileOrdinal)}}
+		profileOpts := reconcile.Options[entities.SslProfile]{Owned: func(e entities.SslProfile) bool { return e.Name == "reconcile-profile" }}
+		if _, err := reconcile.Sync[entities.SslProfile](ctx, target, profiles, profileOpts); err != nil {
+			t.Fatal(err)
+		}
+		profiles[0].Value.Ordinal = 0
+		report, err := reconcile.Sync[entities.SslProfile](ctx, target, profiles, profileOpts)
+		if err != nil || report.Updated != 1 {
+			t.Fatalf("update: %+v %v", report, err)
+		}
+		report, err = reconcile.Sync[entities.SslProfile](ctx, target, profiles, profileOpts)
+		if err != nil || report.Unchanged != 1 {
+			t.Fatalf("after update: %+v %v", report, err)
+		}
+		if _, err := reconcile.Sync[entities.SslProfile](ctx, target, nil, profileOpts); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	response, err := target.Do(ctx, &mgmt.Request{Operation: "GET-JSON-SCHEMA", Ref: mgmt.ByIdentity("self")})
 	if err != nil {
 		t.Fatalf("GET-JSON-SCHEMA: %v", err)
@@ -127,20 +171,16 @@ func startRouter(t *testing.T, image string) int {
 		t.Fatalf("release router port: %v", err)
 	}
 
-	configPath := filepath.Join(t.TempDir(), "skrouterd.conf")
-	config := fmt.Sprintf(`router {
-    mode: standalone
-    id: mgmt-integration
-}
-
-listener {
-    host: 127.0.0.1
-    port: %d
-    authenticatePeer: no
-    saslMechanisms: ANONYMOUS
-}
-`, port)
-	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+	configPath := filepath.Join(t.TempDir(), "skrouterd.json")
+	doc := config.Document{
+		Router:    mgmt.Partial[entities.Router]{Value: entities.Router{Id: "mgmt-integration", Mode: entities.RouterMode("standalone")}, Fields: mgmt.Fields(entities.RouterId, entities.RouterModeField)},
+		Listeners: []mgmt.Partial[entities.Listener]{{Value: entities.Listener{Host: "127.0.0.1", Port: strconv.Itoa(port), SaslMechanisms: "ANONYMOUS"}, Fields: mgmt.Fields(entities.ListenerHost, entities.ListenerPort, entities.ListenerAuthenticatePeer, entities.ListenerSaslMechanisms)}},
+	}
+	data, err := doc.Marshal()
+	if err != nil {
+		t.Fatalf("marshal router config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		t.Fatalf("write router config: %v", err)
 	}
 
@@ -149,7 +189,7 @@ listener {
 	if filepath.Base(engine) == "podman" {
 		args = append(args, "--cgroup-manager=cgroupfs")
 	}
-	args = append(args, "-v", configPath+":/tmp/skrouterd.conf:ro", image, "skrouterd", "-c", "/tmp/skrouterd.conf")
+	args = append(args, "-v", configPath+":/tmp/skrouterd.json:ro", image, "skrouterd", "-c", "/tmp/skrouterd.json")
 	routerCtx, stopRouter := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(routerCtx, engine, args...)
 	var logs bytes.Buffer
