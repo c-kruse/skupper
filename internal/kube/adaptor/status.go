@@ -32,10 +32,16 @@ type StatusPublisher struct {
 	adaptor qdr.AdaptorConfig
 	applied status.Applied
 	next    chan struct{}
+	limiter *rate.Limiter
 }
 
 func NewStatusPublisher(cli *internalclient.KubeClient) *StatusPublisher {
-	return &StatusPublisher{cli: cli, next: make(chan struct{}, 1)}
+	return &StatusPublisher{
+		cli: cli, next: make(chan struct{}, 1),
+		// Allow startup observations to converge quickly, then sustain at most
+		// one attempt every five seconds. Keep the budget across leadership changes.
+		limiter: rate.NewLimiter(rate.Every(5*time.Second), 3),
+	}
 }
 
 func (p *StatusPublisher) Notify() {
@@ -108,7 +114,6 @@ func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
 	}()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	limiter := rate.NewLimiter(rate.Every(time.Second), 1)
 	p.Notify()
 	for {
 		select {
@@ -117,7 +122,7 @@ func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
 		case <-ticker.C:
 		case <-p.next:
 		}
-		if err := limiter.Wait(ctx); err != nil {
+		if err := p.limiter.Wait(ctx); err != nil {
 			return
 		}
 		p.mu.Lock()

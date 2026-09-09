@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	kubeqdr "github.com/skupperproject/skupper/internal/kube/qdr"
@@ -21,6 +22,29 @@ import (
 )
 
 const testNamespace = "test"
+
+func TestStatusPublisherRateLimit(t *testing.T) {
+	publisher, _ := testPublisher()
+	now := time.Now()
+	if !publisher.limiter.AllowN(now, 3) {
+		t.Fatal("startup burst must allow three immediate attempts")
+	}
+	if publisher.limiter.AllowN(now, 1) {
+		t.Fatal("startup burst must not allow a fourth attempt")
+	}
+	if publisher.limiter.AllowN(now.Add(5*time.Second-time.Millisecond), 1) {
+		t.Fatal("exhausted budget must wait five seconds for another attempt")
+	}
+	if !publisher.limiter.AllowN(now.Add(5*time.Second), 1) {
+		t.Fatal("budget must refill after five seconds")
+	}
+	if publisher.limiter.AllowN(now.Add(5*time.Second), 1) {
+		t.Fatal("five seconds must replenish only one attempt")
+	}
+	if !publisher.limiter.AllowN(now.Add(10*time.Second), 1) {
+		t.Fatal("sustained attempts must remain available every five seconds")
+	}
+}
 
 func TestConfigUpdatedReadsQdrSnapshot(t *testing.T) {
 	for _, threshold := range []int{0, 1} {
