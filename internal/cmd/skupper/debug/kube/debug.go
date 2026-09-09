@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	kubeqdr "github.com/skupperproject/skupper/internal/kube/qdr"
 	"github.com/skupperproject/skupper/internal/utils/validator"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1"
+	routerstatus "github.com/skupperproject/skupper/pkg/skrouter/status"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 
@@ -222,6 +224,9 @@ func (cmd *CmdDebug) Run() error {
 					}
 				}
 			}
+		}
+		if err := collectRouterStatus(cmd, rPath, tw); err != nil {
+			return err
 		}
 
 		for _, service := range routerServices {
@@ -438,6 +443,38 @@ func writeObject(rto runtime.Object, name string, tw *tar.Writer) error {
 	err = writeTar(name+".yaml.txt", b.Bytes(), time.Now(), tw)
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func collectRouterStatus(cmd *CmdDebug, path string, tw *tar.Writer) error {
+	configMaps, err := cmd.KubeClient.CoreV1().ConfigMaps(cmd.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: routerstatus.ConfigMapLabel})
+	if err != nil {
+		return err
+	}
+	for i := range configMaps.Items {
+		cm := &configMaps.Items[i]
+		name := path + "Configmap-" + cm.Name
+		if err := writeObject(cm, name, tw); err != nil {
+			return err
+		}
+
+		doc, err := routerstatus.Decode(cm.BinaryData[routerstatus.DataKey])
+		if err != nil {
+			msg := fmt.Sprintf("failed to decode %s from ConfigMap %s: %s", routerstatus.DataKey, cm.Name, err)
+			if err := writeTar(name+"-status.json.error.txt", []byte(msg), time.Now(), tw); err != nil {
+				return err
+			}
+			continue
+		}
+		data, err := stdjson.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := writeTar(name+"-status.json", data, time.Now(), tw); err != nil {
+			return err
+		}
 	}
 	return nil
 }

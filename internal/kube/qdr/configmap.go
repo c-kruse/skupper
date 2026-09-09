@@ -3,6 +3,7 @@ package qdr
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -10,6 +11,30 @@ import (
 	"github.com/skupperproject/skupper/internal/qdr"
 	corev1 "k8s.io/api/core/v1"
 )
+
+const AdaptorConfigKey = "adaptor.json"
+
+func WriteAdaptorConfigToConfigMap(config qdr.AdaptorConfig, cm *corev1.ConfigMap) error {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[AdaptorConfigKey] = string(data)
+	return nil
+}
+
+func GetAdaptorConfigFromConfigMap(cm *corev1.ConfigMap) (qdr.AdaptorConfig, error) {
+	var config qdr.AdaptorConfig
+	data := cm.Data[AdaptorConfigKey]
+	if data == "" {
+		return config, nil
+	}
+	err := json.Unmarshal([]byte(data), &config)
+	return config, err
+}
 
 type ConfigMapWriter struct {
 	CompressionThreshold int

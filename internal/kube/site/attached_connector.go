@@ -124,7 +124,13 @@ func (a *AttachedConnector) updateDefinitionStatusForCurrentBinding(definition *
 
 func (a *AttachedConnector) updateStatusTo(err error, activeDefinition *skupperv2alpha1.AttachedConnector) error {
 	var errors []string
-	if a.binding.SetConfigured(err) {
+	var changed bool
+	if a.parent.site != nil && a.parent.site.localOnlyStatus {
+		changed = a.binding.SetConfiguredOnly(err)
+	} else {
+		changed = a.binding.SetConfigured(err)
+	}
+	if changed {
 		if err := a.updateBindingStatus(); err != nil {
 			errors = append(errors, err.Error())
 		}
@@ -154,6 +160,14 @@ func (a *AttachedConnector) setMatchingListenerCount(count int) {
 				slog.String("namespace", a.binding.Namespace),
 				slog.String("name", a.binding.Name),
 				slog.Any("error", err))
+		}
+	}
+}
+
+func (a *AttachedConnector) clearMatchingStatus() {
+	if a.binding != nil && a.binding.ClearMatchingStatus() {
+		if err := a.updateBindingStatus(); err != nil {
+			a.parent.logger.Error("Failed to clear AttachedConnectorBinding matching status", slog.Any("error", err))
 		}
 	}
 }

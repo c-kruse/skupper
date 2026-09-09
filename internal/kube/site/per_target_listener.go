@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"reflect"
 	"strconv"
-	"strings"
 
 	"github.com/skupperproject/skupper/internal/qdr"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -30,11 +29,10 @@ func (p *PerTargetListener) updateListener(l *skupperv2alpha1.Listener) bool {
 	return changed
 }
 
-func (p *PerTargetListener) extractTargets(network []skupperv2alpha1.SiteRecord, mapping *qdr.PortMapping, exposedPorts ExposedPorts, context BindingContext) (bool, error) {
+func (p *PerTargetListener) extractTargets(targets []string, mapping *qdr.PortMapping, exposedPorts ExposedPorts, context BindingContext) (bool, error) {
 	p.logger.Debug("Extracting targets for listener",
 		slog.String("namespace", p.definition.Namespace),
 		slog.String("listener", p.definition.Name))
-	targets := findTargetsInNetwork(p.address(""), network)
 	changed := false
 	stale := map[string]bool{}
 	for key, _ := range p.targets {
@@ -52,6 +50,7 @@ func (p *PerTargetListener) extractTargets(network []skupperv2alpha1.SiteRecord,
 		}
 	}
 	for target, _ := range stale {
+		changed = true
 		mapping.ReleasePortForKey(p.address(target))
 		if err := p.unexpose(target, mapping, exposedPorts, context); err != nil {
 			return false, err
@@ -141,16 +140,4 @@ func (p *PerTargetListener) updateBridgeConfig(siteId string, config *qdr.Bridge
 		}
 	}
 	return updated
-}
-
-func findTargetsInNetwork(prefix string, network []skupperv2alpha1.SiteRecord) []string {
-	var results []string
-	for _, site := range network {
-		for _, service := range site.Services {
-			if strings.HasPrefix(service.RoutingKey, prefix) && len(service.Connectors) > 0 {
-				results = append(results, strings.TrimPrefix(service.RoutingKey, prefix))
-			}
-		}
-	}
-	return results
 }

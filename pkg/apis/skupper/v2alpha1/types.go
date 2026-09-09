@@ -375,14 +375,22 @@ func (l *Listener) setMatched() bool {
 }
 
 func (l *Listener) SetHasMatchingConnector(value bool) bool {
+	return l.SetMatchingCondition(value, "")
+}
+
+// SetMatchingCondition records the router's explanation when matching fails.
+func (l *Listener) SetMatchingCondition(value bool, message string) bool {
 	changed := false
 	if l.Status.HasMatchingConnector != value {
 		l.Status.HasMatchingConnector = value
 		changed = true
 	}
-	if l.setMatched() {
-		changed = true
+	state := l.matched()
+	if !value && message != "" {
+		state = ErrorCondition(fmt.Errorf("%s", message))
 	}
+	changed = l.Status.SetCondition(CONDITION_TYPE_MATCHED, state, l.Generation) || changed
+	changed = l.Status.setReady([]string{CONDITION_TYPE_CONFIGURED, CONDITION_TYPE_MATCHED}, l.Generation) || changed
 	return changed
 }
 
@@ -443,6 +451,35 @@ func (c *Connector) SetConfigured(err error) bool {
 		return true
 	}
 	return false
+}
+
+// SetConfiguredOnly applies the local-first connector readiness rule. Connector
+// matching has no router-local source, so Ready depends only on Configured.
+func (c *Connector) SetConfiguredOnly(err error) bool {
+	changed := c.SetConfigured(err)
+	if c.Status.HasMatchingListener {
+		c.Status.HasMatchingListener = false
+		changed = true
+	}
+	if meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) {
+		changed = true
+	}
+	if c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.Generation) {
+		changed = true
+	}
+	return changed
+}
+
+// ClearMatchingStatus removes status that is unavailable in local-only mode.
+func (c *Connector) ClearMatchingStatus() bool {
+	changed := false
+	if c.Status.HasMatchingListener {
+		c.Status.HasMatchingListener = false
+		changed = true
+	}
+	changed = meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) || changed
+	changed = c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.Generation) || changed
+	return changed
 }
 
 func (c *Connector) matched() ConditionState {
@@ -547,6 +584,11 @@ func operationalState(operational bool) ConditionState {
 }
 
 func (l *Link) SetOperational(operational bool, remoteSiteId string, remoteSiteName string) bool {
+	return l.SetOperationalCondition(operational, "", remoteSiteId, remoteSiteName)
+}
+
+// SetOperationalCondition records the router's explanation when a link is down.
+func (l *Link) SetOperationalCondition(operational bool, message, remoteSiteId, remoteSiteName string) bool {
 	changed := false
 	if l.Status.RemoteSiteId != remoteSiteId {
 		l.Status.RemoteSiteId = remoteSiteId
@@ -556,7 +598,11 @@ func (l *Link) SetOperational(operational bool, remoteSiteId string, remoteSiteN
 		l.Status.RemoteSiteName = remoteSiteName
 		changed = true
 	}
-	if l.Status.SetCondition(CONDITION_TYPE_OPERATIONAL, operationalState(operational), l.ObjectMeta.Generation) {
+	state := operationalState(operational)
+	if !operational && message != "" {
+		state = ErrorCondition(fmt.Errorf("%s", message))
+	}
+	if l.Status.SetCondition(CONDITION_TYPE_OPERATIONAL, state, l.ObjectMeta.Generation) {
 		l.Status.setReady([]string{CONDITION_TYPE_CONFIGURED, CONDITION_TYPE_OPERATIONAL}, l.ObjectMeta.Generation)
 		return true
 	}
@@ -1087,6 +1133,30 @@ func (c *AttachedConnectorBinding) SetHasMatchingListener(value bool) bool {
 		return true
 	}
 	return false
+}
+
+// SetConfiguredOnly removes legacy network matching from local-only readiness.
+func (c *AttachedConnectorBinding) SetConfiguredOnly(err error) bool {
+	changed := c.SetConfigured(err)
+	if c.Status.HasMatchingListener {
+		c.Status.HasMatchingListener = false
+		changed = true
+	}
+	changed = meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) || changed
+	changed = c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.Generation) || changed
+	return changed
+}
+
+// ClearMatchingStatus removes status that is unavailable in local-only mode.
+func (c *AttachedConnectorBinding) ClearMatchingStatus() bool {
+	changed := false
+	if c.Status.HasMatchingListener {
+		c.Status.HasMatchingListener = false
+		changed = true
+	}
+	changed = meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) || changed
+	changed = c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.Generation) || changed
+	return changed
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
