@@ -1167,6 +1167,9 @@ func (s *Site) CheckConnector(name string, connector *skupperv2alpha1.Connector)
 }
 
 func (s *Site) updateListenerStatus(listener *skupperv2alpha1.Listener, err error) error {
+	if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
+		err = stderrors.Join(err, ptl.configurationError)
+	}
 	if listener.SetConfigured(err) {
 		_, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners(listener.ObjectMeta.Namespace).UpdateStatus(context.TODO(), listener, metav1.UpdateOptions{})
 		if err != nil {
@@ -1314,6 +1317,9 @@ func (s *Site) updateMultiKeyListenerStatus(mkl *skupperv2alpha1.MultiKeyListene
 func (s *Site) setBindingsConfiguredStatus(err error) {
 	lf := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		configuredErr := stderrors.Join(err, s.missingTlsCredentialsErr(listener.Spec.TlsCredentials))
+		if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
+			configuredErr = stderrors.Join(configuredErr, ptl.configurationError)
+		}
 		if listener.SetConfigured(configuredErr) {
 			updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners(listener.ObjectMeta.Namespace).UpdateStatus(context.TODO(), listener, metav1.UpdateOptions{})
 			if err == nil {
@@ -1715,6 +1721,10 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 			errs = append(errs, err)
 		}
 	}
+	// Finish prefix/configuration work before setting either Listener condition.
+	if err := s.updateRouterStatusTargets(groups); err != nil {
+		errs = append(errs, err)
+	}
 	listenerFn := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		up := false
 		failure := ""
@@ -1730,6 +1740,10 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 			}
 		}
 		changed := listener.SetMatchingCondition(up, failure)
+		if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
+			configuredErr := stderrors.Join(s.missingTlsCredentialsErr(listener.Spec.TlsCredentials), ptl.configurationError)
+			changed = listener.SetConfigured(configuredErr) || changed
+		}
 		if changed {
 			updated, err := updateListenerStatus(s.clients, listener)
 			if err != nil {
@@ -1770,9 +1784,18 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 		return nil
 	}
 	s.bindings.MapOverMultiKeyListeners(mklFn)
+	return stderrors.Join(errs...)
+}
+
+func (s *Site) updateRouterStatusTargets(groups []string) error {
+	var errs []error
 	if s.bindings.mapping != nil {
 		configChanged := false
 		for _, ptl := range s.bindings.perTargetListeners {
+			ptl.configurationError = nil
+			if s.missingTlsCredentialsErr(ptl.definition.Spec.TlsCredentials) != nil {
+				continue
+			}
 			prefix := ptl.address("")
 			set := map[string]bool{}
 			truncated := false
@@ -1793,12 +1816,9 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 			}
 			sort.Strings(targets)
 			changed, err := ptl.extractTargets(targets, s.bindings.mapping, s.bindings.exposed, s.bindings.context)
-			var configuredErr error
+			ptl.configurationError = err
 			if truncated {
-				configuredErr = fmt.Errorf("Target list truncated at %d entries", routerstatus.MaxPrefixMatches)
-			}
-			if statusErr := s.updateListenerStatus(ptl.definition, configuredErr); statusErr != nil {
-				errs = append(errs, statusErr)
+				ptl.configurationError = stderrors.Join(ptl.configurationError, fmt.Errorf("Target list truncated at %d entries", routerstatus.MaxPrefixMatches))
 			}
 			if err != nil {
 				errs = append(errs, err)
@@ -1808,6 +1828,9 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 		if configChanged {
 			if err := s.updateRouterConfig(s.bindings); err != nil {
 				errs = append(errs, err)
+				for _, ptl := range s.bindings.perTargetListeners {
+					ptl.configurationError = stderrors.Join(ptl.configurationError, err)
+				}
 			}
 		}
 	}
