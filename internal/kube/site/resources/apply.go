@@ -32,12 +32,12 @@ type Labelling interface {
 	SetPodObjectMetadata(namespace string, name string, kind string, meta *metav1.ObjectMeta) bool
 }
 
-func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool) []resource.Template {
+func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, legacyNetworkStatus bool) []resource.Template {
 	templates := []resource.Template{
 		{
 			Name:       "deployment",
 			Template:   routerDeploymentTemplate,
-			Parameters: getCoreParams(site, group, size, disableSecCtx).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router", "Deployment"),
+			Parameters: getCoreParams(site, group, size, disableSecCtx, legacyNetworkStatus).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router", "Deployment"),
 			Resource: schema.GroupVersionResource{
 				Group:    "apps",
 				Version:  "v1",
@@ -47,7 +47,7 @@ func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Siz
 		{
 			Name:       "localService",
 			Template:   routerLocalServiceTemplate,
-			Parameters: getCoreParams(site, group, size, disableSecCtx).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router-local", "Service"),
+			Parameters: getCoreParams(site, group, size, disableSecCtx, legacyNetworkStatus).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router-local", "Service"),
 			Resource: schema.GroupVersionResource{
 				Group:    "",
 				Version:  "v1",
@@ -59,21 +59,22 @@ func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Siz
 }
 
 type CoreParams struct {
-	SiteId             string
-	SiteName           string
-	Group              string
-	Replicas           int
-	ServiceAccount     string
-	ConfigDigest       string
-	RouterImage        skuppertypes.ImageDetails
-	AdaptorImage       skuppertypes.ImageDetails
-	Sizing             sizing.Sizing
-	Labels             map[string]string
-	Annotations        map[string]string
-	PodLabels          map[string]string
-	PodAnnotations     map[string]string
-	EnableAntiAffinity bool
-	DisableSecCtx      bool
+	SiteId              string
+	SiteName            string
+	Group               string
+	Replicas            int
+	ServiceAccount      string
+	ConfigDigest        string
+	RouterImage         skuppertypes.ImageDetails
+	AdaptorImage        skuppertypes.ImageDetails
+	Sizing              sizing.Sizing
+	Labels              map[string]string
+	Annotations         map[string]string
+	PodLabels           map[string]string
+	PodAnnotations      map[string]string
+	EnableAntiAffinity  bool
+	DisableSecCtx       bool
+	LegacyNetworkStatus bool
 }
 
 func (p *CoreParams) setLabelsAndAnnotations(labelling Labelling, namespace string, name string, kind string) *CoreParams {
@@ -169,25 +170,26 @@ func configDigest(config *skupperv2alpha1.SiteSpec) string {
 	return ""
 }
 
-func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing, disableSecCtx bool) *CoreParams {
+func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing, disableSecCtx bool, legacyNetworkStatus bool) *CoreParams {
 	return &CoreParams{
-		SiteId:             site.GetSiteId(),
-		SiteName:           site.Name,
-		Group:              group,
-		Replicas:           1,
-		ServiceAccount:     site.Spec.GetServiceAccount(),
-		ConfigDigest:       configDigest(&site.Spec),
-		RouterImage:        images.GetRouterImageDetails(),
-		AdaptorImage:       images.GetKubeAdaptorImageDetails(),
-		Sizing:             size,
-		Labels:             map[string]string{},
-		EnableAntiAffinity: enableAntiAffinity(site),
-		DisableSecCtx:      disableSecCtx,
+		SiteId:              site.GetSiteId(),
+		SiteName:            site.Name,
+		Group:               group,
+		Replicas:            1,
+		ServiceAccount:      site.Spec.GetServiceAccount(),
+		ConfigDigest:        configDigest(&site.Spec),
+		RouterImage:         images.GetRouterImageDetails(),
+		AdaptorImage:        images.GetKubeAdaptorImageDetails(),
+		Sizing:              size,
+		Labels:              map[string]string{},
+		EnableAntiAffinity:  enableAntiAffinity(site),
+		DisableSecCtx:       disableSecCtx,
+		LegacyNetworkStatus: legacyNetworkStatus,
 	}
 }
 
-func Apply(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool) error {
-	for _, t := range resourceTemplates(site, group, size, labelling, disableSecCtx) {
+func Apply(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, legacyNetworkStatus bool) error {
+	for _, t := range resourceTemplates(site, group, size, labelling, disableSecCtx, legacyNetworkStatus) {
 		_, err := t.Apply(clients.GetDynamicClient(), ctx, site.Namespace)
 		if err != nil {
 			return err

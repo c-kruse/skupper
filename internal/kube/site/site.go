@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/internal/kube/certificates"
@@ -27,6 +29,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
+	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
 	"github.com/skupperproject/skupper/internal/site"
 	"github.com/skupperproject/skupper/internal/version"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -47,27 +50,30 @@ type Labelling interface {
 }
 
 type Site struct {
-	initialised   bool
-	site          *skupperv2alpha1.Site
-	name          string
-	namespace     string
-	clients       *watchers.EventProcessor
-	bindings      *ExtendedBindings
-	links         map[string]*site.Link
-	errors        map[string]string
-	linkAccess    site.RouterAccessMap
-	certs         certificates.CertificateManager
-	access        SecuredAccessFactory
-	accessMapping securedAccessMap
-	sizes         *sizing.Registry
-	routerPods    map[string]*corev1.Pod
-	logger        *slog.Logger
-	currentGroups []string
-	labelling     Labelling
-	profiles      *secrets.ProfilesWatcher
-	disableSecCtx bool
-	leadListeners map[string]string
-	configWriter  kubeqdr.ConfigMapWriter
+	initialised         bool
+	site                *skupperv2alpha1.Site
+	name                string
+	namespace           string
+	clients             *watchers.EventProcessor
+	bindings            *ExtendedBindings
+	links               map[string]*site.Link
+	errors              map[string]string
+	linkAccess          site.RouterAccessMap
+	certs               certificates.CertificateManager
+	access              SecuredAccessFactory
+	accessMapping       securedAccessMap
+	sizes               *sizing.Registry
+	routerPods          map[string]*corev1.Pod
+	logger              *slog.Logger
+	currentGroups       []string
+	labelling           Labelling
+	profiles            *secrets.ProfilesWatcher
+	disableSecCtx       bool
+	leadListeners       map[string]string
+	configWriter        kubeqdr.ConfigMapWriter
+	routerStatus        map[string]*routerstatus.Document
+	legacyNetworkStatus bool
+	localOnlyStatus     bool
 }
 
 func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling, disableSecCtx bool, configWriter kubeqdr.ConfigMapWriter) *Site {
@@ -86,10 +92,12 @@ func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs ce
 		logger: logger.With(
 			slog.String("component", "kube.site.site"),
 		),
-		labelling:     labelling,
-		disableSecCtx: disableSecCtx,
-		leadListeners: map[string]string{},
-		configWriter:  configWriter,
+		labelling:           labelling,
+		disableSecCtx:       disableSecCtx,
+		leadListeners:       map[string]string{},
+		configWriter:        configWriter,
+		routerStatus:        map[string]*routerstatus.Document{},
+		legacyNetworkStatus: true,
 	}
 	site.profiles = secrets.NewProfilesWatcher(
 		sslSecretsWatcher(namespace, eventProcessor),
@@ -102,6 +110,11 @@ func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs ce
 			slog.String("namespace", namespace)),
 	)
 	return site
+}
+
+func (s *Site) SetLegacyNetworkStatus(enabled bool) {
+	s.legacyNetworkStatus = enabled
+	s.localOnlyStatus = !enabled
 }
 
 func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
@@ -324,7 +337,7 @@ func (s *Site) reconcile(siteDef *skupperv2alpha1.Site, inRecovery bool) error {
 		)
 	}
 	for _, group := range s.groups() {
-		if err := resources.Apply(s.clients, ctxt, s.site, group, size, s.labelling, s.disableSecCtx); err != nil {
+		if err := resources.Apply(s.clients, ctxt, s.site, group, size, s.labelling, s.disableSecCtx, s.legacyNetworkStatus); err != nil {
 			return err
 		}
 	}
@@ -1009,6 +1022,9 @@ func (s *Site) createRouterConfigForGroup(group string, config *qdr.RouterConfig
 	if err := s.configWriter.WriteConfigMap(config, cm); err != nil {
 		return err
 	}
+	if err := kubeqdr.WriteAdaptorConfigToConfigMap(s.bindings.adaptorConfig(), cm); err != nil {
+		return err
+	}
 	if s.labelling != nil {
 		s.labelling.SetLabels(s.namespace, group, "ConfigMap", cm.ObjectMeta.Labels)
 		s.labelling.SetAnnotations(s.namespace, group, "ConfigMap", cm.ObjectMeta.Annotations)
@@ -1045,7 +1061,30 @@ func (s *Site) updateRouterConfigForGroup(update qdr.ConfigUpdate, group string)
 	if err := kubeqdr.UpdateRouterConfig(s.clients.GetKubeClient(), group, s.namespace, context.TODO(), update, s.labelling, s.configWriter); err != nil {
 		return err
 	}
+	if err := s.ensureAdaptorConfig(group); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Site) ensureAdaptorConfig(group string) error {
+	client := s.clients.GetKubeClient().CoreV1().ConfigMaps(s.namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm, err := client.Get(context.TODO(), group, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		desired := s.bindings.adaptorConfig()
+		current, err := kubeqdr.GetAdaptorConfigFromConfigMap(cm)
+		if err == nil && reflect.DeepEqual(current, desired) {
+			return nil
+		}
+		if err := kubeqdr.WriteAdaptorConfigToConfigMap(desired, cm); err != nil {
+			return err
+		}
+		_, err = client.Update(context.TODO(), cm, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (s *Site) updateConnectorStatus(connector *skupperv2alpha1.Connector) error {
@@ -1058,7 +1097,11 @@ func (s *Site) updateConnectorStatus(connector *skupperv2alpha1.Connector) error
 }
 
 func (s *Site) updateConnectorConfiguredStatus(connector *skupperv2alpha1.Connector, err error) error {
-	if connector.SetConfigured(err) {
+	changed := connector.SetConfigured(err)
+	if s.localOnlyStatus {
+		changed = connector.SetConfiguredOnly(err) || changed
+	}
+	if changed {
 		return s.updateConnectorStatus(connector)
 	}
 	return nil
@@ -1074,7 +1117,11 @@ func (s *Site) updateConnectorConfiguredStatusWithSelectedPods(connector *skuppe
 	} else {
 
 	}
-	if connector.SetConfigured(err) || connector.SetSelectedPods(selected) {
+	changed := connector.SetConfigured(err)
+	if s.localOnlyStatus {
+		changed = connector.SetConfiguredOnly(err) || changed
+	}
+	if changed || connector.SetSelectedPods(selected) {
 		return s.updateConnectorStatus(connector)
 	}
 	return nil
@@ -1293,7 +1340,11 @@ func (s *Site) setBindingsConfiguredStatus(err error) {
 				configuredErr = stderrors.Join(configuredErr, stderrors.New("No matches for selector"))
 			}
 		}
-		if connector.SetConfigured(configuredErr) {
+		changed := connector.SetConfigured(configuredErr)
+		if s.localOnlyStatus {
+			changed = connector.SetConfiguredOnly(configuredErr) || changed
+		}
+		if changed {
 			updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Connectors(connector.ObjectMeta.Namespace).UpdateStatus(context.TODO(), connector, metav1.UpdateOptions{})
 			if err == nil {
 				return updated
@@ -1476,6 +1527,9 @@ func (s *Site) updateResolved() error {
 }
 
 func (s *Site) updateSiteStatus() error {
+	if s.localOnlyStatus {
+		s.site.Status.Network = nil
+	}
 	updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Sites(s.site.ObjectMeta.Namespace).UpdateStatus(context.TODO(), s.site, metav1.UpdateOptions{})
 	if err != nil {
 		return err
@@ -1525,8 +1579,8 @@ func (s *Site) updateRedeemedStatusForDeletedSite(token *skupperv2alpha1.AccessT
 	}
 }
 
-func (s *Site) updateLinkOperationalCondition(link *skupperv2alpha1.Link, operational bool, remoteSiteId string, remoteSiteName string) error {
-	if link.SetOperational(operational, remoteSiteId, remoteSiteName) {
+func (s *Site) updateLinkOperationalCondition(link *skupperv2alpha1.Link, operational bool, message string, remoteSiteId string, remoteSiteName string) error {
+	if link.SetOperationalCondition(operational, message, remoteSiteId, remoteSiteName) {
 		return s.updateLinkStatus(link)
 	}
 	return nil
@@ -1544,6 +1598,26 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 	if s.site == nil {
 		return nil
 	}
+	if s.localOnlyStatus {
+		var errs []error
+		s.bindings.Map(func(connector *skupperv2alpha1.Connector) *skupperv2alpha1.Connector {
+			if connector.ClearMatchingStatus() {
+				updated, err := updateConnectorStatus(s.clients, connector)
+				if err != nil {
+					errs = append(errs, err)
+					return nil
+				}
+				return updated
+			}
+			return nil
+		}, func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener { return nil })
+		s.bindings.MapOverAttachedConnectors(func(connector *AttachedConnector) { connector.clearMatchingStatus() })
+		if s.site.Status.Network != nil {
+			s.site.Status.Network = nil
+			errs = append(errs, s.updateSiteStatus())
+		}
+		return stderrors.Join(errs...)
+	}
 	// Only the site status update can be skipped when the network is
 	// unchanged; the binding related handling below must still run so
 	// that in-memory state (e.g. targets for listeners with
@@ -1555,11 +1629,18 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 		}
 	}
 
+	// Once local documents arrive they are authoritative for links and listeners.
+	if len(s.routerStatus) > 0 {
+		bindingStatus := newBindingStatus(s.clients, network)
+		s.bindings.Map(bindingStatus.updateMatchingListenerCount, nil)
+		s.bindings.MapOverAttachedConnectors(bindingStatus.updateMatchingListenerCountForAttachedConnector)
+		return bindingStatus.error()
+	}
 	// find the site record for this site, then process the link records it contains
 	linkRecords := internalnetwork.GetLinkRecordsForSite(s.site.GetSiteId(), network)
 	for _, linkRecord := range linkRecords {
 		if link, ok := s.links[linkRecord.Name]; ok {
-			if err := s.updateLinkOperationalCondition(link.Definition(), linkRecord.Operational, linkRecord.RemoteSiteId, linkRecord.RemoteSiteName); err != nil {
+			if err := s.updateLinkOperationalCondition(link.Definition(), linkRecord.Operational, "", linkRecord.RemoteSiteId, linkRecord.RemoteSiteName); err != nil {
 				s.logger.Error("Error updating operational status of link",
 					slog.String("namespace", s.site.Namespace),
 					slog.String("link", linkRecord.Name),
@@ -1581,10 +1662,176 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 	return bindingStatus.error()
 }
 
+// RouterStatusUpdated merges the observations from all router deployment groups.
+// A nil document removes the group's observations (for example after ConfigMap deletion).
+func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) error {
+	if doc == nil {
+		delete(s.routerStatus, group)
+	} else {
+		s.routerStatus[group] = doc
+	}
+	if s.site == nil {
+		return nil
+	}
+	var errs []error
+	groups := make([]string, 0, len(s.routerStatus))
+	for group := range s.routerStatus {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	maxSites := 0
+	for _, group := range groups {
+		observed := s.routerStatus[group]
+		if len(observed.Network.Sites) > maxSites {
+			maxSites = len(observed.Network.Sites)
+		}
+	}
+	if s.site.Status.SitesInNetwork != maxSites {
+		s.site.Status.SitesInNetwork = maxSites
+		if err := s.updateSiteStatus(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for name, managed := range s.links {
+		up := false
+		remoteID, remoteName, failure := "", "", ""
+		for _, group := range groups {
+			observed := s.routerStatus[group]
+			for _, link := range observed.Links {
+				if link.Name != name {
+					continue
+				}
+				if link.RemoteSiteID != "" && remoteID == "" {
+					remoteID, remoteName = link.RemoteSiteID, link.RemoteSiteName
+				}
+				if link.Present && link.ConnectionStatus == "SUCCESS" {
+					up = true
+				} else if link.Message != "" && failure == "" {
+					failure = link.Message
+				}
+			}
+		}
+		if err := s.updateLinkOperationalCondition(managed.Definition(), up, failure, remoteID, remoteName); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	listenerFn := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
+		up := false
+		failure := ""
+		for _, group := range groups {
+			observed := s.routerStatus[group]
+			for _, item := range observed.TcpListeners {
+				if item.Name == listener.Name || item.Name == qdr.TcpListenerNamePrefix+listener.Name {
+					up = up || (item.Present && strings.EqualFold(item.OperStatus, "up"))
+					if !up && item.Message != "" && failure == "" {
+						failure = item.Message
+					}
+				}
+			}
+		}
+		changed := listener.SetMatchingCondition(up, failure)
+		if changed {
+			updated, err := updateListenerStatus(s.clients, listener)
+			if err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			return updated
+		}
+		return nil
+	}
+	s.bindings.Map(func(connector *skupperv2alpha1.Connector) *skupperv2alpha1.Connector { return nil }, listenerFn)
+	reachable := map[string]bool{}
+	for _, group := range groups {
+		observed := s.routerStatus[group]
+		for _, address := range observed.Addresses {
+			if address.Reachable {
+				reachable[address.Name] = true
+			}
+		}
+	}
+	mklFn := func(mkl *skupperv2alpha1.MultiKeyListener) *skupperv2alpha1.MultiKeyListener {
+		var keys []string
+		for _, key := range mkl.GetRoutingKeys() {
+			if reachable[key] {
+				keys = append(keys, key)
+			}
+		}
+		changed := mkl.SetHasDestination(len(keys) > 0)
+		changed = mkl.SetRoutingKeysReachable(keys) || changed
+		if changed {
+			updated, err := updateMultiKeyListenerStatus(s.clients, mkl)
+			if err != nil {
+				errs = append(errs, err)
+				return nil
+			}
+			return updated
+		}
+		return nil
+	}
+	s.bindings.MapOverMultiKeyListeners(mklFn)
+	if s.bindings.mapping != nil {
+		configChanged := false
+		for _, ptl := range s.bindings.perTargetListeners {
+			prefix := ptl.address("")
+			set := map[string]bool{}
+			truncated := false
+			for _, group := range groups {
+				observed := s.routerStatus[group]
+				for _, query := range observed.Prefixes {
+					if query.Prefix == prefix {
+						truncated = truncated || query.Truncated
+						for _, match := range query.Matches {
+							set[strings.TrimPrefix(match, prefix)] = true
+						}
+					}
+				}
+			}
+			var targets []string
+			for target := range set {
+				targets = append(targets, target)
+			}
+			sort.Strings(targets)
+			changed, err := ptl.extractTargets(targets, s.bindings.mapping, s.bindings.exposed, s.bindings.context)
+			var configuredErr error
+			if truncated {
+				configuredErr = fmt.Errorf("Target list truncated at %d entries", routerstatus.MaxPrefixMatches)
+			}
+			if statusErr := s.updateListenerStatus(ptl.definition, configuredErr); statusErr != nil {
+				errs = append(errs, statusErr)
+			}
+			if err != nil {
+				errs = append(errs, err)
+			}
+			configChanged = configChanged || changed
+		}
+		if configChanged {
+			if err := s.updateRouterConfig(s.bindings); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return stderrors.Join(errs...)
+}
+
+func (s *Site) RefreshRouterStatus() error {
+	if s.localOnlyStatus {
+		if err := s.NetworkStatusUpdated(nil); err != nil {
+			return err
+		}
+	}
+	if len(s.routerStatus) == 0 && !s.localOnlyStatus {
+		return nil
+	}
+	return s.RouterStatusUpdated("", nil)
+}
+
 func (s *Site) updateNetworkStatus(network []skupperv2alpha1.SiteRecord) error {
 	prev := s.site.DeepCopy()
 	s.site.Status.Network = network
-	s.site.Status.SitesInNetwork = len(network)
+	if len(s.routerStatus) == 0 {
+		s.site.Status.SitesInNetwork = len(network)
+	}
 	updated, err := s.UpdateSiteStatus(s.site)
 	if err != nil {
 		return err
@@ -1605,7 +1852,9 @@ func (s *Site) updateNetworkStatus(network []skupperv2alpha1.SiteRecord) error {
 			}
 		}
 		s.site.Status.Network = network
-		s.site.Status.SitesInNetwork = len(network)
+		if len(s.routerStatus) == 0 {
+			s.site.Status.SitesInNetwork = len(network)
+		}
 		s.site.RefreshAggregatedStatus()
 		updated, err = s.UpdateSiteStatus(s.site)
 		if err != nil {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -26,6 +27,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/network"
+	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
 	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -46,6 +48,7 @@ type Controller struct {
 	grantWatcher                    *watchers.AccessGrantWatcher
 	serviceWatcher                  *watchers.ServiceWatcher
 	networkStatusWatcher            *watchers.ConfigMapWatcher
+	routerStatusWatcher             *watchers.ConfigMapWatcher
 	sites                           map[string]*site.Site
 	startGrantServer                func()
 	accessMgr                       *securedaccess.SecuredAccessManager
@@ -57,6 +60,7 @@ type Controller struct {
 	labellingWatcher                *watchers.ConfigMapWatcher
 	attachableConnectors            map[string]*skupperv2alpha1.AttachedConnector
 	disableSecContext               bool
+	legacyNetworkStatus             bool
 	log                             *slog.Logger
 	namespaces                      *NamespaceConfig
 	observedServices                map[string]string
@@ -71,6 +75,11 @@ func skupperRouterConfig() internalinterfaces.TweakListOptionsFunc {
 func skupperNetworkStatus() internalinterfaces.TweakListOptionsFunc {
 	return func(options *metav1.ListOptions) {
 		options.FieldSelector = "metadata.name=skupper-network-status"
+	}
+}
+func skupperRouterStatus() internalinterfaces.TweakListOptionsFunc {
+	return func(options *metav1.ListOptions) {
+		options.LabelSelector = routerstatus.ConfigMapLabel
 	}
 }
 
@@ -108,6 +117,7 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 		log:                  slog.New(slog.Default().Handler()).With(slog.String("component", "kube.controller")),
 		observedServices:     map[string]string{},
 		disableSecContext:    config.DisableSecurityContext,
+		legacyNetworkStatus:  config.LegacyNetworkStatus,
 		configWriter: kubeqdr.ConfigMapWriter{
 			CompressionThreshold: config.RouterConfigCompressionThreshold,
 		},
@@ -147,7 +157,10 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.attachedConnectorWatcher = controller.eventProcessor.WatchAttachedConnectors(config.WatchNamespace, filter(controller, controller.checkAttachedConnector))
 	controller.attachedConnectorBindingWatcher = controller.eventProcessor.WatchAttachedConnectorBindings(config.WatchNamespace, filter(controller, controller.checkAttachedConnectorBinding))
 	controller.eventProcessor.WatchLinks(config.WatchNamespace, filter(controller, controller.checkLink))
-	controller.networkStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
+	if config.LegacyNetworkStatus {
+		controller.networkStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
+	}
+	controller.routerStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperRouterStatus(), config.WatchNamespace, filter(controller, controller.routerStatusUpdate))
 	controller.eventProcessor.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
 	controller.eventProcessor.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
 	controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
@@ -387,19 +400,32 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 	}
 	// needed by listeners with exposePodsByName
 	networkStatusCount := 0
-	for _, cm := range c.networkStatusWatcher.List() {
+	if c.networkStatusWatcher != nil {
+		for _, cm := range c.networkStatusWatcher.List() {
+			if !c.namespaces.isControlled(cm.Namespace) {
+				continue
+			}
+			if err := c.networkStatusUpdate(cm.Namespace+"/"+cm.Name, cm); err != nil {
+				log.Error("Error recovering network status",
+					slog.String("namespace", cm.Namespace),
+					slog.String("name", cm.Name),
+					slog.Any("error", err),
+				)
+				errCount++
+			}
+			networkStatusCount++
+		}
+	}
+	routerStatusCount := 0
+	for _, cm := range c.routerStatusWatcher.List() {
 		if !c.namespaces.isControlled(cm.Namespace) {
 			continue
 		}
-		if err := c.networkStatusUpdate(cm.Namespace+"/"+cm.Name, cm); err != nil {
-			log.Error("Error recovering network status",
-				slog.String("namespace", cm.Namespace),
-				slog.String("name", cm.Name),
-				slog.Any("error", err),
-			)
+		if err := c.routerStatusUpdate(cm.Namespace+"/"+cm.Name, cm); err != nil {
+			log.Error("Error recovering router status", slog.String("namespace", cm.Namespace), slog.String("name", cm.Name), slog.Any("error", err))
 			errCount++
 		}
-		networkStatusCount++
+		routerStatusCount++
 	}
 	log.Info("Bindings recovered",
 		slog.Int("connectors", connectorCount),
@@ -408,6 +434,7 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		slog.Int("attachedConnectors", attachedConnectorCount),
 		slog.Int("attachedConnectorBindings", attachedConnectorBindingCount),
 		slog.Int("networkStatuses", networkStatusCount),
+		slog.Int("routerStatuses", routerStatusCount),
 	)
 	// Binding recovery creates pod watchers for selector-based connectors
 	// and attached connectors; wait for them to sync so that the initial
@@ -428,6 +455,9 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		site.Status.Controller = &c.self
 		recoveredSite := c.getSite(site.ObjectMeta.Namespace)
 		err := recoveredSite.Reconcile(site)
+		if err == nil {
+			err = recoveredSite.RefreshRouterStatus()
+		}
 		if err == nil {
 			err = recoveredSite.FinishAttachedConnectorRecovery()
 		}
@@ -470,6 +500,7 @@ func (c *Controller) getSite(namespace string) *site.Site {
 		return existing
 	}
 	site := site.NewSite(namespace, c.eventProcessor, c.certMgr, c.accessMgr, c.siteSizing, c, c.disableSecContext, c.configWriter)
+	site.SetLegacyNetworkStatus(c.legacyNetworkStatus)
 	c.sites[namespace] = site
 	return site
 }
@@ -526,7 +557,7 @@ func (c *Controller) checkListener(key string, listener *skupperv2alpha1.Listene
 	if err != nil {
 		return err
 	}
-	return nil
+	return c.getSite(namespace).RefreshRouterStatus()
 }
 
 func (c *Controller) checkMultiKeyListener(key string, mkl *skupperv2alpha1.MultiKeyListener) error {
@@ -535,7 +566,10 @@ func (c *Controller) checkMultiKeyListener(key string, mkl *skupperv2alpha1.Mult
 	if err != nil {
 		return err
 	}
-	return c.getSite(namespace).CheckMultiKeyListener(name, mkl)
+	if err := c.getSite(namespace).CheckMultiKeyListener(name, mkl); err != nil {
+		return err
+	}
+	return c.getSite(namespace).RefreshRouterStatus()
 }
 
 func (c *Controller) checkListenerService(key string, svc *corev1.Service) error {
@@ -569,7 +603,10 @@ func (c *Controller) checkLink(key string, linkconfig *skupperv2alpha1.Link) err
 	if err != nil {
 		return err
 	}
-	return c.getSite(namespace).CheckLink(name, linkconfig)
+	if err := c.getSite(namespace).CheckLink(name, linkconfig); err != nil {
+		return err
+	}
+	return c.getSite(namespace).RefreshRouterStatus()
 }
 
 func (c *Controller) checkAccessToken(key string, token *skupperv2alpha1.AccessToken) error {
@@ -689,6 +726,27 @@ func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error
 	}
 	c.log.Debug("Updating network status", slog.String("site", key))
 	return c.getSite(cm.ObjectMeta.Namespace).NetworkStatusUpdated(network.ExtractSiteRecords(status))
+}
+
+func (c *Controller) routerStatusUpdate(key string, cm *corev1.ConfigMap) error {
+	if cm == nil {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		group := strings.TrimSuffix(parts[1], "-status")
+		return c.getSite(parts[0]).RouterStatusUpdated(group, nil)
+	}
+	group := cm.Labels[routerstatus.GroupLabel]
+	if group == "" {
+		group = strings.TrimSuffix(cm.Name, "-status")
+	}
+	doc, err := routerstatus.Decode(cm.BinaryData[routerstatus.DataKey])
+	if err != nil {
+		c.log.Error("Error decoding router status", slog.String("site", key), slog.Any("error", err))
+		return c.getSite(cm.Namespace).RouterStatusUpdated(group, nil)
+	}
+	return c.getSite(cm.Namespace).RouterStatusUpdated(group, doc)
 }
 
 func filter[V any](controller *Controller, handler func(string, V) error) func(string, V) error {

@@ -26,6 +26,7 @@ type ConfigSync struct {
 	path            string
 	routerConfigMap string
 	logger          *slog.Logger
+	StatusPublisher *StatusPublisher
 }
 
 func sslSecretsWatcher(namespace string, eventProcessor *watchers.EventProcessor) secrets.SecretsCacheFactory {
@@ -90,10 +91,15 @@ func (c *ConfigSync) key(name string) string {
 	return fmt.Sprintf("%s/%s", c.namespace, name)
 }
 
-func (c *ConfigSync) configEvent(key string, configmap *corev1.ConfigMap) error {
+func (c *ConfigSync) configEvent(key string, configmap *corev1.ConfigMap) (result error) {
 	if configmap == nil {
 		return nil
 	}
+	defer func() {
+		if c.StatusPublisher != nil {
+			c.StatusPublisher.ConfigUpdated(configmap, result)
+		}
+	}()
 	desired, err := kubeqdr.GetRouterConfigFromConfigMap(configmap)
 	if err != nil {
 		return err

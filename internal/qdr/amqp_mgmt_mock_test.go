@@ -1,6 +1,8 @@
 package qdr
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"reflect"
 	"testing"
@@ -11,6 +13,16 @@ import (
 )
 
 var clusterRun = flag.Bool("use-cluster", false, "run tests against a configured cluster")
+
+func TestQueryCanceledBeforeSend(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// No connection is needed: cancellation must be checked before using links.
+	_, err := (&Agent{}).QueryByAgentAddressContext(ctx, "io.skupper.router.router.address", []string{"name"}, "", 0, 500)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("query error = %v, want context.Canceled", err)
+	}
+}
 
 func TestQDR(t *testing.T) {
 

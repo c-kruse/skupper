@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -43,6 +45,31 @@ func NewExtendedBindings(controller *watchers.EventProcessor, profilePath string
 	eb.bindings.SetListenerConfiguration(eb.updateBridgeConfigForListener)
 	eb.bindings.SetMultiKeyListenerConfiguration(eb.updateBridgeConfigForMultiKeyListener)
 	return eb
+}
+
+func (b *ExtendedBindings) adaptorConfig() qdr.AdaptorConfig {
+	unique := make(map[string]struct{}, len(b.perTargetListeners))
+	for _, listener := range b.perTargetListeners {
+		unique[listener.address("")] = struct{}{}
+	}
+	prefixes := make([]qdr.AddressPrefix, 0, len(unique))
+	for prefix := range unique {
+		prefixes = append(prefixes, qdr.AddressPrefix{Prefix: prefix})
+	}
+	sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].Prefix < prefixes[j].Prefix })
+	return qdr.AdaptorConfig{Version: 1, AddressPrefixes: prefixes}
+}
+
+func findTargetsInNetwork(prefix string, network []skupperv2alpha1.SiteRecord) []string {
+	var targets []string
+	for _, networkSite := range network {
+		for _, service := range networkSite.Services {
+			if strings.HasPrefix(service.RoutingKey, prefix) && len(service.Connectors) > 0 {
+				targets = append(targets, strings.TrimPrefix(service.RoutingKey, prefix))
+			}
+		}
+	}
+	return targets
 }
 
 func (a *ExtendedBindings) init(context BindingContext, config *qdr.RouterConfig) {
@@ -590,7 +617,8 @@ func (b *ExtendedBindings) networkUpdated(network []skupperv2alpha1.SiteRecord) 
 		if ptl.definition.Spec.TlsCredentials != "" && !b.bindings.IsTlsSecretPresent(ptl.definition.Spec.TlsCredentials) {
 			continue
 		}
-		update, err := ptl.extractTargets(network, b.mapping, b.exposed, b.context)
+		targets := findTargetsInNetwork(ptl.address(""), network)
+		update, err := ptl.extractTargets(targets, b.mapping, b.exposed, b.context)
 		if err != nil {
 			if err := b.site.updateListenerStatus(ptl.definition, err); err != nil {
 				bindings_logger.Error("Error handling network update for listener",

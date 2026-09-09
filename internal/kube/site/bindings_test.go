@@ -684,7 +684,7 @@ func TestRecoveredPortMappingMatchesExtendedBindingKeys(t *testing.T) {
 	}
 	allocator.updateBridgeConfigForListener(siteId, listener, &generated.Bridges)
 	perTarget := newPerTargetListener(perTargetListener, slog.Default())
-	_, err := perTarget.extractTargets(network, allocator.mapping, ExposedPorts{}, NewMockBindingContext(nil))
+	_, err := perTarget.extractTargets(findTargetsInNetwork(perTarget.address(""), network), allocator.mapping, ExposedPorts{}, NewMockBindingContext(nil))
 	assert.NilError(t, err)
 	perTarget.updateBridgeConfig(siteId, &generated.Bridges)
 	allocator.updateBridgeConfigForMultiKeyListener(siteId, multiKeyListener, &generated.Bridges)
@@ -702,7 +702,7 @@ func TestRecoveredPortMappingMatchesExtendedBindingKeys(t *testing.T) {
 	recovered.ListenerUpdated(listener)
 	recovered.multiKeyListenerUpdated(multiKeyListener)
 	recoveredPerTarget := newPerTargetListener(perTargetListener, slog.Default())
-	_, err = recoveredPerTarget.extractTargets(network, recovered.mapping, recovered.exposed, recovered.context)
+	_, err = recoveredPerTarget.extractTargets(findTargetsInNetwork(recoveredPerTarget.address(""), network), recovered.mapping, recovered.exposed, recovered.context)
 	assert.NilError(t, err)
 
 	exposed := recovered.context.(*MockBindingContext).exposed

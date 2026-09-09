@@ -142,6 +142,8 @@ spec:
           value: {{ .Group }}
         - name: SKUPPER_ROUTER_DEPLOYMENT
           value: {{ .Group }}
+        - name: SKUPPER_LEGACY_NETWORK_STATUS
+          value: "{{ .LegacyNetworkStatus }}"
         image: {{ .AdaptorImage.Name }}
         imagePullPolicy: {{ .AdaptorImage.PullPolicy }}
         name: kube-adaptor

@@ -1,7 +1,11 @@
 package kube
 
 import (
+	"archive/tar"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -9,6 +13,7 @@ import (
 	"github.com/skupperproject/skupper/internal/cmd/skupper/common"
 	"github.com/skupperproject/skupper/internal/cmd/skupper/common/testutils"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
+	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"github.com/spf13/cobra"
 	"gotest.tools/v3/assert"
@@ -19,6 +24,70 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	restclient "k8s.io/client-go/rest"
 )
+
+func TestCollectRouterStatus(t *testing.T) {
+	doc := &routerstatus.Document{Version: 1, Group: "group1", Router: routerstatus.Router{ID: "router1"}}
+	encoded, err := routerstatus.Encode(doc)
+	assert.NilError(t, err)
+	statusCM := &v12.ConfigMap{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "group1-status",
+			Namespace: "test",
+			Labels:    map[string]string{routerstatus.ConfigMapLabel: "", routerstatus.GroupLabel: "group1"},
+		},
+		BinaryData: map[string][]byte{routerstatus.DataKey: encoded},
+	}
+	unrelatedCM := &v12.ConfigMap{ObjectMeta: v1.ObjectMeta{Name: "unrelated", Namespace: "test"}}
+	cmd, ok := newCmdDebugWithMocks("test", []runtime.Object{statusCM, unrelatedCM}, nil, "")
+	assert.Assert(t, ok)
+
+	var output bytes.Buffer
+	tw := tar.NewWriter(&output)
+	assert.NilError(t, collectRouterStatus(cmd, "resources/", tw))
+	assert.NilError(t, tw.Close())
+
+	files := readTarFiles(t, output.Bytes())
+	assert.Assert(t, files["resources/Configmap-group1-status.yaml"] != nil)
+	assert.Assert(t, files["resources/Configmap-group1-status.yaml.txt"] != nil)
+	assert.Assert(t, files["resources/Configmap-unrelated.yaml"] == nil)
+	var decoded routerstatus.Document
+	assert.NilError(t, json.Unmarshal(files["resources/Configmap-group1-status-status.json"], &decoded))
+	assert.Equal(t, decoded.Group, doc.Group)
+	assert.Equal(t, decoded.Router.ID, doc.Router.ID)
+}
+
+func TestCollectRouterStatusWritesDecodeError(t *testing.T) {
+	statusCM := &v12.ConfigMap{
+		ObjectMeta: v1.ObjectMeta{Name: "bad-status", Namespace: "test", Labels: map[string]string{routerstatus.ConfigMapLabel: ""}},
+		BinaryData: map[string][]byte{routerstatus.DataKey: []byte("not gzip")},
+	}
+	cmd, ok := newCmdDebugWithMocks("test", []runtime.Object{statusCM}, nil, "")
+	assert.Assert(t, ok)
+
+	var output bytes.Buffer
+	tw := tar.NewWriter(&output)
+	assert.NilError(t, collectRouterStatus(cmd, "resources/", tw))
+	assert.NilError(t, tw.Close())
+	files := readTarFiles(t, output.Bytes())
+	assert.Assert(t, files["resources/Configmap-bad-status.yaml"] != nil)
+	assert.Assert(t, bytes.Contains(files["resources/Configmap-bad-status-status.json.error.txt"], []byte("failed to decode")))
+}
+
+func readTarFiles(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		assert.NilError(t, err)
+		files[header.Name], err = io.ReadAll(tr)
+		assert.NilError(t, err)
+	}
+	return files
+}
 
 func TestCmdDebug_ValidateInput(t *testing.T) {
 	type test struct {

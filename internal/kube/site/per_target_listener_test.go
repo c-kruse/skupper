@@ -1,8 +1,10 @@
 package site
 
 import (
+	"log/slog"
 	"testing"
 
+	"github.com/skupperproject/skupper/internal/qdr"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"gotest.tools/v3/assert"
 )
@@ -252,4 +254,44 @@ func TestFindTargetsInNetwork(t *testing.T) {
 			assert.DeepEqual(t, result, tt.expected)
 		})
 	}
+}
+
+func TestExtractTargetsReportsAddAndRemove(t *testing.T) {
+	listener := &skupperv2alpha1.Listener{}
+	listener.Name = "backend"
+	listener.Spec.RoutingKey = "backend"
+	listener.Spec.Port = 8080
+	perTarget := newPerTargetListener(listener, slog.Default())
+	mapping := qdr.RecoverPortMapping(nil)
+	exposed := ExposedPorts{}
+	context := NewMockBindingContext(nil)
+
+	changed, err := perTarget.extractTargets([]string{"old"}, mapping, exposed, context)
+	assert.NilError(t, err)
+	assert.Assert(t, changed)
+
+	changed, err = perTarget.extractTargets([]string{"new"}, mapping, exposed, context)
+	assert.NilError(t, err)
+	assert.Assert(t, changed)
+	_, oldExists := perTarget.targets["old"]
+	_, newExists := perTarget.targets["new"]
+	assert.Assert(t, !oldExists)
+	assert.Assert(t, newExists)
+
+	changed, err = perTarget.extractTargets(nil, mapping, exposed, context)
+	assert.NilError(t, err)
+	assert.Assert(t, changed, "removing the final stale target must report a configuration change")
+}
+
+func TestAdaptorConfigDeduplicatesAndSortsPrefixes(t *testing.T) {
+	bindings := &ExtendedBindings{perTargetListeners: map[string]*PerTargetListener{
+		"z":         newPerTargetListener(&skupperv2alpha1.Listener{Spec: skupperv2alpha1.ListenerSpec{RoutingKey: "zebra"}}, slog.Default()),
+		"a":         newPerTargetListener(&skupperv2alpha1.Listener{Spec: skupperv2alpha1.ListenerSpec{RoutingKey: "alpha"}}, slog.Default()),
+		"duplicate": newPerTargetListener(&skupperv2alpha1.Listener{Spec: skupperv2alpha1.ListenerSpec{RoutingKey: "alpha"}}, slog.Default()),
+	}}
+
+	assert.DeepEqual(t, bindings.adaptorConfig().AddressPrefixes, []qdr.AddressPrefix{
+		{Prefix: "alpha."},
+		{Prefix: "zebra."},
+	})
 }

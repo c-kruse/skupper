@@ -488,9 +488,18 @@ func AsUint64(value interface{}) (uint64, bool) {
 }
 
 func (a *Agent) QueryByAgentAddress(typename string, attributes []string, agent string) ([]Record, error) {
-	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-	defer cancel()
+	return a.QueryByAgentAddressContext(context.Background(), typename, attributes, agent, 0, 0)
+}
 
+// QueryByAgentAddressContext performs a query with a five-second timeout bounded
+// by the caller's context. A positive count enables management pagination;
+// offset is then the first row.
+func (a *Agent) QueryByAgentAddressContext(ctx context.Context, typename string, attributes []string, agent string, offset, count int) ([]Record, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var request amqp.Message
 	var properties amqp.MessageProperties
 	properties.ReplyTo = a.receiver.Address()
@@ -500,7 +509,17 @@ func (a *Agent) QueryByAgentAddress(typename string, attributes []string, agent 
 	request.ApplicationProperties["operation"] = "QUERY"
 	request.ApplicationProperties["entityType"] = typename
 	var body = make(map[string]interface{})
-	body["attributeNames"] = attributes
+	// Use an AMQP list, not a typed string array: the Python management agent
+	// cannot decode arrays in the request body.
+	fields := make([]interface{}, len(attributes))
+	for i, attribute := range attributes {
+		fields[i] = attribute
+	}
+	body["attributeNames"] = fields
+	if count > 0 {
+		request.ApplicationProperties["offset"] = int64(offset)
+		request.ApplicationProperties["count"] = int64(count)
+	}
 	request.Value = body
 
 	var err error

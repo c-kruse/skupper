@@ -177,7 +177,11 @@ func runLeaderElection(lock *resourcelock.LeaseLock, id string, cli *internalcli
 					defer mu.Unlock()
 					leaderCtx, leaderCtxCancel = context.WithCancel(ctx)
 					slog.Info("COLLECTOR: Became leader. Starting status sync and site controller", slog.Any("elapsedTime", strategy.GetElapsedTime()))
-					siteCollector(leaderCtx, cli)
+					if os.Getenv("SKUPPER_LEGACY_NETWORK_STATUS") != "false" {
+						siteCollector(leaderCtx, cli)
+					} else if err := cli.Kube.CoreV1().ConfigMaps(cli.Namespace).Delete(leaderCtx, types.NetworkStatusConfigMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+						slog.Error("Deleting legacy network status", "error", err)
+					}
 					ensureStartFlowController(leaderCtx, cli)
 				},
 				OnStoppedLeading: func() {
