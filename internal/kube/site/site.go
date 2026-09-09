@@ -1679,6 +1679,18 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 	if s.site == nil {
 		return nil
 	}
+	// Unavailable observations are not an authoritative empty network.
+	if len(s.routerStatus) == 0 {
+		if !s.localOnlyStatus {
+			if s.site.Status.SitesInNetwork != len(s.site.Status.Network) {
+				if err := s.updateNetworkStatus(s.site.Status.Network); err != nil {
+					return err
+				}
+			}
+			return s.NetworkStatusUpdated(s.site.Status.Network)
+		}
+		return nil
+	}
 	var errs []error
 	groups := make([]string, 0, len(s.routerStatus))
 	for group := range s.routerStatus {
