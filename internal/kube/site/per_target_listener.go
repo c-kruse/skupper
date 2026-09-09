@@ -13,6 +13,8 @@ type PerTargetListener struct {
 	definition *skupperv2alpha1.Listener
 	targets    map[string]int // name -> port
 	logger     *slog.Logger
+	// Retain prefix-processing errors across ordinary Listener reconciliation.
+	configurationError error
 }
 
 func newPerTargetListener(l *skupperv2alpha1.Listener, logger *slog.Logger) *PerTargetListener {
