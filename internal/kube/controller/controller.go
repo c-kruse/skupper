@@ -697,16 +697,20 @@ func (c *Controller) checkAttachedConnector(key string, connector *skupperv2alph
 		return c.getSite(connector.Spec.SiteNamespace).AttachedConnectorUpdated(connector)
 	}
 }
-func (c *Controller) routerConfigUpdate(_ string, cm *corev1.ConfigMap) error {
+func (c *Controller) routerConfigUpdate(key string, cm *corev1.ConfigMap) error {
 	if cm == nil {
-		return nil
+		namespace, name, err := cache.SplitMetaNamespaceKey(key)
+		if err != nil {
+			return err
+		}
+		return c.getSite(namespace).RouterConfigVersionUpdated(name, "")
 	}
 	config, err := kubeqdr.GetRouterConfigFromConfigMap(cm)
 	if err != nil {
 		return err
 	}
 	c.getSite(cm.Namespace).CheckSslAndProxyProfiles(config)
-	return nil
+	return c.getSite(cm.Namespace).RouterConfigVersionUpdated(cm.Name, cm.ResourceVersion)
 }
 
 func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error {
@@ -729,24 +733,30 @@ func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error
 }
 
 func (c *Controller) routerStatusUpdate(key string, cm *corev1.ConfigMap) error {
-	if cm == nil {
-		parts := strings.SplitN(key, "/", 2)
-		if len(parts) != 2 {
-			return nil
-		}
-		group := strings.TrimSuffix(parts[1], "-status")
-		return c.getSite(parts[0]).RouterStatusUpdated(group, nil)
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return err
 	}
-	group := cm.Labels[routerstatus.GroupLabel]
-	if group == "" {
-		group = strings.TrimSuffix(cm.Name, "-status")
+	podName := strings.TrimSuffix(name, "-status")
+	if cm == nil {
+		return c.getSite(namespace).RouterStatusUpdated(podName, nil)
 	}
 	doc, err := routerstatus.Decode(cm.BinaryData[routerstatus.DataKey])
 	if err != nil {
 		c.log.Error("Error decoding router status", slog.String("site", key), slog.Any("error", err))
-		return c.getSite(cm.Namespace).RouterStatusUpdated(group, nil)
+		return c.getSite(namespace).RouterStatusUpdated(podName, nil)
 	}
-	return c.getSite(cm.Namespace).RouterStatusUpdated(group, doc)
+	// Group-owned documents from older adaptors are not replica observations.
+	owned := false
+	for _, owner := range cm.OwnerReferences {
+		if owner.APIVersion == "v1" && owner.Kind == "Pod" && owner.Name == podName && string(owner.UID) == doc.Router.PodUID && owner.UID != "" {
+			owned = true
+		}
+	}
+	if !owned || doc.Router.Hostname != podName || doc.Group == "" || doc.Group != cm.Labels[routerstatus.GroupLabel] {
+		return c.getSite(namespace).RouterStatusUpdated(podName, nil)
+	}
+	return c.getSite(namespace).RouterStatusUpdated(podName, doc)
 }
 
 func filter[V any](controller *Controller, handler func(string, V) error) func(string, V) error {

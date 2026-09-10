@@ -134,6 +134,16 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        - name: SKUPPER_POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: SKUPPER_POD_UID
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.uid
         - name: SKUPPER_SITE_ID
           value: {{ .SiteId }}
         - name: SKUPPER_SITE_NAME

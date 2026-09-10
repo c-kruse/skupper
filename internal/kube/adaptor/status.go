@@ -18,12 +18,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/util/retry"
 )
 
-// StatusPublisher publishes observations only while this pod owns its group's lease.
+// StatusPublisher publishes observations for this pod, without leader election.
 // ConfigSync supplies immutable snapshots after each attempted configuration sync.
 type StatusPublisher struct {
 	cli     *internalclient.KubeClient
@@ -33,13 +31,15 @@ type StatusPublisher struct {
 	applied status.Applied
 	next    chan struct{}
 	limiter *rate.Limiter
+	podUID  string
 }
 
 func NewStatusPublisher(cli *internalclient.KubeClient) *StatusPublisher {
 	return &StatusPublisher{
 		cli: cli, next: make(chan struct{}, 1),
+		podUID: os.Getenv("SKUPPER_POD_UID"),
 		// Allow startup observations to converge quickly, then sustain at most
-		// one attempt every five seconds. Keep the budget across leadership changes.
+		// one attempt every five seconds.
 		limiter: rate.NewLimiter(rate.Every(5*time.Second), 3),
 	}
 }
@@ -78,29 +78,12 @@ func (p *StatusPublisher) ConfigUpdated(cm *corev1.ConfigMap, syncErr error) {
 }
 
 func (p *StatusPublisher) Run(ctx context.Context) {
-	hostname, _ := os.Hostname()
-	lock := &resourcelock.LeaseLock{
-		LeaseMeta:  metav1.ObjectMeta{Name: deploymentName() + "-status-leader", Namespace: p.cli.Namespace},
-		Client:     p.cli.Kube.CoordinationV1(),
-		LockConfig: resourcelock.ResourceLockConfig{Identity: hostname},
+	podName := os.Getenv("SKUPPER_POD_NAME")
+	if podName == "" || p.podUID == "" {
+		slog.Error("Cannot publish router status without SKUPPER_POD_NAME and SKUPPER_POD_UID")
+		return
 	}
-	for ctx.Err() == nil {
-		done := make(chan struct{})
-		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-			Lock: lock, LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second,
-			Callbacks: leaderelection.LeaderCallbacks{
-				OnStartedLeading: func(leaderCtx context.Context) { defer close(done); p.publishLoop(leaderCtx, hostname) },
-				OnStoppedLeading: func() {},
-			},
-		})
-		// The election cancels the callback context before returning. Wait for
-		// management and API requests to stop before attempting leadership again.
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return
-		}
-	}
+	p.publishLoop(ctx, podName)
 }
 
 func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
@@ -161,6 +144,14 @@ func (p *StatusPublisher) publish(ctx context.Context, doc *status.Document) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	pod, err := p.cli.Kube.CoreV1().Pods(p.cli.Namespace).Get(ctx, doc.Router.Hostname, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if pod.DeletionTimestamp != nil || string(pod.UID) != p.podUID {
+		return nil
+	}
+	doc.Router.PodUID = string(pod.UID)
 	payload, err := status.Encode(doc)
 	if err != nil {
 		return err
@@ -168,23 +159,19 @@ func (p *StatusPublisher) publish(ctx context.Context, doc *status.Document) err
 	if len(payload) > 1024*1024 {
 		return fmt.Errorf("compressed router status exceeds 1 MiB")
 	}
-	deployment, err := p.cli.Kube.AppsV1().Deployments(p.cli.Namespace).Get(ctx, doc.Group, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	owner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID}
+	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}
 	client := p.cli.Kube.CoreV1().ConfigMaps(p.cli.Namespace)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		cm, err := client.Get(ctx, doc.Group+"-status", metav1.GetOptions{})
+		cm, err := client.Get(ctx, pod.Name+"-status", metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			_, err = client.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-				Name: doc.Group + "-status", Namespace: p.cli.Namespace,
+				Name: pod.Name + "-status", Namespace: p.cli.Namespace,
 				Labels:          map[string]string{status.ConfigMapLabel: "", status.GroupLabel: doc.Group},
 				OwnerReferences: []metav1.OwnerReference{owner},
 			}, BinaryData: map[string][]byte{status.DataKey: payload}}, metav1.CreateOptions{})
@@ -193,13 +180,14 @@ func (p *StatusPublisher) publish(ctx context.Context, doc *status.Document) err
 		if err != nil {
 			return err
 		}
-		if bytes.Equal(cm.BinaryData[status.DataKey], payload) {
+		if bytes.Equal(cm.BinaryData[status.DataKey], payload) && len(cm.OwnerReferences) == 1 && cm.OwnerReferences[0] == owner {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		cm = cm.DeepCopy()
+		cm.OwnerReferences = []metav1.OwnerReference{owner}
 		if cm.BinaryData == nil {
 			cm.BinaryData = map[string][]byte{}
 		}

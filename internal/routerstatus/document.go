@@ -34,6 +34,7 @@ type Router struct {
 	Mode     string `json:"mode"`
 	Version  string `json:"version"`
 	Hostname string `json:"hostname"`
+	PodUID   string `json:"podUid,omitempty"`
 }
 type Applied struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`

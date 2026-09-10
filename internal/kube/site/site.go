@@ -50,30 +50,31 @@ type Labelling interface {
 }
 
 type Site struct {
-	initialised         bool
-	site                *skupperv2alpha1.Site
-	name                string
-	namespace           string
-	clients             *watchers.EventProcessor
-	bindings            *ExtendedBindings
-	links               map[string]*site.Link
-	errors              map[string]string
-	linkAccess          site.RouterAccessMap
-	certs               certificates.CertificateManager
-	access              SecuredAccessFactory
-	accessMapping       securedAccessMap
-	sizes               *sizing.Registry
-	routerPods          map[string]*corev1.Pod
-	logger              *slog.Logger
-	currentGroups       []string
-	labelling           Labelling
-	profiles            *secrets.ProfilesWatcher
-	disableSecCtx       bool
-	leadListeners       map[string]string
-	configWriter        kubeqdr.ConfigMapWriter
-	routerStatus        map[string]*routerstatus.Document
-	legacyNetworkStatus bool
-	localOnlyStatus     bool
+	initialised          bool
+	site                 *skupperv2alpha1.Site
+	name                 string
+	namespace            string
+	clients              *watchers.EventProcessor
+	bindings             *ExtendedBindings
+	links                map[string]*site.Link
+	errors               map[string]string
+	linkAccess           site.RouterAccessMap
+	certs                certificates.CertificateManager
+	access               SecuredAccessFactory
+	accessMapping        securedAccessMap
+	sizes                *sizing.Registry
+	routerPods           map[string]*corev1.Pod
+	logger               *slog.Logger
+	currentGroups        []string
+	labelling            Labelling
+	profiles             *secrets.ProfilesWatcher
+	disableSecCtx        bool
+	leadListeners        map[string]string
+	configWriter         kubeqdr.ConfigMapWriter
+	routerStatus         map[string]*routerstatus.Document
+	routerConfigVersions map[string]string
+	legacyNetworkStatus  bool
+	localOnlyStatus      bool
 }
 
 func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling, disableSecCtx bool, configWriter kubeqdr.ConfigMapWriter) *Site {
@@ -92,12 +93,13 @@ func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs ce
 		logger: logger.With(
 			slog.String("component", "kube.site.site"),
 		),
-		labelling:           labelling,
-		disableSecCtx:       disableSecCtx,
-		leadListeners:       map[string]string{},
-		configWriter:        configWriter,
-		routerStatus:        map[string]*routerstatus.Document{},
-		legacyNetworkStatus: true,
+		labelling:            labelling,
+		disableSecCtx:        disableSecCtx,
+		leadListeners:        map[string]string{},
+		configWriter:         configWriter,
+		routerStatus:         map[string]*routerstatus.Document{},
+		routerConfigVersions: map[string]string{},
+		legacyNetworkStatus:  true,
 	}
 	site.profiles = secrets.NewProfilesWatcher(
 		sslSecretsWatcher(namespace, eventProcessor),
@@ -906,6 +908,9 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 		return nil, err
 	}
 	byName := map[string]*qdr.RouterConfig{}
+	if s.routerConfigVersions == nil {
+		s.routerConfigVersions = map[string]string{}
+	}
 	for _, cm := range list.Items {
 		if !isOwner(s.site, cm.OwnerReferences) {
 			s.logger.Error("Error recovering router config - existing config not owned by Site",
@@ -924,6 +929,7 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 				slog.Any("error", err))
 		} else {
 			byName[cm.Name] = config
+			s.routerConfigVersions[cm.Name] = cm.ResourceVersion
 		}
 	}
 	//need to ensure that the list of configs is in the right order, i.e. matching s.groups()
@@ -1636,7 +1642,7 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 	}
 
 	// Once local documents arrive they are authoritative for links and listeners.
-	if len(s.routerStatus) > 0 {
+	if len(s.eligibleRouterStatus()) > 0 {
 		bindingStatus := newBindingStatus(s.clients, network)
 		s.bindings.Map(bindingStatus.updateMatchingListenerCount, nil)
 		s.bindings.MapOverAttachedConnectors(bindingStatus.updateMatchingListenerCountForAttachedConnector)
@@ -1668,19 +1674,60 @@ func (s *Site) NetworkStatusUpdated(network []skupperv2alpha1.SiteRecord) error 
 	return bindingStatus.error()
 }
 
-// RouterStatusUpdated merges the observations from all router deployment groups.
-// A nil document removes the group's observations (for example after ConfigMap deletion).
-func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) error {
+// RouterStatusUpdated retains and merges observations from individual router pods.
+// A nil document removes the observation (for example after ConfigMap deletion).
+func (s *Site) RouterStatusUpdated(observation string, doc *routerstatus.Document) error {
 	if doc == nil {
-		delete(s.routerStatus, group)
+		delete(s.routerStatus, observation)
 	} else {
-		s.routerStatus[group] = doc
+		if s.routerStatus == nil {
+			s.routerStatus = map[string]*routerstatus.Document{}
+		}
+		s.routerStatus[observation] = doc
 	}
 	if s.site == nil {
 		return nil
 	}
+	return s.refreshRouterStatus()
+}
+
+// RouterConfigVersionUpdated records the opaque ConfigMap resource version used
+// to decide whether a pod observation describes the current configuration.
+func (s *Site) RouterConfigVersionUpdated(group, version string) error {
+	if s.routerConfigVersions == nil {
+		s.routerConfigVersions = map[string]string{}
+	}
+	if version == "" {
+		delete(s.routerConfigVersions, group)
+	} else {
+		s.routerConfigVersions[group] = version
+	}
+	if s.site == nil {
+		return nil
+	}
+	return s.refreshRouterStatus()
+}
+
+func (s *Site) eligibleRouterStatus() []string {
+	keys := make([]string, 0, len(s.routerStatus))
+	for key, doc := range s.routerStatus {
+		pod := s.routerPods[s.namespace+"/"+doc.Router.Hostname]
+		if pod == nil || key != doc.Router.Hostname || doc.Router.PodUID == "" || string(pod.UID) != doc.Router.PodUID ||
+			pod.Labels["skupper.io/group"] != doc.Group || pod.DeletionTimestamp != nil ||
+			!isPodRunning(pod) || !isPodReady(pod) || doc.Applied.ResourceVersion == "" ||
+			s.routerConfigVersions[doc.Group] != doc.Applied.ResourceVersion {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (s *Site) refreshRouterStatus() error {
 	// Unavailable observations are not an authoritative empty network.
-	if len(s.routerStatus) == 0 {
+	groups := s.eligibleRouterStatus()
+	if len(groups) == 0 {
 		if !s.localOnlyStatus {
 			if s.site.Status.SitesInNetwork != len(s.site.Status.Network) {
 				if err := s.updateNetworkStatus(s.site.Status.Network); err != nil {
@@ -1689,14 +1736,15 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 			}
 			return s.NetworkStatusUpdated(s.site.Status.Network)
 		}
-		return nil
+		// In local-only mode, stale replicas must not remain operational. Prefix
+		// targets are deliberately untouched: absence is not an empty result.
+		return s.mergeRouterStatus(groups, false)
 	}
+	return s.mergeRouterStatus(groups, true)
+}
+
+func (s *Site) mergeRouterStatus(groups []string, authoritativePrefixes bool) error {
 	var errs []error
-	groups := make([]string, 0, len(s.routerStatus))
-	for group := range s.routerStatus {
-		groups = append(groups, group)
-	}
-	sort.Strings(groups)
 	maxSites := 0
 	for _, group := range groups {
 		observed := s.routerStatus[group]
@@ -1719,23 +1767,28 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 				if link.Name != name {
 					continue
 				}
-				if link.RemoteSiteID != "" && remoteID == "" {
-					remoteID, remoteName = link.RemoteSiteID, link.RemoteSiteName
-				}
 				if link.Present && link.ConnectionStatus == "SUCCESS" {
 					up = true
+					if remoteID == "" {
+						remoteID, remoteName = link.RemoteSiteID, link.RemoteSiteName
+					}
 				} else if link.Message != "" && failure == "" {
 					failure = link.Message
 				}
 			}
+		}
+		if up {
+			failure = ""
 		}
 		if err := s.updateLinkOperationalCondition(managed.Definition(), up, failure, remoteID, remoteName); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	// Finish prefix/configuration work before setting either Listener condition.
-	if err := s.updateRouterStatusTargets(groups); err != nil {
-		errs = append(errs, err)
+	if authoritativePrefixes {
+		if err := s.updateRouterStatusTargets(groups); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	listenerFn := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		up := false
@@ -1750,6 +1803,9 @@ func (s *Site) RouterStatusUpdated(group string, doc *routerstatus.Document) err
 					}
 				}
 			}
+		}
+		if up {
+			failure = ""
 		}
 		changed := listener.SetMatchingCondition(up, failure)
 		if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
@@ -1855,16 +1911,16 @@ func (s *Site) RefreshRouterStatus() error {
 			return err
 		}
 	}
-	if len(s.routerStatus) == 0 && !s.localOnlyStatus {
+	if len(s.eligibleRouterStatus()) == 0 && !s.localOnlyStatus {
 		return nil
 	}
-	return s.RouterStatusUpdated("", nil)
+	return s.refreshRouterStatus()
 }
 
 func (s *Site) updateNetworkStatus(network []skupperv2alpha1.SiteRecord) error {
 	prev := s.site.DeepCopy()
 	s.site.Status.Network = network
-	if len(s.routerStatus) == 0 {
+	if len(s.eligibleRouterStatus()) == 0 {
 		s.site.Status.SitesInNetwork = len(network)
 	}
 	updated, err := s.UpdateSiteStatus(s.site)
@@ -1887,7 +1943,7 @@ func (s *Site) updateNetworkStatus(network []skupperv2alpha1.SiteRecord) error {
 			}
 		}
 		s.site.Status.Network = network
-		if len(s.routerStatus) == 0 {
+		if len(s.eligibleRouterStatus()) == 0 {
 			s.site.Status.SitesInNetwork = len(network)
 		}
 		s.site.RefreshAggregatedStatus()
@@ -2140,10 +2196,12 @@ func (s *Site) RouterPodEvent(key string, pod *corev1.Pod) error {
 	if s.site == nil {
 		return nil
 	}
+	var errs []error
 	if s.site.SetRunning(s.isRouterPodRunning()) {
-		return s.updateSiteStatus()
+		errs = append(errs, s.updateSiteStatus())
 	}
-	return nil
+	errs = append(errs, s.refreshRouterStatus())
+	return stderrors.Join(errs...)
 }
 
 func (s *Site) isRouterPodRunning() skupperv2alpha1.ConditionState {
