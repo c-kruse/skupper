@@ -692,7 +692,7 @@ func TestGeneral(t *testing.T) {
 }
 
 func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
-	t.Run("legacy", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, true, false) })
+	t.Run("legacy", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, true, true) })
 	t.Run("local-unavailable", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, false, false) })
 	t.Run("local-current", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, false, true) })
 }
@@ -760,7 +760,13 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 		"internal.skupper.io/router-config": "",
 	}
 	routerConfigMap.ResourceVersion = "revision-a"
-	statusInfo := f.networkStatusInfo("mysite", "test", nil, map[string]string{"backend-a.pod-a": "10.1.1.10"}).info()
+	legacyTarget, localTarget := "pod-a", "pod-a"
+	if legacy {
+		localTarget = "unselected"
+	} else {
+		legacyTarget = "unselected"
+	}
+	statusInfo := f.networkStatusInfo("mysite", "test", nil, map[string]string{"backend-a." + legacyTarget: "10.1.1.10"}).info()
 	networkStatus := f.skupperNetworkStatus("test", statusInfo)
 	// the persisted site status already reflects the network, as it would
 	// after a controller restart
@@ -791,7 +797,7 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 		payload, err := routerstatus.Encode(&routerstatus.Document{
 			Version: 1, Group: "skupper-router", Router: routerstatus.Router{Hostname: pod.Name, PodUID: string(pod.UID)},
 			Applied:  routerstatus.Applied{ResourceVersion: "revision-a"},
-			Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend-a.", Matches: []string{"backend-a.pod-a"}}},
+			Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend-a.", Matches: []string{"backend-a." + localTarget}}},
 			Network:  routerstatus.Network{Sites: []routerstatus.Site{{ID: "local"}, {ID: "remote"}}},
 		})
 		assert.NilError(t, err)
@@ -836,6 +842,23 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 	err = controller.init(stopCh)
 	assert.Assert(t, err)
 
+	deployment, err := clients.GetDynamicClient().Resource(resource.DeploymentResource()).Namespace("test").Get(context.Background(), "skupper-router", metav1.GetOptions{})
+	assert.NilError(t, err)
+	var deployed appsv1.Deployment
+	assert.NilError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(deployment.Object, &deployed))
+	modeFound := false
+	for _, container := range deployed.Spec.Template.Spec.Containers {
+		if container.Name == "kube-adaptor" {
+			for _, env := range container.Env {
+				if env.Name == "SKUPPER_LEGACY_NETWORK_STATUS" {
+					assert.Equal(t, env.Value, fmt.Sprint(legacy))
+					modeFound = true
+				}
+			}
+		}
+	}
+	assert.Assert(t, modeFound, "controller mode must configure adaptor status collection")
+
 	serviceAfterRecovery, err := clients.GetKubeClient().CoreV1().Services("test").Get(context.Background(), "pod-a", metav1.GetOptions{})
 	assert.NilError(t, err)
 	assert.Equal(t, serviceAfterRecovery.Spec.Ports[0].TargetPort.IntVal, int32(1027))
@@ -844,9 +867,11 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 			assert.Assert(t, action.(k8stesting.DeleteAction).GetName() != "pod-a", "recovery must not delete a working target Service")
 		}
 	}
-	if localStatus {
+	if localStatus && !legacy {
 		assert.Equal(t, controller.getSite("test").GetSite().Status.SitesInNetwork, 2, "persisted observations must be eligible before queued pod events run")
 	}
+	_, err = clients.GetKubeClient().CoreV1().Services("test").Get(context.Background(), "unselected", metav1.GetOptions{})
+	assert.Assert(t, errors.IsNotFound(err), "the unselected source must not create target Services")
 
 	expectedTcpListeners := []string{
 		"listener/listener-a",
@@ -860,6 +885,8 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 	}
 	assert.Assert(t, len(observed) > 0, "expected at least one router config update after recovery")
 	for i, bridge := range observed {
+		_, unselected := bridge.TcpListeners["listener/listener-a@unselected"]
+		assert.Assert(t, !unselected, "the unselected source must not change target configuration")
 		assert.Equal(t, bridge.TcpListeners["listener/listener-a@pod-a"].Port, "1027", "recovery must preserve the target's allocated port")
 		for _, name := range expectedTcpListeners {
 			_, ok := bridge.TcpListeners[name]

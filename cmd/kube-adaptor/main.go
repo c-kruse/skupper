@@ -118,11 +118,13 @@ func main() {
 	go http.ListenAndServe(":9191", nil)
 
 	configSync := adaptor.NewConfigSync(cli, cli.GetNamespace(), configDir, configMapName, eventProcessorMetrics)
-	statusCtx, stopStatus := context.WithCancel(context.Background())
-	defer stopStatus()
-	go func() { <-stopCh; stopStatus() }()
-	configSync.StatusPublisher = adaptor.NewStatusPublisher(cli)
-	go configSync.StatusPublisher.Run(statusCtx)
+	if os.Getenv("SKUPPER_LEGACY_NETWORK_STATUS") == "false" {
+		statusCtx, stopStatus := context.WithCancel(context.Background())
+		defer stopStatus()
+		go func() { <-stopCh; stopStatus() }()
+		configSync.StatusPublisher = adaptor.NewStatusPublisher(cli)
+		go configSync.StatusPublisher.Run(statusCtx)
+	}
 	slog.Info("Starting controller loop...")
 	configSync.Start(stopCh)
 

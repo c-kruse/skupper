@@ -160,8 +160,9 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.eventProcessor.WatchLinks(config.WatchNamespace, filter(controller, controller.checkLink))
 	if config.LegacyNetworkStatus {
 		controller.networkStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
+	} else {
+		controller.routerStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperRouterStatus(), config.WatchNamespace, filter(controller, controller.routerStatusUpdate))
 	}
-	controller.routerStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperRouterStatus(), config.WatchNamespace, filter(controller, controller.routerStatusUpdate))
 	controller.eventProcessor.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
 	controller.eventProcessor.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
 	controller.routerPodWatcher = controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
@@ -427,15 +428,17 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		}
 	}
 	routerStatusCount := 0
-	for _, cm := range c.routerStatusWatcher.List() {
-		if !c.namespaces.isControlled(cm.Namespace) {
-			continue
+	if c.routerStatusWatcher != nil {
+		for _, cm := range c.routerStatusWatcher.List() {
+			if !c.namespaces.isControlled(cm.Namespace) {
+				continue
+			}
+			if err := c.routerStatusUpdate(cm.Namespace+"/"+cm.Name, cm); err != nil {
+				log.Error("Error recovering router status", slog.String("namespace", cm.Namespace), slog.String("name", cm.Name), slog.Any("error", err))
+				errCount++
+			}
+			routerStatusCount++
 		}
-		if err := c.routerStatusUpdate(cm.Namespace+"/"+cm.Name, cm); err != nil {
-			log.Error("Error recovering router status", slog.String("namespace", cm.Namespace), slog.String("name", cm.Name), slog.Any("error", err))
-			errCount++
-		}
-		routerStatusCount++
 	}
 	log.Info("Bindings recovered",
 		slog.Int("connectors", connectorCount),

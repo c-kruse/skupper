@@ -61,7 +61,7 @@ func BoundConfig(flags *flag.FlagSet) (*Config, error) {
 	iflag.StringVar(flags, &c.Name, "name", "CONTROLLER_NAME", "", "A name identifying the controller. If not specified it will be deduced from the hostname.")
 	iflag.BoolVar(flags, &c.RequireExplicitControl, "require-explicit-control", "REQUIRE_EXPLICIT_CONTROL", false, "If set, this controller instance will only process resources in which there is a ConfigMap named skupper with an entry 'controller' whose value matches the controller's namespace qualified name. Controllers watching a single namespace require that ConfigMap regardless of this setting.")
 	iflag.BoolVar(flags, &c.DisableSecurityContext, "disable-security-context", "DISABLE_SECURITY_CONTEXT", false, "If set, the default security context definitions won't be set to the skupper-router deployment's pod and containers.")
-	iflag.BoolVar(flags, &c.LegacyNetworkStatus, "legacy-network-status", "LEGACY_NETWORK_STATUS", true, "Publish and consume the deprecated whole-network status document.")
+	iflag.BoolVar(flags, &c.LegacyNetworkStatus, "legacy-network-status", "LEGACY_NETWORK_STATUS", true, "Select the exclusive status source for all sites managed by this controller: true uses legacy whole-network status; false uses local router status. No fallback between sources.")
 	if err := iflag.IntVar(flags, &c.RouterConfigCompressionThreshold, "router-config-compression-threshold", "ROUTER_CONFIG_COMPRESSION_THRESHOLD", defaultRouterConfigCompressionThreshold, "The size in bytes of the serialized router configuration at which the controller stores it gzip-compressed in the router ConfigMap. A value of zero disables compression."); err != nil {
 		return nil, err
 	}

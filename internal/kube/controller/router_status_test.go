@@ -42,6 +42,7 @@ func TestLocalOnlyListenersWithoutSite(t *testing.T) {
 func TestRouterStatusHandlerRemovesOnlyInvalidReplica(t *testing.T) {
 	config, err := BoundConfig(flag.NewFlagSet("test", flag.ContinueOnError))
 	assert.NilError(t, err)
+	config.LegacyNetworkStatus = false
 	clients, err := fakeclient.NewFakeClient("test", nil, nil, "")
 	assert.NilError(t, err)
 	controller, err := NewController(clients, config)
@@ -94,14 +95,19 @@ func TestRouterStatusHandlerRemovesOnlyInvalidReplica(t *testing.T) {
 	assert.Equal(t, statusMap.Len(), 0)
 }
 
-func TestLegacyStatusFlagDisablesLegacyWatcherOnly(t *testing.T) {
-	config, err := BoundConfig(flag.NewFlagSet("test", flag.ContinueOnError))
-	assert.NilError(t, err)
-	config.LegacyNetworkStatus = false
-	clients, err := fakeclient.NewFakeClient("test", nil, nil, "")
-	assert.NilError(t, err)
-	controller, err := NewController(clients, config)
-	assert.NilError(t, err)
-	assert.Assert(t, controller.networkStatusWatcher == nil)
-	assert.Assert(t, controller.routerStatusWatcher != nil)
+func TestStatusFlagSelectsExactlyOneWatcher(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			flags := flag.NewFlagSet("test", flag.ContinueOnError)
+			config, err := BoundConfig(flags)
+			assert.NilError(t, err)
+			assert.NilError(t, flags.Parse([]string{"--legacy-network-status=" + value}))
+			clients, err := fakeclient.NewFakeClient("test", nil, nil, "")
+			assert.NilError(t, err)
+			controller, err := NewController(clients, config)
+			assert.NilError(t, err)
+			assert.Equal(t, controller.networkStatusWatcher != nil, value == "true")
+			assert.Equal(t, controller.routerStatusWatcher != nil, value == "false")
+		})
+	}
 }

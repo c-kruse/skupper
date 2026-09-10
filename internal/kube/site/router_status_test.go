@@ -46,6 +46,7 @@ func TestRouterStatusMergesGroupsAndPersistsStatus(t *testing.T) {
 	assert.NilError(t, err)
 	// newSiteMocks predates router status and intentionally constructs Site directly.
 	s.routerStatus = map[string]*routerstatus.Document{}
+	s.SetLegacyNetworkStatus(false)
 	managed, err := s.newLink(linkDefinition)
 	assert.NilError(t, err)
 	s.links[linkDefinition.Name] = managed
@@ -206,6 +207,7 @@ func TestPrefixStatusPreservesConfigurationErrors(t *testing.T) {
 			s, err := newSiteMocks("test", nil, []runtime.Object{listener}, "", false)
 			assert.NilError(t, err)
 			s.routerStatus = map[string]*routerstatus.Document{}
+			s.SetLegacyNetworkStatus(false)
 			_, err = s.bindings.UpdateListener(listener.Name, listener)
 			assert.NilError(t, err)
 			doc := &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.pod-a"}, Truncated: true}}}
@@ -229,41 +231,5 @@ func TestPrefixStatusPreservesConfigurationErrors(t *testing.T) {
 				assert.Assert(t, meta.IsStatusConditionTrue(got.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
 			}
 		})
-	}
-}
-
-func TestUnavailableRouterStatusPreservesTargetsOrUsesLegacy(t *testing.T) {
-	for _, localOnly := range []bool{true, false} {
-		listener := &skupperv2alpha1.Listener{
-			ObjectMeta: metav1.ObjectMeta{Name: "pods", Namespace: "test"},
-			Spec:       skupperv2alpha1.ListenerSpec{RoutingKey: "backend", Port: 8080, Type: "tcp", ExposePodsByName: true},
-		}
-		s, err := newSiteMocks("test", nil, []runtime.Object{listener}, "", false)
-		assert.NilError(t, err)
-		s.routerStatus = map[string]*routerstatus.Document{}
-		s.localOnlyStatus = localOnly
-		_, err = s.bindings.UpdateListener(listener.Name, listener)
-		assert.NilError(t, err)
-		legacy := []skupperv2alpha1.SiteRecord{{Id: "legacy", Services: []skupperv2alpha1.ServiceRecord{{RoutingKey: "backend.legacy-pod", Connectors: []string{"backend"}}}}}
-		assert.NilError(t, s.NetworkStatusUpdated(legacy))
-		doc := &routerstatus.Document{Version: 1, Network: routerstatus.Network{Sites: []routerstatus.Site{{ID: "a"}, {ID: "b"}}}, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.local-pod"}}}}
-		eligibleObservation(s, "group", "group", doc)
-		assert.NilError(t, s.RouterStatusUpdated("group", doc))
-		ptl := s.bindings.perTargetListeners["pods"]
-		assert.Equal(t, len(ptl.targets), 1)
-		assert.Assert(t, ptl.targets["local-pod"] != 0)
-		assert.NilError(t, s.RouterStatusUpdated("group", nil))
-		assert.Equal(t, len(ptl.targets), 1)
-		if localOnly {
-			assert.Assert(t, ptl.targets["local-pod"] != 0)
-			assert.Equal(t, s.site.Status.SitesInNetwork, 0)
-		} else {
-			assert.Assert(t, ptl.targets["legacy-pod"] != 0)
-			assert.Equal(t, s.site.Status.SitesInNetwork, 1)
-		}
-		// A valid empty observation must still remove previously exposed targets.
-		assert.NilError(t, s.RouterStatusUpdated("group", eligibleObservation(s, "group", "group", &routerstatus.Document{Version: 1})))
-		assert.Equal(t, len(ptl.targets), 0)
-		assert.Equal(t, s.site.Status.SitesInNetwork, 0)
 	}
 }
