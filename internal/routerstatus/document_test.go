@@ -9,7 +9,7 @@ import (
 )
 
 func TestEncodeStableAndDecodeVersion(t *testing.T) {
-	doc := &Document{Version: 1, Group: "group", Network: Network{Sites: []Site{}}}
+	doc := &Document{Version: 1, Network: Network{Sites: []Site{}}}
 	a, err := Encode(doc)
 	if err != nil {
 		t.Fatal(err)

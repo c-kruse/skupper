@@ -26,14 +26,14 @@ import (
 )
 
 func TestCollectRouterStatus(t *testing.T) {
-	doc := &routerstatus.Document{Version: 1, Group: "group1", Router: routerstatus.Router{ID: "router1"}}
+	doc := &routerstatus.Document{Version: 1, Router: routerstatus.Router{ID: "router1"}}
 	encoded, err := routerstatus.Encode(doc)
 	assert.NilError(t, err)
 	statusCM := &v12.ConfigMap{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      "group1-status",
 			Namespace: "test",
-			Labels:    map[string]string{routerstatus.ConfigMapLabel: "", routerstatus.GroupLabel: "group1"},
+			Labels:    map[string]string{routerstatus.ConfigMapLabel: ""},
 		},
 		BinaryData: map[string][]byte{routerstatus.DataKey: encoded},
 	}
@@ -52,7 +52,6 @@ func TestCollectRouterStatus(t *testing.T) {
 	assert.Assert(t, files["resources/Configmap-unrelated.yaml"] == nil)
 	var decoded routerstatus.Document
 	assert.NilError(t, json.Unmarshal(files["resources/Configmap-group1-status-status.json"], &decoded))
-	assert.Equal(t, decoded.Group, doc.Group)
 	assert.Equal(t, decoded.Router.ID, doc.Router.ID)
 }
 

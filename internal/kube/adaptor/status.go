@@ -121,7 +121,7 @@ func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
 				continue
 			}
 		}
-		builder := status.Builder{Client: agent, Group: deploymentName(), Hostname: hostname}
+		builder := status.Builder{Client: agent, Hostname: hostname}
 		doc, err := builder.Build(ctx, desired, adaptor, index)
 		if err == nil {
 			err = p.publish(ctx, &doc)
@@ -167,7 +167,7 @@ func (p *StatusPublisher) publish(ctx context.Context, doc *status.Document) err
 			}
 			_, err = client.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 				Name: pod.Name + "-status", Namespace: p.cli.Namespace,
-				Labels:          map[string]string{status.ConfigMapLabel: "", status.GroupLabel: doc.Group},
+				Labels:          map[string]string{status.ConfigMapLabel: ""},
 				OwnerReferences: []metav1.OwnerReference{owner},
 			}, BinaryData: map[string][]byte{status.DataKey: payload}}, metav1.CreateOptions{})
 			return err

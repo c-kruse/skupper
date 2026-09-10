@@ -11,14 +11,12 @@ import (
 
 const (
 	ConfigMapLabel   = "internal.skupper.io/router-status"
-	GroupLabel       = "internal.skupper.io/router-group"
 	DataKey          = "status.json.gz"
 	MaxPrefixMatches = 128
 )
 
 type Document struct {
 	Version       int            `json:"version"`
-	Group         string         `json:"group"`
 	Router        Router         `json:"router"`
 	Links         []Link         `json:"links,omitempty"`
 	RouterAccess  []RouterAccess `json:"routerAccess,omitempty"`

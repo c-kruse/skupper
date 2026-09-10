@@ -87,7 +87,7 @@ func testPod(name string) *corev1.Pod {
 }
 
 func TestPublishCreatesGzipConfigMapWithOwnershipAndLabels(t *testing.T) {
-	doc := &status.Document{Version: 1, Group: "router-group", Router: status.Router{ID: "router-a", Hostname: "pod-a"}}
+	doc := &status.Document{Version: 1, Router: status.Router{ID: "router-a", Hostname: "pod-a"}}
 	publisher, client := testPublisher(testPod(doc.Router.Hostname))
 
 	if err := publisher.publish(context.Background(), doc); err != nil {
@@ -101,14 +101,11 @@ func TestPublishCreatesGzipConfigMapWithOwnershipAndLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status data is not valid gzip: %v", err)
 	}
-	if decoded.Group != doc.Group || decoded.Router.ID != doc.Router.ID || decoded.Router.PodUID != "pod-uid" {
+	if decoded.Router.ID != doc.Router.ID || decoded.Router.PodUID != "pod-uid" {
 		t.Fatalf("unexpected decoded status: %#v", decoded)
 	}
 	if value, ok := cm.Labels[status.ConfigMapLabel]; !ok || value != "" {
 		t.Fatalf("missing status label: %#v", cm.Labels)
-	}
-	if cm.Labels[status.GroupLabel] != doc.Group {
-		t.Fatalf("unexpected group label: %#v", cm.Labels)
 	}
 	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].UID != types.UID("pod-uid") || cm.OwnerReferences[0].Kind != "Pod" {
 		t.Fatalf("unexpected owner references: %#v", cm.OwnerReferences)
@@ -116,7 +113,7 @@ func TestPublishCreatesGzipConfigMapWithOwnershipAndLabels(t *testing.T) {
 }
 
 func TestPublishSuppressesNoOpUpdate(t *testing.T) {
-	doc := &status.Document{Version: 1, Group: "router-group", Router: status.Router{Hostname: "pod-a", PodUID: "pod-uid"}}
+	doc := &status.Document{Version: 1, Router: status.Router{Hostname: "pod-a", PodUID: "pod-uid"}}
 	payload, err := status.Encode(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +133,7 @@ func TestPublishSuppressesNoOpUpdate(t *testing.T) {
 }
 
 func TestPublishRetriesConflict(t *testing.T) {
-	doc := &status.Document{Version: 1, Group: "router-group", Router: status.Router{Hostname: "pod-a"}}
+	doc := &status.Document{Version: 1, Router: status.Router{Hostname: "pod-a"}}
 	existing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: doc.Router.Hostname + "-status", Namespace: testNamespace}, BinaryData: map[string][]byte{status.DataKey: []byte("old")}}
 	publisher, client := testPublisher(testPod(doc.Router.Hostname), existing)
 	updates := 0
@@ -157,7 +154,7 @@ func TestPublishRetriesConflict(t *testing.T) {
 }
 
 func TestPublishCanceledContextStopsWrites(t *testing.T) {
-	doc := &status.Document{Version: 1, Group: "router-group"}
+	doc := &status.Document{Version: 1}
 	publisher, client := testPublisher()
 	client.ClearActions()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -176,8 +173,8 @@ func TestPublishReplicasDoNotOverwriteEachOther(t *testing.T) {
 	podA, podB := testPod("pod-a"), testPod("pod-b")
 	podB.UID = "pod-b-uid"
 	publisher, client := testPublisher(podA, podB)
-	docA := &status.Document{Version: 1, Group: "same-group", Router: status.Router{ID: "router-a", Hostname: "pod-a"}}
-	docB := &status.Document{Version: 1, Group: "same-group", Router: status.Router{ID: "router-b", Hostname: "pod-b"}}
+	docA := &status.Document{Version: 1, Router: status.Router{ID: "router-a", Hostname: "pod-a"}}
+	docB := &status.Document{Version: 1, Router: status.Router{ID: "router-b", Hostname: "pod-b"}}
 	if err := publisher.publish(context.Background(), docA); err != nil {
 		t.Fatal(err)
 	}

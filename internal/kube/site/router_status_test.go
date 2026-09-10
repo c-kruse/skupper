@@ -15,15 +15,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func eligibleObservation(s *Site, podName, group string, doc *routerstatus.Document) *routerstatus.Document {
-	doc.Group = group
+func eligibleObservation(s *Site, podName string, doc *routerstatus.Document) *routerstatus.Document {
 	doc.Router.Hostname = podName
 	doc.Router.PodUID = podName + "-uid"
 	if s.routerPods == nil {
 		s.routerPods = map[string]*corev1.Pod{}
 	}
 	s.routerPods[s.namespace+"/"+podName] = &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: s.namespace, UID: types.UID(doc.Router.PodUID), Labels: map[string]string{"skupper.io/group": group}},
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: s.namespace, UID: types.UID(doc.Router.PodUID)},
 	}
 	return doc
 }
@@ -60,8 +59,8 @@ func TestRouterStatusMergesGroupsAndPersistsStatus(t *testing.T) {
 		TcpListeners: []routerstatus.TcpListener{{Name: "listener/orders", Present: true, OperStatus: "up"}},
 		Network:      routerstatus.Network{Sites: []routerstatus.Site{{ID: "a"}, {ID: "b"}}},
 	}
-	assert.NilError(t, s.RouterStatusUpdated("group1", eligibleObservation(s, "group1", "group1", down)))
-	assert.NilError(t, s.RouterStatusUpdated("group2", eligibleObservation(s, "group2", "group2", up)))
+	assert.NilError(t, s.RouterStatusUpdated("group1", eligibleObservation(s, "group1", down)))
+	assert.NilError(t, s.RouterStatusUpdated("group2", eligibleObservation(s, "group2", up)))
 
 	link, err := s.clients.GetSkupperClient().SkupperV2alpha1().Links("test").Get(context.Background(), "east", metav1.GetOptions{})
 	assert.NilError(t, err)
@@ -114,8 +113,8 @@ func TestRouterStatusReplicaEligibility(t *testing.T) {
 	managed, err := s.newLink(linkDefinition)
 	assert.NilError(t, err)
 	s.links["east"] = managed
-	down := eligibleObservation(s, "pod-a", "group", &routerstatus.Document{Version: 1, Links: []routerstatus.Link{{Name: "east", Present: true, ConnectionStatus: "FAILED", RemoteSiteID: "wrong", Message: "connection refused"}}})
-	up := eligibleObservation(s, "pod-b", "group", &routerstatus.Document{Version: 1, Links: []routerstatus.Link{{Name: "east", Present: true, ConnectionStatus: "SUCCESS", RemoteSiteID: "right"}}})
+	down := eligibleObservation(s, "pod-a", &routerstatus.Document{Version: 1, Links: []routerstatus.Link{{Name: "east", Present: true, ConnectionStatus: "FAILED", RemoteSiteID: "wrong", Message: "connection refused"}}})
+	up := eligibleObservation(s, "pod-b", &routerstatus.Document{Version: 1, Links: []routerstatus.Link{{Name: "east", Present: true, ConnectionStatus: "SUCCESS", RemoteSiteID: "right"}}})
 	assert.NilError(t, s.RouterStatusUpdated("pod-a", down))
 	assert.NilError(t, s.RouterStatusUpdated("pod-b", up))
 	check := func(operational bool) {
@@ -141,18 +140,13 @@ func TestRouterStatusReplicaEligibility(t *testing.T) {
 		assert.NilError(t, s.RouterPodEvent("test/pod-b", pod))
 		check(true)
 	}
-	// A replaced pod or a pod from another group invalidates the observation.
-	for _, mutate := range []func(*corev1.Pod){
-		func(p *corev1.Pod) { p.UID = "replacement-uid" },
-		func(p *corev1.Pod) { p.Labels["skupper.io/group"] = "other" },
-	} {
-		pod := current.DeepCopy()
-		mutate(pod)
-		assert.NilError(t, s.RouterPodEvent("test/pod-b", pod))
-		check(false)
-		assert.NilError(t, s.RouterPodEvent("test/pod-b", current))
-		check(true)
-	}
+	// A replaced pod invalidates the observation.
+	replaced := current.DeepCopy()
+	replaced.UID = "replacement-uid"
+	assert.NilError(t, s.RouterPodEvent("test/pod-b", replaced))
+	check(false)
+	assert.NilError(t, s.RouterPodEvent("test/pod-b", current))
+	check(true)
 	assert.NilError(t, s.RouterPodEvent("test/pod-b", nil))
 	check(false)
 	assert.NilError(t, s.RouterPodEvent("test/pod-b", current))
@@ -167,12 +161,12 @@ func TestPrefixReplicaRolloutDoesNotRestoreOldTargets(t *testing.T) {
 	s.localOnlyStatus = true
 	_, err = s.bindings.UpdateListener(listener.Name, listener)
 	assert.NilError(t, err)
-	old := eligibleObservation(s, "pod-old", "group", &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.old"}}}})
-	current := eligibleObservation(s, "pod-new", "group", &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.new"}}}})
+	old := eligibleObservation(s, "pod-old", &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.old"}}}})
+	current := eligibleObservation(s, "pod-new", &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.new"}}}})
 	assert.NilError(t, s.RouterStatusUpdated("pod-old", old))
 	assert.NilError(t, s.RouterStatusUpdated("pod-new", current))
 	ptl := s.bindings.perTargetListeners["pods"]
-	assert.Equal(t, len(ptl.targets), 2, "same-group replicas contribute a union")
+	assert.Equal(t, len(ptl.targets), 2, "replicas contribute a union")
 
 	// The old pod is replaced; its observation no longer counts.
 	assert.NilError(t, s.RouterPodEvent("test/pod-old", nil))
@@ -207,7 +201,7 @@ func TestPrefixStatusReportsTruncation(t *testing.T) {
 			assert.NilError(t, err)
 			assert.NilError(t, s.updateListenerStatus(listener, s.missingTlsCredentialsErr(credentials)))
 			doc := &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.pod-a"}, Truncated: true}}}
-			eligibleObservation(s, "pod", "group", doc)
+			eligibleObservation(s, "pod", doc)
 			assert.NilError(t, s.RouterStatusUpdated("pod", doc))
 			got, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners("test").Get(context.Background(), "pods", metav1.GetOptions{})
 			assert.NilError(t, err)

@@ -1653,8 +1653,7 @@ func (s *Site) eligibleRouterStatus() []string {
 	keys := make([]string, 0, len(s.routerStatus))
 	for key, doc := range s.routerStatus {
 		pod := s.routerPods[s.namespace+"/"+key]
-		if pod == nil || key != doc.Router.Hostname || doc.Router.PodUID == "" || string(pod.UID) != doc.Router.PodUID ||
-			pod.Labels["skupper.io/group"] != doc.Group {
+		if pod == nil || key != doc.Router.Hostname || doc.Router.PodUID == "" || string(pod.UID) != doc.Router.PodUID {
 			continue
 		}
 		keys = append(keys, key)

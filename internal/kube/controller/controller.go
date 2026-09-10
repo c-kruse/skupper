@@ -755,16 +755,6 @@ func (c *Controller) routerStatusUpdate(key string, cm *corev1.ConfigMap) error 
 		c.log.Error("Error decoding router status", slog.String("site", key), slog.Any("error", err))
 		return c.getSite(namespace).RouterStatusUpdated(podName, nil)
 	}
-	// Group-owned documents from older adaptors are not replica observations.
-	owned := false
-	for _, owner := range cm.OwnerReferences {
-		if owner.APIVersion == "v1" && owner.Kind == "Pod" && owner.Name == podName && string(owner.UID) == doc.Router.PodUID && owner.UID != "" {
-			owned = true
-		}
-	}
-	if !owned || doc.Router.Hostname != podName || doc.Group == "" || doc.Group != cm.Labels[routerstatus.GroupLabel] {
-		return c.getSite(namespace).RouterStatusUpdated(podName, nil)
-	}
 	return c.getSite(namespace).RouterStatusUpdated(podName, doc)
 }
 

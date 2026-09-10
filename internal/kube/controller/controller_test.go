@@ -794,13 +794,13 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 		pod := f.pod("router-a", "test", map[string]string{"skupper.io/component": "router", "skupper.io/type": "site", "skupper.io/group": "skupper-router"}, nil, f.podStatus("10.1.1.40", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue)))
 		pod.UID = "router-uid"
 		payload, err := routerstatus.Encode(&routerstatus.Document{
-			Version: 1, Group: "skupper-router", Router: routerstatus.Router{Hostname: pod.Name, PodUID: string(pod.UID)},
+			Version: 1, Router: routerstatus.Router{Hostname: pod.Name, PodUID: string(pod.UID)},
 			Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend-a.", Matches: []string{"backend-a." + localTarget}}},
 			Network:  routerstatus.Network{Sites: []routerstatus.Site{{ID: "local"}, {ID: "remote"}}},
 		})
 		assert.NilError(t, err)
 		objects = append(objects, pod, &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "router-a-status", Namespace: "test", Labels: map[string]string{routerstatus.ConfigMapLabel: "", routerstatus.GroupLabel: "skupper-router"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}}},
+			ObjectMeta: metav1.ObjectMeta{Name: "router-a-status", Namespace: "test", Labels: map[string]string{routerstatus.ConfigMapLabel: ""}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}}},
 			BinaryData: map[string][]byte{routerstatus.DataKey: payload},
 		})
 	}
