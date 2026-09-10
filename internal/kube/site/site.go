@@ -1906,6 +1906,9 @@ func (s *Site) updateRouterStatusTargets(groups []string) error {
 }
 
 func (s *Site) RefreshRouterStatus() error {
+	if s.site == nil {
+		return nil
+	}
 	if s.localOnlyStatus {
 		if err := s.NetworkStatusUpdated(nil); err != nil {
 			return err

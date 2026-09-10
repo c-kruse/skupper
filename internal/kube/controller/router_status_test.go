@@ -1,16 +1,43 @@
 package controller
 
 import (
+	"context"
 	"flag"
 	"reflect"
 	"testing"
 
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
 	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
+
+func TestLocalOnlyListenersWithoutSite(t *testing.T) {
+	config, err := BoundConfig(flag.NewFlagSet("test", flag.ContinueOnError))
+	assert.NilError(t, err)
+	config.LegacyNetworkStatus = false
+	listener := &skupperv2alpha1.Listener{ObjectMeta: metav1.ObjectMeta{Name: "listener", Namespace: "test"}}
+	mkl := &skupperv2alpha1.MultiKeyListener{ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "test"}}
+	clients, err := fakeclient.NewFakeClient("test", nil, []runtime.Object{listener, mkl}, "")
+	assert.NilError(t, err)
+	controller, err := NewController(clients, config)
+	assert.NilError(t, err)
+	assert.NilError(t, controller.checkListener("test/listener", listener))
+	assert.NilError(t, controller.checkMultiKeyListener("test/multi", mkl))
+	api := clients.GetSkupperClient().SkupperV2alpha1()
+	gotListener, err := api.Listeners("test").Get(context.Background(), "listener", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Assert(t, meta.IsStatusConditionFalse(gotListener.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
+	gotMulti, err := api.MultiKeyListeners("test").Get(context.Background(), "multi", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Assert(t, meta.IsStatusConditionFalse(gotMulti.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
+	assert.NilError(t, controller.checkListener("test/listener", nil))
+	assert.NilError(t, controller.checkMultiKeyListener("test/multi", nil))
+}
 
 func TestRouterStatusHandlerRemovesOnlyInvalidReplica(t *testing.T) {
 	config, err := BoundConfig(flag.NewFlagSet("test", flag.ContinueOnError))
