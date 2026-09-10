@@ -18,7 +18,7 @@ func TestNetworkIndexBuildsStableSiteRouterMapping(t *testing.T) {
 
 	route.Route(vanflow.RecordMessage{Records: []vanflow.Record{
 		vanflow.SiteRecord{BaseRecord: vanflow.NewBase("site-b"), Name: ptr("Beta")},
-		vanflow.SiteRecord{BaseRecord: vanflow.NewBase("site-a"), Name: ptr("Alpha"), Namespace: ptr("ns"), Platform: ptr("kubernetes"), Version: ptr("2")},
+		vanflow.SiteRecord{BaseRecord: vanflow.NewBase("site-a"), Name: ptr("Alpha")},
 		vanflow.RouterRecord{BaseRecord: vanflow.NewBase("source:0"), Parent: ptr("site-a"), Name: ptr("0/router-a")},
 		vanflow.RouterRecord{BaseRecord: vanflow.BaseRecord{ID: "ended", EndTime: &end}, Parent: ptr("site-b"), Name: ptr("0/router-ended")},
 		vanflow.LinkRecord{BaseRecord: vanflow.NewBase("ignored")},
@@ -27,14 +27,14 @@ func TestNetworkIndexBuildsStableSiteRouterMapping(t *testing.T) {
 	if notifications != 4 { // SITE and ROUTER records only; LINK is not retained.
 		t.Fatalf("got %d notifications, want 4", notifications)
 	}
-	if got := index.Sites(); len(got) != 2 || got[0] != (Site{ID: "site-a", Name: "Alpha", Namespace: "ns", Platform: "kubernetes", Version: "2"}) {
+	if got := index.Sites(); len(got) != 2 || got[0] != (Site{ID: "site-a", Name: "Alpha"}) {
 		t.Fatalf("unexpected sites: %#v", got)
-	}
-	if got := index.Routers(); len(got) != 1 || got[0] != (RouterRef{ID: "router-a", SiteID: "site-a"}) {
-		t.Fatalf("unexpected routers: %#v", got)
 	}
 	if got, ok := index.SiteForRouter("router-a"); !ok || got.ID != "site-a" || got.Name != "Alpha" {
 		t.Fatalf("unexpected router site: %#v, %v", got, ok)
+	}
+	if _, ok := index.SiteForRouter("router-ended"); ok {
+		t.Fatal("ended router must not resolve to a site")
 	}
 	if _, ok := index.SiteForRouter("source:0"); ok {
 		t.Fatal("record identity must not be exposed as router ID")
@@ -54,8 +54,8 @@ func TestNetworkIndexPurgesForgottenSource(t *testing.T) {
 	if got := index.Sites(); len(got) != 0 {
 		t.Fatalf("forgotten sites remain: %#v", got)
 	}
-	if got := index.Routers(); len(got) != 0 {
-		t.Fatalf("forgotten routers remain: %#v", got)
+	if _, ok := index.SiteForRouter("router"); ok {
+		t.Fatal("forgotten routers remain")
 	}
 }
 

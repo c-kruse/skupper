@@ -15,54 +15,36 @@ const (
 	MaxPrefixMatches = 128
 )
 
+// Document is what a router pod publishes about itself. It carries only what
+// the controller consumes; add fields when a consumer appears.
 type Document struct {
-	Version       int            `json:"version"`
-	Router        Router         `json:"router"`
-	Links         []Link         `json:"links,omitempty"`
-	RouterAccess  []RouterAccess `json:"routerAccess,omitempty"`
-	TcpListeners  []TcpListener  `json:"tcpListeners,omitempty"`
-	TcpConnectors []TcpConnector `json:"tcpConnectors,omitempty"`
-	Addresses     []Address      `json:"addresses,omitempty"`
-	Prefixes      []PrefixQuery  `json:"prefixes,omitempty"`
-	Network       Network        `json:"network"`
+	Version      int           `json:"version"`
+	Router       Router        `json:"router"`
+	Links        []Link        `json:"links,omitempty"`
+	TcpListeners []TcpListener `json:"tcpListeners,omitempty"`
+	Addresses    []Address     `json:"addresses,omitempty"`
+	Prefixes     []PrefixQuery `json:"prefixes,omitempty"`
+	Network      Network       `json:"network"`
 }
 type Router struct {
 	ID       string `json:"id"`
 	Mode     string `json:"mode"`
-	Version  string `json:"version"`
 	Hostname string `json:"hostname"`
 	PodUID   string `json:"podUid,omitempty"`
 }
 type Link struct {
 	Name             string `json:"name"`
-	Role             string `json:"role"`
 	Present          bool   `json:"present"`
 	ConnectionStatus string `json:"connectionStatus"`
 	Message          string `json:"message,omitempty"`
-	RemoteRouterID   string `json:"remoteRouterId,omitempty"`
-	RemoteAccessID   string `json:"remoteAccessId,omitempty"`
 	RemoteSiteID     string `json:"remoteSiteId,omitempty"`
 	RemoteSiteName   string `json:"remoteSiteName,omitempty"`
 }
-type RouterAccess struct {
-	Name    string   `json:"name"`
-	Role    string   `json:"role"`
-	Present bool     `json:"present"`
-	Peers   []string `json:"peers,omitempty"`
-}
 type TcpListener struct {
 	Name       string `json:"name"`
-	Address    string `json:"address"`
 	Present    bool   `json:"present"`
 	OperStatus string `json:"operStatus"`
 	Message    string `json:"message,omitempty"`
-}
-type TcpConnector struct {
-	Name    string `json:"name"`
-	Address string `json:"address"`
-	Host    string `json:"host"`
-	Port    string `json:"port"`
-	Present bool   `json:"present"`
 }
 type Address struct {
 	Name      string `json:"name"`
@@ -74,19 +56,11 @@ type PrefixQuery struct {
 	Truncated bool     `json:"truncated"`
 }
 type Network struct {
-	Sites   []Site      `json:"sites"`
-	Routers []RouterRef `json:"routers,omitempty"`
+	Sites []Site `json:"sites"`
 }
 type Site struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Platform  string `json:"platform"`
-	Version   string `json:"version"`
-}
-type RouterRef struct {
-	ID     string `json:"id"`
-	SiteID string `json:"siteId"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 func Encode(doc *Document) ([]byte, error) {

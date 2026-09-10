@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -138,58 +137,27 @@ func (n *NetworkIndex) Sites() []Site {
 		if !ok || ended(record.EndTime) {
 			continue
 		}
-		sites = append(sites, Site{
-			ID:        record.Identity(),
-			Name:      stringValue(record.Name),
-			Namespace: stringValue(record.Namespace),
-			Platform:  stringValue(record.Platform),
-			Version:   stringValue(record.Version),
-		})
+		sites = append(sites, Site{ID: record.Identity(), Name: stringValue(record.Name)})
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i].ID < sites[j].ID })
 	return sites
 }
 
-func (n *NetworkIndex) Routers() []RouterRef {
-	var routers []RouterRef
+// SiteForRouter resolves a router's VanFlow name ("0/<routerID>") to its site.
+func (n *NetworkIndex) SiteForRouter(routerID string) (Site, bool) {
 	for _, entry := range n.records.List() {
 		record, ok := entry.Record.(vanflow.RouterRecord)
-		if !ok || ended(record.EndTime) || record.Parent == nil || record.Name == nil {
-			continue
-		}
-		id, ok := strings.CutPrefix(*record.Name, "0/")
-		if !ok || id == "" {
-			continue
-		}
-		routers = append(routers, RouterRef{ID: id, SiteID: *record.Parent})
-	}
-	sort.Slice(routers, func(i, j int) bool { return routers[i].ID < routers[j].ID })
-	return routers
-}
-
-func (n *NetworkIndex) SiteForRouter(routerID string) (Site, bool) {
-	for _, router := range n.Routers() {
-		if router.ID != routerID {
+		if !ok || ended(record.EndTime) || record.Parent == nil || stringValue(record.Name) != "0/"+routerID {
 			continue
 		}
 		for _, site := range n.Sites() {
-			if site.ID == router.SiteID {
+			if site.ID == *record.Parent {
 				return site, true
 			}
 		}
-		break
+		return Site{}, false
 	}
 	return Site{}, false
-}
-
-func (n *NetworkIndex) RouterVersion(routerID string) string {
-	for _, entry := range n.records.List() {
-		record, ok := entry.Record.(vanflow.RouterRecord)
-		if ok && !ended(record.EndTime) && stringValue(record.Name) == "0/"+routerID {
-			return stringValue(record.BuildVersion)
-		}
-	}
-	return ""
 }
 
 func ended(end *vanflow.Time) bool {

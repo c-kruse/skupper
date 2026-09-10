@@ -42,28 +42,45 @@ func (f *fakeQuery) QueryByAgentAddressContext(ctx context.Context, entity strin
 	return rows[offset:end], nil
 }
 
+type fakeIndex map[string]Site // router ID -> site
+
+func (f fakeIndex) Sites() []Site {
+	var sites []Site
+	for _, s := range f {
+		sites = append(sites, s)
+	}
+	return sites
+}
+func (f fakeIndex) SiteForRouter(routerID string) (Site, bool) {
+	s, ok := f[routerID]
+	return s, ok
+}
+
 func TestBuildDesiredAndInteriorPrefixQuery(t *testing.T) {
 	interior := qdr.GetRouterAgentAddress("interior-a", false)
 	f := &fakeQuery{records: map[string][]qdr.Record{
-		"|io.skupper.router.router":       {{"id": "edge-a", "mode": "edge"}},
-		"|io.skupper.router.connector":    {{"name": "link", "role": "edge", "connectionStatus": "SUCCESS"}},
-		"|io.skupper.router.connection":   {{"host": "west:4567", "dir": "out", "role": "edge", "opened": true, "container": "interior-a", "properties": map[string]interface{}{"qd.access-id": "access-a"}}, {"localSocket": "[::]:5678", "dir": "in", "role": "edge", "opened": true, "container": "peer-a"}},
-		"|io.skupper.router.listener":     {{"name": "access", "role": "edge"}},
-		"|io.skupper.router.tcpListener":  {{"name": "tl", "operStatus": "up"}},
-		"|io.skupper.router.tcpConnector": {}, "|io.skupper.router.listenerAddress": {},
+		"|io.skupper.router.router":                    {{"id": "edge-a", "mode": "edge"}},
+		"|io.skupper.router.connector":                 {{"name": "link", "role": "edge", "connectionStatus": "SUCCESS"}},
+		"|io.skupper.router.connection":                {{"host": "west:4567", "dir": "out", "role": "edge", "opened": true, "container": "interior-a"}},
+		"|io.skupper.router.tcpListener":               {{"name": "tl", "operStatus": "up"}},
+		"|io.skupper.router.listenerAddress":           {},
 		"|io.skupper.router.router.address":            {{"name": "Msvc-local", "subscriberCount": 1}},
 		interior + "|io.skupper.router.router.address": {{"name": "Msvc-remote", "remoteCount": 1}},
 	}}
-	desired := &qdr.RouterConfig{Connectors: map[string]qdr.Connector{"link": {Name: "link", Role: "edge", Host: "west", Port: "4567"}, "missing": {Name: "missing", Role: "edge", Host: "none", Port: "1"}}, Listeners: map[string]qdr.Listener{"access": {Name: "access", Role: "edge", Port: 5678}}, Bridges: qdr.BridgeConfig{TcpListeners: qdr.TcpEndpointMap{"tl": {Name: "tl", Address: "svc-local"}}, TcpConnectors: qdr.TcpEndpointMap{}, ListenerAddresses: qdr.ListenerAddressMap{}}}
-	doc, err := (Builder{Client: f}).Build(context.Background(), desired, qdr.AdaptorConfig{AddressPrefixes: []qdr.AddressPrefix{{Prefix: "svc-"}}}, nil)
+	desired := &qdr.RouterConfig{Connectors: map[string]qdr.Connector{"link": {Name: "link", Role: "edge", Host: "west", Port: "4567"}, "missing": {Name: "missing", Role: "edge", Host: "none", Port: "1"}}, Bridges: qdr.BridgeConfig{TcpListeners: qdr.TcpEndpointMap{"tl": {Name: "tl", Address: "svc-local"}}, ListenerAddresses: qdr.ListenerAddressMap{}}}
+	index := fakeIndex{"interior-a": {ID: "site-west", Name: "west"}}
+	doc, err := (Builder{Client: f}).Build(context.Background(), desired, qdr.AdaptorConfig{AddressPrefixes: []qdr.AddressPrefix{{Prefix: "svc-"}}}, index)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Links) != 2 || !doc.Links[0].Present || doc.Links[0].RemoteRouterID != "interior-a" || doc.Links[0].RemoteAccessID != "access-a" || doc.Links[1].Present {
+	if len(doc.Links) != 2 || !doc.Links[0].Present || doc.Links[0].RemoteSiteID != "site-west" || doc.Links[0].RemoteSiteName != "west" || doc.Links[1].Present || doc.Links[1].RemoteSiteID != "" {
 		t.Fatalf("links: %#v", doc.Links)
 	}
-	if !reflect.DeepEqual(doc.RouterAccess[0].Peers, []string{"peer-a"}) || !doc.Addresses[0].Reachable {
-		t.Fatalf("access/address: %#v %#v", doc.RouterAccess, doc.Addresses)
+	if len(doc.TcpListeners) != 1 || !doc.TcpListeners[0].Present || doc.TcpListeners[0].OperStatus != "up" || !doc.Addresses[0].Reachable {
+		t.Fatalf("listeners/address: %#v %#v", doc.TcpListeners, doc.Addresses)
+	}
+	if len(doc.Network.Sites) != 1 {
+		t.Fatalf("network: %#v", doc.Network)
 	}
 	if !reflect.DeepEqual(doc.Prefixes[0].Matches, []string{"svc-remote"}) {
 		t.Fatalf("prefix: %#v", doc.Prefixes)
@@ -109,7 +126,6 @@ func TestConnectionHelpers(t *testing.T) {
 		{"host": "west:4567", "dir": "out", "role": "edge", "opened": true, "container": "router-west"},
 		{"host": "east:5678", "dir": "out", "role": "edge", "opened": true, "container": "router-east"},
 		{"host": "east:5678", "dir": "out", "role": "edge", "opened": false, "container": "stale"},
-		{"localSocket": "127.0.0.1:5678", "dir": "in", "role": "edge", "opened": true, "container": "peer-b"},
 	}
 	c, ok := connectorConnection(cs, "east", "5678", "edge")
 	if !ok || c.AsString("container") != "router-east" {
@@ -117,9 +133,6 @@ func TestConnectionHelpers(t *testing.T) {
 	}
 	if _, ok := connectorConnection(cs, "missing", "5678", "edge"); ok {
 		t.Fatal("missing connector acquired a peer")
-	}
-	if got := listenerPeers(cs, "5678", "edge"); !reflect.DeepEqual(got, []string{"peer-b"}) {
-		t.Fatal(got)
 	}
 }
 func TestPrefixQuerySortsAndTruncates129(t *testing.T) {
