@@ -759,7 +759,6 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 	routerConfigMap.Labels = map[string]string{
 		"internal.skupper.io/router-config": "",
 	}
-	routerConfigMap.ResourceVersion = "revision-a"
 	legacyTarget, localTarget := "pod-a", "pod-a"
 	if legacy {
 		localTarget = "unselected"
@@ -796,7 +795,6 @@ func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus b
 		pod.UID = "router-uid"
 		payload, err := routerstatus.Encode(&routerstatus.Document{
 			Version: 1, Group: "skupper-router", Router: routerstatus.Router{Hostname: pod.Name, PodUID: string(pod.UID)},
-			Applied:  routerstatus.Applied{ResourceVersion: "revision-a"},
 			Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend-a.", Matches: []string{"backend-a." + localTarget}}},
 			Network:  routerstatus.Network{Sites: []routerstatus.Site{{ID: "local"}, {ID: "remote"}}},
 		})

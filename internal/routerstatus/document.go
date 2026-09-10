@@ -20,7 +20,6 @@ type Document struct {
 	Version       int            `json:"version"`
 	Group         string         `json:"group"`
 	Router        Router         `json:"router"`
-	Applied       Applied        `json:"applied"`
 	Links         []Link         `json:"links,omitempty"`
 	RouterAccess  []RouterAccess `json:"routerAccess,omitempty"`
 	TcpListeners  []TcpListener  `json:"tcpListeners,omitempty"`
@@ -35,10 +34,6 @@ type Router struct {
 	Version  string `json:"version"`
 	Hostname string `json:"hostname"`
 	PodUID   string `json:"podUid,omitempty"`
-}
-type Applied struct {
-	ResourceVersion string `json:"resourceVersion,omitempty"`
-	Error           string `json:"error,omitempty"`
 }
 type Link struct {
 	Name             string `json:"name"`

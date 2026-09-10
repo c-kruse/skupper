@@ -2,6 +2,7 @@ package site
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
@@ -18,17 +19,11 @@ func eligibleObservation(s *Site, podName, group string, doc *routerstatus.Docum
 	doc.Group = group
 	doc.Router.Hostname = podName
 	doc.Router.PodUID = podName + "-uid"
-	doc.Applied.ResourceVersion = "revision-a"
-	if s.routerConfigVersions == nil {
-		s.routerConfigVersions = map[string]string{}
-	}
-	s.routerConfigVersions[group] = "revision-a"
 	if s.routerPods == nil {
 		s.routerPods = map[string]*corev1.Pod{}
 	}
 	s.routerPods[s.namespace+"/"+podName] = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: s.namespace, UID: types.UID(doc.Router.PodUID), Labels: map[string]string{"skupper.io/group": group}},
-		Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 	}
 	return doc
 }
@@ -134,41 +129,35 @@ func TestRouterStatusReplicaEligibility(t *testing.T) {
 		}
 	}
 	check(true)
-	ready := s.routerPods["test/pod-b"].DeepCopy()
+	current := s.routerPods["test/pod-b"].DeepCopy()
+	// Pod phase and readiness do not gate observations: a router that is
+	// starting or terminating still reports its own links accurately.
 	for _, mutate := range []func(*corev1.Pod){
-		func(p *corev1.Pod) { p.Status.Conditions[0].Status = corev1.ConditionFalse },
 		func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending },
 		func(p *corev1.Pod) { now := metav1.Now(); p.DeletionTimestamp = &now },
+	} {
+		pod := current.DeepCopy()
+		mutate(pod)
+		assert.NilError(t, s.RouterPodEvent("test/pod-b", pod))
+		check(true)
+	}
+	// A replaced pod or a pod from another group invalidates the observation.
+	for _, mutate := range []func(*corev1.Pod){
 		func(p *corev1.Pod) { p.UID = "replacement-uid" },
 		func(p *corev1.Pod) { p.Labels["skupper.io/group"] = "other" },
 	} {
-		pod := ready.DeepCopy()
+		pod := current.DeepCopy()
 		mutate(pod)
 		assert.NilError(t, s.RouterPodEvent("test/pod-b", pod))
 		check(false)
-		assert.NilError(t, s.RouterPodEvent("test/pod-b", ready))
+		assert.NilError(t, s.RouterPodEvent("test/pod-b", current))
 		check(true)
 	}
 	assert.NilError(t, s.RouterPodEvent("test/pod-b", nil))
 	check(false)
-	assert.NilError(t, s.RouterPodEvent("test/pod-b", ready))
+	assert.NilError(t, s.RouterPodEvent("test/pod-b", current))
 	check(true)
-	// Versions are opaque: a lexically smaller new revision invalidates both.
-	assert.NilError(t, s.RouterConfigVersionUpdated("group", "a-new"))
-	check(false)
-	newUp := *up
-	newUp.Applied.ResourceVersion = "a-new"
-	assert.NilError(t, s.RouterStatusUpdated("pod-b", &newUp))
-	check(true)
-	assert.DeepEqual(t, s.eligibleRouterStatus(), []string{"pod-b"})
-	// Future observation arrives first, then the config event makes it eligible.
-	newUp.Applied.ResourceVersion = "another-revision"
-	assert.NilError(t, s.RouterStatusUpdated("pod-b", &newUp))
-	check(false)
-	assert.NilError(t, s.RouterConfigVersionUpdated("group", "another-revision"))
-	check(true)
-	assert.NilError(t, s.RouterConfigVersionUpdated("group", ""))
-	check(false)
+	assert.DeepEqual(t, s.eligibleRouterStatus(), []string{"pod-a", "pod-b"})
 }
 
 func TestPrefixReplicaRolloutDoesNotRestoreOldTargets(t *testing.T) {
@@ -184,20 +173,26 @@ func TestPrefixReplicaRolloutDoesNotRestoreOldTargets(t *testing.T) {
 	assert.NilError(t, s.RouterStatusUpdated("pod-new", current))
 	ptl := s.bindings.perTargetListeners["pods"]
 	assert.Equal(t, len(ptl.targets), 2, "same-group replicas contribute a union")
-	assert.NilError(t, s.RouterConfigVersionUpdated("group", "revision-b"))
-	assert.Equal(t, len(ptl.targets), 2, "no current observation must not erase target configuration")
-	current.Applied.ResourceVersion = "revision-b"
-	assert.NilError(t, s.RouterStatusUpdated("pod-new", current))
+
+	// The old pod is replaced; its observation no longer counts.
+	assert.NilError(t, s.RouterPodEvent("test/pod-old", nil))
 	assert.Equal(t, len(ptl.targets), 1)
 	assert.Assert(t, ptl.targets["new"] != 0)
 	assert.NilError(t, s.RouterStatusUpdated("pod-old", old))
-	assert.Equal(t, len(ptl.targets), 1, "old revision must not restore old targets")
+	assert.Equal(t, len(ptl.targets), 1, "an observation without a live pod must not restore old targets")
+
+	// A router that has not seen the prefix yet is not an empty result.
+	unaware := *current
+	unaware.Prefixes = nil
+	assert.NilError(t, s.RouterStatusUpdated("pod-new", &unaware))
+	assert.Equal(t, len(ptl.targets), 1, "unobserved prefix must not erase target configuration")
+
 	current.Prefixes[0].Matches = nil
 	assert.NilError(t, s.RouterStatusUpdated("pod-new", current))
 	assert.Equal(t, len(ptl.targets), 0, "current empty result is authoritative")
 }
 
-func TestPrefixStatusPreservesConfigurationErrors(t *testing.T) {
+func TestPrefixStatusReportsTruncation(t *testing.T) {
 	for _, credentials := range []string{"", "missing-secret"} {
 		t.Run(credentials, func(t *testing.T) {
 			listener := &skupperv2alpha1.Listener{
@@ -210,26 +205,30 @@ func TestPrefixStatusPreservesConfigurationErrors(t *testing.T) {
 			s.SetLegacyNetworkStatus(false)
 			_, err = s.bindings.UpdateListener(listener.Name, listener)
 			assert.NilError(t, err)
+			assert.NilError(t, s.updateListenerStatus(listener, s.missingTlsCredentialsErr(credentials)))
 			doc := &routerstatus.Document{Version: 1, Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend.", Matches: []string{"backend.pod-a"}, Truncated: true}}}
-			eligibleObservation(s, "group", "group", doc)
-			for i := 0; i < 3; i++ {
-				assert.NilError(t, s.RouterStatusUpdated("group", doc))
-				got, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners("test").Get(context.Background(), "pods", metav1.GetOptions{})
-				assert.NilError(t, err)
-				assert.Assert(t, meta.IsStatusConditionFalse(got.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
-				assert.NilError(t, s.updateListenerStatus(got, s.missingTlsCredentialsErr(credentials)))
-			}
+			eligibleObservation(s, "pod", "group", doc)
+			assert.NilError(t, s.RouterStatusUpdated("pod", doc))
+			got, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners("test").Get(context.Background(), "pods", metav1.GetOptions{})
+			assert.NilError(t, err)
+			configured := meta.FindStatusCondition(got.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED)
+			assert.Assert(t, configured != nil)
+			assert.Equal(t, configured.Status, metav1.ConditionFalse)
 			ptl := s.bindings.perTargetListeners["pods"]
 			if credentials != "" {
 				assert.Equal(t, len(ptl.targets), 0, "missing TLS must prevent target exposure")
-			} else {
-				assert.Equal(t, len(ptl.targets), 1)
-				doc.Prefixes[0].Truncated = false
-				assert.NilError(t, s.RouterStatusUpdated("group", doc))
-				got, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners("test").Get(context.Background(), "pods", metav1.GetOptions{})
-				assert.NilError(t, err)
-				assert.Assert(t, meta.IsStatusConditionTrue(got.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
+				return
 			}
+			assert.Assert(t, strings.Contains(configured.Message, "truncated"), configured.Message)
+			assert.Equal(t, len(ptl.targets), 1)
+			// As with legacy network status, ordinary reconciliation restores
+			// Configured once the observation no longer reports an error.
+			doc.Prefixes[0].Truncated = false
+			assert.NilError(t, s.RouterStatusUpdated("pod", doc))
+			assert.NilError(t, s.updateListenerStatus(got, nil))
+			got, err = s.clients.GetSkupperClient().SkupperV2alpha1().Listeners("test").Get(context.Background(), "pods", metav1.GetOptions{})
+			assert.NilError(t, err)
+			assert.Assert(t, meta.IsStatusConditionTrue(got.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED))
 		})
 	}
 }

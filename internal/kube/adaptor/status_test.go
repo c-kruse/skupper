@@ -48,7 +48,7 @@ func TestStatusPublisherRateLimit(t *testing.T) {
 func TestConfigUpdatedReadsQdrSnapshot(t *testing.T) {
 	for _, threshold := range []int{0, 1} {
 		publisher, _ := testPublisher()
-		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "revision-a"}}
+		cm := &corev1.ConfigMap{}
 		config := qdr.InitialConfig("router-a", "site-a", "test", true, 3)
 		config.AddConnector(qdr.Connector{Name: "west", Role: "edge", Host: "west", Port: "4567"})
 		writer := kubeqdr.ConfigMapWriter{CompressionThreshold: threshold}
@@ -58,21 +58,17 @@ func TestConfigUpdatedReadsQdrSnapshot(t *testing.T) {
 		if err := kubeqdr.WriteAdaptorConfigToConfigMap(qdr.AdaptorConfig{Version: 1, AddressPrefixes: []qdr.AddressPrefix{{Prefix: "backend."}}}, cm); err != nil {
 			t.Fatal(err)
 		}
-		publisher.ConfigUpdated(cm, errors.New("sync failed"))
+		publisher.ConfigUpdated(cm)
 		if publisher.desired == nil || publisher.desired.Connectors["west"].Host != "west" || publisher.desired.Metadata.Mode != qdr.ModeEdge {
 			t.Fatalf("threshold %d: desired = %#v", threshold, publisher.desired)
 		}
-		if publisher.applied != (status.Applied{ResourceVersion: "revision-a", Error: "sync failed"}) || len(publisher.adaptor.AddressPrefixes) != 1 || publisher.adaptor.AddressPrefixes[0].Prefix != "backend." {
-			t.Fatalf("applied/adaptor = %#v / %#v", publisher.applied, publisher.adaptor)
+		if len(publisher.adaptor.AddressPrefixes) != 1 || publisher.adaptor.AddressPrefixes[0].Prefix != "backend." {
+			t.Fatalf("adaptor = %#v", publisher.adaptor)
 		}
 		select {
 		case <-publisher.next:
 		default:
 			t.Fatal("configuration update did not notify publisher")
-		}
-		publisher.ConfigUpdated(cm, nil)
-		if publisher.applied.Error != "" {
-			t.Fatal("successful sync retained previous error")
 		}
 	}
 }
@@ -140,7 +136,7 @@ func TestPublishSuppressesNoOpUpdate(t *testing.T) {
 }
 
 func TestPublishRetriesConflict(t *testing.T) {
-	doc := &status.Document{Version: 1, Group: "router-group", Router: status.Router{Hostname: "pod-a"}, Applied: status.Applied{ResourceVersion: "2"}}
+	doc := &status.Document{Version: 1, Group: "router-group", Router: status.Router{Hostname: "pod-a"}}
 	existing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: doc.Router.Hostname + "-status", Namespace: testNamespace}, BinaryData: map[string][]byte{status.DataKey: []byte("old")}}
 	publisher, client := testPublisher(testPod(doc.Router.Hostname), existing)
 	updates := 0
@@ -190,7 +186,7 @@ func TestPublishReplicasDoNotOverwriteEachOther(t *testing.T) {
 	if err := publisherB.publish(context.Background(), docB); err != nil {
 		t.Fatal(err)
 	}
-	docA.Applied.ResourceVersion = "new-revision"
+	docA.Router.ID = "router-a-restarted"
 	if err := publisher.publish(context.Background(), docA); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +205,7 @@ func TestPublishReplicasDoNotOverwriteEachOther(t *testing.T) {
 		if cm.Name != doc.Router.Hostname+"-status" || cm.OwnerReferences[0].Name != doc.Router.Hostname || string(cm.OwnerReferences[0].UID) != doc.Router.PodUID {
 			t.Fatalf("incorrect pod ownership: %#v / %#v", cm.ObjectMeta, doc.Router)
 		}
-		if doc.Router.Hostname == "pod-b" && doc.Applied.ResourceVersion != "" {
+		if doc.Router.Hostname == "pod-b" && doc.Router.ID != "router-b" {
 			t.Fatal("pod-a overwrote pod-b")
 		}
 	}

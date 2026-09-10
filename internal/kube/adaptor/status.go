@@ -28,7 +28,6 @@ type StatusPublisher struct {
 	mu      sync.Mutex
 	desired *qdr.RouterConfig
 	adaptor qdr.AdaptorConfig
-	applied status.Applied
 	next    chan struct{}
 	limiter *rate.Limiter
 	podUID  string
@@ -51,7 +50,7 @@ func (p *StatusPublisher) Notify() {
 	}
 }
 
-func (p *StatusPublisher) ConfigUpdated(cm *corev1.ConfigMap, syncErr error) {
+func (p *StatusPublisher) ConfigUpdated(cm *corev1.ConfigMap) {
 	data, err := kubeqdr.GetRouterConfigData(cm)
 	if err != nil {
 		slog.Error("Reading status configuration", "error", err)
@@ -67,12 +66,8 @@ func (p *StatusPublisher) ConfigUpdated(cm *corev1.ConfigMap, syncErr error) {
 		slog.Error("Parsing adaptor configuration", "error", err)
 		return
 	}
-	applied := status.Applied{ResourceVersion: cm.ResourceVersion}
-	if syncErr != nil {
-		applied.Error = syncErr.Error()
-	}
 	p.mu.Lock()
-	p.desired, p.adaptor, p.applied = &desired, adaptor, applied
+	p.desired, p.adaptor = &desired, adaptor
 	p.mu.Unlock()
 	p.Notify()
 }
@@ -109,7 +104,7 @@ func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
 			return
 		}
 		p.mu.Lock()
-		desired, adaptor, applied := p.desired, p.adaptor, p.applied
+		desired, adaptor := p.desired, p.adaptor
 		p.mu.Unlock()
 		if desired == nil {
 			continue
@@ -127,7 +122,7 @@ func (p *StatusPublisher) publishLoop(ctx context.Context, hostname string) {
 			}
 		}
 		builder := status.Builder{Client: agent, Group: deploymentName(), Hostname: hostname}
-		doc, err := builder.Build(ctx, desired, adaptor, applied, index)
+		doc, err := builder.Build(ctx, desired, adaptor, index)
 		if err == nil {
 			err = p.publish(ctx, &doc)
 		} else {

@@ -50,30 +50,29 @@ type Labelling interface {
 }
 
 type Site struct {
-	initialised          bool
-	site                 *skupperv2alpha1.Site
-	name                 string
-	namespace            string
-	clients              *watchers.EventProcessor
-	bindings             *ExtendedBindings
-	links                map[string]*site.Link
-	errors               map[string]string
-	linkAccess           site.RouterAccessMap
-	certs                certificates.CertificateManager
-	access               SecuredAccessFactory
-	accessMapping        securedAccessMap
-	sizes                *sizing.Registry
-	routerPods           map[string]*corev1.Pod
-	logger               *slog.Logger
-	currentGroups        []string
-	labelling            Labelling
-	profiles             *secrets.ProfilesWatcher
-	disableSecCtx        bool
-	leadListeners        map[string]string
-	configWriter         kubeqdr.ConfigMapWriter
-	routerStatus         map[string]*routerstatus.Document
-	routerConfigVersions map[string]string
-	localOnlyStatus      bool
+	initialised     bool
+	site            *skupperv2alpha1.Site
+	name            string
+	namespace       string
+	clients         *watchers.EventProcessor
+	bindings        *ExtendedBindings
+	links           map[string]*site.Link
+	errors          map[string]string
+	linkAccess      site.RouterAccessMap
+	certs           certificates.CertificateManager
+	access          SecuredAccessFactory
+	accessMapping   securedAccessMap
+	sizes           *sizing.Registry
+	routerPods      map[string]*corev1.Pod
+	logger          *slog.Logger
+	currentGroups   []string
+	labelling       Labelling
+	profiles        *secrets.ProfilesWatcher
+	disableSecCtx   bool
+	leadListeners   map[string]string
+	configWriter    kubeqdr.ConfigMapWriter
+	routerStatus    map[string]*routerstatus.Document
+	localOnlyStatus bool
 }
 
 func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs certificates.CertificateManager, access SecuredAccessFactory, sizes *sizing.Registry, labelling Labelling, disableSecCtx bool, configWriter kubeqdr.ConfigMapWriter) *Site {
@@ -92,12 +91,11 @@ func NewSite(namespace string, eventProcessor *watchers.EventProcessor, certs ce
 		logger: logger.With(
 			slog.String("component", "kube.site.site"),
 		),
-		labelling:            labelling,
-		disableSecCtx:        disableSecCtx,
-		leadListeners:        map[string]string{},
-		configWriter:         configWriter,
-		routerStatus:         map[string]*routerstatus.Document{},
-		routerConfigVersions: map[string]string{},
+		labelling:     labelling,
+		disableSecCtx: disableSecCtx,
+		leadListeners: map[string]string{},
+		configWriter:  configWriter,
+		routerStatus:  map[string]*routerstatus.Document{},
 	}
 	site.profiles = secrets.NewProfilesWatcher(
 		sslSecretsWatcher(namespace, eventProcessor),
@@ -905,9 +903,6 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 		return nil, err
 	}
 	byName := map[string]*qdr.RouterConfig{}
-	if s.routerConfigVersions == nil {
-		s.routerConfigVersions = map[string]string{}
-	}
 	for _, cm := range list.Items {
 		if !isOwner(s.site, cm.OwnerReferences) {
 			s.logger.Error("Error recovering router config - existing config not owned by Site",
@@ -926,7 +921,6 @@ func (s *Site) recoverRouterConfig(update bool) ([]*qdr.RouterConfig, error) {
 				slog.Any("error", err))
 		} else {
 			byName[cm.Name] = config
-			s.routerConfigVersions[cm.Name] = cm.ResourceVersion
 		}
 	}
 	//need to ensure that the list of configs is in the right order, i.e. matching s.groups()
@@ -1170,9 +1164,6 @@ func (s *Site) CheckConnector(name string, connector *skupperv2alpha1.Connector)
 }
 
 func (s *Site) updateListenerStatus(listener *skupperv2alpha1.Listener, err error) error {
-	if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
-		err = stderrors.Join(err, ptl.configurationError)
-	}
 	if listener.SetConfigured(err) {
 		_, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners(listener.ObjectMeta.Namespace).UpdateStatus(context.TODO(), listener, metav1.UpdateOptions{})
 		if err != nil {
@@ -1320,9 +1311,6 @@ func (s *Site) updateMultiKeyListenerStatus(mkl *skupperv2alpha1.MultiKeyListene
 func (s *Site) setBindingsConfiguredStatus(err error) {
 	lf := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		configuredErr := stderrors.Join(err, s.missingTlsCredentialsErr(listener.Spec.TlsCredentials))
-		if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
-			configuredErr = stderrors.Join(configuredErr, ptl.configurationError)
-		}
 		if listener.SetConfigured(configuredErr) {
 			updated, err := s.clients.GetSkupperClient().SkupperV2alpha1().Listeners(listener.ObjectMeta.Namespace).UpdateStatus(context.TODO(), listener, metav1.UpdateOptions{})
 			if err == nil {
@@ -1658,31 +1646,15 @@ func (s *Site) RouterStatusUpdated(observation string, doc *routerstatus.Documen
 	return s.RefreshRouterStatus()
 }
 
-// RouterConfigVersionUpdated records the opaque ConfigMap resource version used
-// to decide whether a pod observation describes the current configuration.
-func (s *Site) RouterConfigVersionUpdated(group, version string) error {
-	if !s.localOnlyStatus {
-		return nil
-	}
-	if s.routerConfigVersions == nil {
-		s.routerConfigVersions = map[string]string{}
-	}
-	if version == "" {
-		delete(s.routerConfigVersions, group)
-	} else {
-		s.routerConfigVersions[group] = version
-	}
-	return s.RefreshRouterStatus()
-}
-
+// eligibleRouterStatus returns the pod names whose observations describe a
+// router pod that currently exists. Documents are owned by their pod and named
+// after it, so a UID mismatch means the pod was replaced.
 func (s *Site) eligibleRouterStatus() []string {
 	keys := make([]string, 0, len(s.routerStatus))
 	for key, doc := range s.routerStatus {
-		pod := s.routerPods[s.namespace+"/"+doc.Router.Hostname]
+		pod := s.routerPods[s.namespace+"/"+key]
 		if pod == nil || key != doc.Router.Hostname || doc.Router.PodUID == "" || string(pod.UID) != doc.Router.PodUID ||
-			pod.Labels["skupper.io/group"] != doc.Group || pod.DeletionTimestamp != nil ||
-			!isPodRunning(pod) || !isPodReady(pod) || doc.Applied.ResourceVersion == "" ||
-			s.routerConfigVersions[doc.Group] != doc.Applied.ResourceVersion {
+			pod.Labels["skupper.io/group"] != doc.Group {
 			continue
 		}
 		keys = append(keys, key)
@@ -1714,10 +1686,10 @@ func (s *Site) RefreshRouterStatus() error {
 		s.site.Status.Network = nil
 		errs = append(errs, s.updateSiteStatus())
 	}
-	groups := s.eligibleRouterStatus()
+	pods := s.eligibleRouterStatus()
 	maxSites := 0
-	for _, group := range groups {
-		observed := s.routerStatus[group]
+	for _, pod := range pods {
+		observed := s.routerStatus[pod]
 		if len(observed.Network.Sites) > maxSites {
 			maxSites = len(observed.Network.Sites)
 		}
@@ -1731,8 +1703,8 @@ func (s *Site) RefreshRouterStatus() error {
 	for name, managed := range s.links {
 		up := false
 		remoteID, remoteName, failure := "", "", ""
-		for _, group := range groups {
-			observed := s.routerStatus[group]
+		for _, pod := range pods {
+			observed := s.routerStatus[pod]
 			for _, link := range observed.Links {
 				if link.Name != name {
 					continue
@@ -1756,16 +1728,16 @@ func (s *Site) RefreshRouterStatus() error {
 	}
 	// Finish prefix/configuration work before setting either Listener condition.
 	// Unavailable observations clear health, but are not an empty target set.
-	if len(groups) > 0 {
-		if err := s.updateRouterStatusTargets(groups); err != nil {
+	if len(pods) > 0 {
+		if err := s.updateRouterStatusTargets(pods); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	listenerFn := func(listener *skupperv2alpha1.Listener) *skupperv2alpha1.Listener {
 		up := false
 		failure := ""
-		for _, group := range groups {
-			observed := s.routerStatus[group]
+		for _, pod := range pods {
+			observed := s.routerStatus[pod]
 			for _, item := range observed.TcpListeners {
 				if item.Name == listener.Name || item.Name == qdr.TcpListenerNamePrefix+listener.Name {
 					up = up || (item.Present && strings.EqualFold(item.OperStatus, "up"))
@@ -1778,12 +1750,7 @@ func (s *Site) RefreshRouterStatus() error {
 		if up {
 			failure = ""
 		}
-		changed := listener.SetMatchingCondition(up, failure)
-		if ptl := s.bindings.perTargetListeners[listener.Name]; ptl != nil {
-			configuredErr := stderrors.Join(s.missingTlsCredentialsErr(listener.Spec.TlsCredentials), ptl.configurationError)
-			changed = listener.SetConfigured(configuredErr) || changed
-		}
-		if changed {
+		if listener.SetMatchingCondition(up, failure) {
 			updated, err := updateListenerStatus(s.clients, listener)
 			if err != nil {
 				errs = append(errs, err)
@@ -1795,8 +1762,8 @@ func (s *Site) RefreshRouterStatus() error {
 	}
 	s.bindings.Map(func(connector *skupperv2alpha1.Connector) *skupperv2alpha1.Connector { return nil }, listenerFn)
 	reachable := map[string]bool{}
-	for _, group := range groups {
-		observed := s.routerStatus[group]
+	for _, pod := range pods {
+		observed := s.routerStatus[pod]
 		for _, address := range observed.Addresses {
 			if address.Reachable {
 				reachable[address.Name] = true
@@ -1826,22 +1793,21 @@ func (s *Site) RefreshRouterStatus() error {
 	return stderrors.Join(errs...)
 }
 
-func (s *Site) updateRouterStatusTargets(groups []string) error {
+func (s *Site) updateRouterStatusTargets(pods []string) error {
 	var errs []error
 	if s.bindings.mapping != nil {
 		configChanged := false
 		for _, ptl := range s.bindings.perTargetListeners {
-			ptl.configurationError = nil
 			if s.missingTlsCredentialsErr(ptl.definition.Spec.TlsCredentials) != nil {
 				continue
 			}
 			prefix := ptl.address("")
 			set := map[string]bool{}
-			truncated := false
-			for _, group := range groups {
-				observed := s.routerStatus[group]
-				for _, query := range observed.Prefixes {
+			observed, truncated := false, false
+			for _, pod := range pods {
+				for _, query := range s.routerStatus[pod].Prefixes {
 					if query.Prefix == prefix {
+						observed = true
 						truncated = truncated || query.Truncated
 						for _, match := range query.Matches {
 							set[strings.TrimPrefix(match, prefix)] = true
@@ -1849,27 +1815,28 @@ func (s *Site) updateRouterStatusTargets(groups []string) error {
 					}
 				}
 			}
+			// A router that has not yet seen this prefix reports nothing for
+			// it; that is not an empty target set.
+			if !observed {
+				continue
+			}
 			var targets []string
 			for target := range set {
 				targets = append(targets, target)
 			}
 			sort.Strings(targets)
 			changed, err := ptl.extractTargets(targets, s.bindings.mapping, s.bindings.exposed, s.bindings.context)
-			ptl.configurationError = err
 			if truncated {
-				ptl.configurationError = stderrors.Join(ptl.configurationError, fmt.Errorf("Target list truncated at %d entries", routerstatus.MaxPrefixMatches))
+				err = stderrors.Join(err, fmt.Errorf("Target list truncated at %d entries", routerstatus.MaxPrefixMatches))
 			}
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, s.updateListenerStatus(ptl.definition, err))
 			}
 			configChanged = configChanged || changed
 		}
 		if configChanged {
 			if err := s.updateRouterConfig(s.bindings); err != nil {
 				errs = append(errs, err)
-				for _, ptl := range s.bindings.perTargetListeners {
-					ptl.configurationError = stderrors.Join(ptl.configurationError, err)
-				}
 			}
 		}
 	}

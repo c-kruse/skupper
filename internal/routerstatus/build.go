@@ -27,8 +27,8 @@ type Builder struct {
 	Group, Hostname string
 }
 
-func (b Builder) Build(ctx context.Context, desired *qdr.RouterConfig, adaptor qdr.AdaptorConfig, applied Applied, index SiteIndex) (Document, error) {
-	d := Document{Version: 1, Group: b.Group, Applied: applied, Network: Network{Sites: []Site{}}}
+func (b Builder) Build(ctx context.Context, desired *qdr.RouterConfig, adaptor qdr.AdaptorConfig, index SiteIndex) (Document, error) {
+	d := Document{Version: 1, Group: b.Group, Network: Network{Sites: []Site{}}}
 	if index != nil {
 		d.Network.Sites, d.Network.Routers = index.Sites(), index.Routers()
 	}

@@ -55,7 +55,7 @@ func TestBuildDesiredAndInteriorPrefixQuery(t *testing.T) {
 		interior + "|io.skupper.router.router.address": {{"name": "Msvc-remote", "remoteCount": 1}},
 	}}
 	desired := &qdr.RouterConfig{Connectors: map[string]qdr.Connector{"link": {Name: "link", Role: "edge", Host: "west", Port: "4567"}, "missing": {Name: "missing", Role: "edge", Host: "none", Port: "1"}}, Listeners: map[string]qdr.Listener{"access": {Name: "access", Role: "edge", Port: 5678}}, Bridges: qdr.BridgeConfig{TcpListeners: qdr.TcpEndpointMap{"tl": {Name: "tl", Address: "svc-local"}}, TcpConnectors: qdr.TcpEndpointMap{}, ListenerAddresses: qdr.ListenerAddressMap{}}}
-	doc, err := (Builder{Client: f}).Build(context.Background(), desired, qdr.AdaptorConfig{AddressPrefixes: []qdr.AddressPrefix{{Prefix: "svc-"}}}, Applied{}, nil)
+	doc, err := (Builder{Client: f}).Build(context.Background(), desired, qdr.AdaptorConfig{AddressPrefixes: []qdr.AddressPrefix{{Prefix: "svc-"}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

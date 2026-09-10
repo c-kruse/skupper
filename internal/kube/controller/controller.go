@@ -710,20 +710,16 @@ func (c *Controller) checkAttachedConnector(key string, connector *skupperv2alph
 		return c.getSite(connector.Spec.SiteNamespace).AttachedConnectorUpdated(connector)
 	}
 }
-func (c *Controller) routerConfigUpdate(key string, cm *corev1.ConfigMap) error {
+func (c *Controller) routerConfigUpdate(_ string, cm *corev1.ConfigMap) error {
 	if cm == nil {
-		namespace, name, err := cache.SplitMetaNamespaceKey(key)
-		if err != nil {
-			return err
-		}
-		return c.getSite(namespace).RouterConfigVersionUpdated(name, "")
+		return nil
 	}
 	config, err := kubeqdr.GetRouterConfigFromConfigMap(cm)
 	if err != nil {
 		return err
 	}
 	c.getSite(cm.Namespace).CheckSslAndProxyProfiles(config)
-	return c.getSite(cm.Namespace).RouterConfigVersionUpdated(cm.Name, cm.ResourceVersion)
+	return nil
 }
 
 func (c *Controller) networkStatusUpdate(key string, cm *corev1.ConfigMap) error {
