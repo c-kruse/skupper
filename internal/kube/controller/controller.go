@@ -49,6 +49,7 @@ type Controller struct {
 	serviceWatcher                  *watchers.ServiceWatcher
 	networkStatusWatcher            *watchers.ConfigMapWatcher
 	routerStatusWatcher             *watchers.ConfigMapWatcher
+	routerPodWatcher                *watchers.PodWatcher
 	sites                           map[string]*site.Site
 	startGrantServer                func()
 	accessMgr                       *securedaccess.SecuredAccessManager
@@ -163,7 +164,7 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.routerStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperRouterStatus(), config.WatchNamespace, filter(controller, controller.routerStatusUpdate))
 	controller.eventProcessor.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
 	controller.eventProcessor.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
-	controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
+	controller.routerPodWatcher = controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
 	controller.siteSizingWatcher = controller.eventProcessor.WatchConfigMaps(skupperSiteSizingConfig(), config.Namespace, filter(controller, controller.siteSizing.Update))
 	controller.namespaces.watch(controller.eventProcessor, config.WatchNamespace)
 	controller.labellingWatcher = controller.eventProcessor.WatchConfigMaps(labelling(), config.WatchNamespace, controller.labelling.Update)
@@ -297,6 +298,15 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		routerAccessCount++
 	}
 	log.Info("Router access seeded", slog.Int("count", routerAccessCount))
+	// Seed pods before sites and status documents, so recovery can evaluate
+	// replica eligibility without waiting for the queued informer events.
+	for _, pod := range c.routerPodWatcher.List() {
+		if c.namespaces.isControlled(pod.Namespace) {
+			if err := c.routerPodEvent(pod.Namespace+"/"+pod.Name, pod); err != nil {
+				return err
+			}
+		}
+	}
 	//recover existing sites & bindings
 	siteRecovery := site.NewSiteRecovery(c.eventProcessor.GetKubeClient())
 	for _, site := range c.siteWatcher.List() {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 
@@ -23,6 +24,7 @@ type ExtendedBindings struct {
 	bindings              *site.Bindings
 	connectors            map[string]*AttachedConnector
 	perTargetListeners    map[string]*PerTargetListener
+	recoveredListeners    map[string]qdr.TcpEndpoint
 	listenerHosts         map[string]string // listener name -> host
 	multiKeyListenerHosts map[string]string // multikeylistener name -> host
 	controller            *watchers.EventProcessor
@@ -76,6 +78,13 @@ func (a *ExtendedBindings) init(context BindingContext, config *qdr.RouterConfig
 	a.context = context
 	if a.mapping == nil {
 		a.mapping = qdr.RecoverPortMapping(config)
+		if config != nil {
+			a.recoveredListeners = maps.Clone(config.Bridges.TcpListeners)
+		}
+	} else {
+		// The second init finishes recovery. Do not resurrect old targets when
+		// a Listener is created later with the same name.
+		a.recoveredListeners = nil
 	}
 	if a.exposed == nil {
 		a.exposed = ExposedPorts{}
@@ -330,7 +339,24 @@ func (b *ExtendedBindings) UpdateListener(name string, listener *skupperv2alpha1
 				updateConfig = true
 			}
 		} else {
-			b.perTargetListeners[name] = newPerTargetListener(listener, b.logger)
+			ptl := newPerTargetListener(listener, b.logger)
+			b.perTargetListeners[name] = ptl
+			// Restore targets before any full configuration write, even if no
+			// current network observation is available during recovery.
+			prefix := qdr.TcpListenerNamePrefix + name + "@"
+			var targets []string
+			for key, endpoint := range b.recoveredListeners {
+				if strings.HasPrefix(key, prefix) {
+					target := strings.TrimPrefix(key, prefix)
+					if endpoint.Address == ptl.address(target) {
+						targets = append(targets, target)
+					}
+					delete(b.recoveredListeners, key)
+				}
+			}
+			if _, err := ptl.extractTargets(targets, b.mapping, b.exposed, b.context); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	} else {
 		if existing, ok := b.perTargetListeners[name]; ok {

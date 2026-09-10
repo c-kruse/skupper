@@ -38,6 +38,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/resource"
 	"github.com/skupperproject/skupper/internal/network"
 	"github.com/skupperproject/skupper/internal/qdr"
+	routerstatus "github.com/skupperproject/skupper/internal/routerstatus"
 	"github.com/skupperproject/skupper/internal/utils"
 	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -691,9 +692,16 @@ func TestGeneral(t *testing.T) {
 }
 
 func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, true, false) })
+	t.Run("local-unavailable", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, false, false) })
+	t.Run("local-current", func(t *testing.T) { testRecoveryPreservesRouterBridgeConfig(t, false, true) })
+}
+
+func testRecoveryPreservesRouterBridgeConfig(t *testing.T, legacy, localStatus bool) {
 	flags := &flag.FlagSet{}
 	config, err := BoundConfig(flags)
 	assert.Assert(t, err)
+	config.LegacyNetworkStatus = legacy
 
 	uid := "49b03ad4-d414-42be-bbb5-b32d7d4ca503"
 	site := f.addUID(f.site("mysite", "test", "loadbalancer", false, false), uid)
@@ -751,6 +759,7 @@ func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
 	routerConfigMap.Labels = map[string]string{
 		"internal.skupper.io/router-config": "",
 	}
+	routerConfigMap.ResourceVersion = "revision-a"
 	statusInfo := f.networkStatusInfo("mysite", "test", nil, map[string]string{"backend-a.pod-a": "10.1.1.10"}).info()
 	networkStatus := f.skupperNetworkStatus("test", statusInfo)
 	// the persisted site status already reflects the network, as it would
@@ -771,7 +780,27 @@ func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
 			Selector: &metav1.LabelSelector{MatchLabels: f.routerSelector(false)},
 		},
 	}
-	clients, err := fakeclient.NewFakeClient(config.Namespace, []runtime.Object{routerConfigMap, networkStatus, routerDeployment, attachedPod, normalPod}, []runtime.Object{
+	targetService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", Annotations: map[string]string{"internal.skupper.io/controlled": "true"}},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "listener-a", Port: 8080, TargetPort: intstr.FromInt(1027), Protocol: corev1.ProtocolTCP}}},
+	}
+	objects := []runtime.Object{routerConfigMap, networkStatus, routerDeployment, attachedPod, normalPod, targetService}
+	if localStatus {
+		pod := f.pod("router-a", "test", map[string]string{"skupper.io/component": "router", "skupper.io/type": "site", "skupper.io/group": "skupper-router"}, nil, f.podStatus("10.1.1.40", corev1.PodRunning, f.podCondition(corev1.PodReady, corev1.ConditionTrue)))
+		pod.UID = "router-uid"
+		payload, err := routerstatus.Encode(&routerstatus.Document{
+			Version: 1, Group: "skupper-router", Router: routerstatus.Router{Hostname: pod.Name, PodUID: string(pod.UID)},
+			Applied:  routerstatus.Applied{ResourceVersion: "revision-a"},
+			Prefixes: []routerstatus.PrefixQuery{{Prefix: "backend-a.", Matches: []string{"backend-a.pod-a"}}},
+			Network:  routerstatus.Network{Sites: []routerstatus.Site{{ID: "local"}, {ID: "remote"}}},
+		})
+		assert.NilError(t, err)
+		objects = append(objects, pod, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "router-a-status", Namespace: "test", Labels: map[string]string{routerstatus.ConfigMapLabel: "", routerstatus.GroupLabel: "skupper-router"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}}},
+			BinaryData: map[string][]byte{routerstatus.DataKey: payload},
+		})
+	}
+	clients, err := fakeclient.NewFakeClient(config.Namespace, objects, []runtime.Object{
 		site,
 		siteCA,
 		f.routerAccess("skupper-router", "test", "loadbalancer", "skupper-site-server", true, "skupper-site-ca", f.role("inter-router", 55671), f.role("edge", 45671)),
@@ -807,6 +836,18 @@ func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
 	err = controller.init(stopCh)
 	assert.Assert(t, err)
 
+	serviceAfterRecovery, err := clients.GetKubeClient().CoreV1().Services("test").Get(context.Background(), "pod-a", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, serviceAfterRecovery.Spec.Ports[0].TargetPort.IntVal, int32(1027))
+	for _, action := range clients.GetKubeClient().(*k8sfake.Clientset).Actions() {
+		if action.Matches("delete", "services") {
+			assert.Assert(t, action.(k8stesting.DeleteAction).GetName() != "pod-a", "recovery must not delete a working target Service")
+		}
+	}
+	if localStatus {
+		assert.Equal(t, controller.getSite("test").GetSite().Status.SitesInNetwork, 2, "persisted observations must be eligible before queued pod events run")
+	}
+
 	expectedTcpListeners := []string{
 		"listener/listener-a",
 		"listener/listener-a@pod-a",
@@ -819,6 +860,7 @@ func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
 	}
 	assert.Assert(t, len(observed) > 0, "expected at least one router config update after recovery")
 	for i, bridge := range observed {
+		assert.Equal(t, bridge.TcpListeners["listener/listener-a@pod-a"].Port, "1027", "recovery must preserve the target's allocated port")
 		for _, name := range expectedTcpListeners {
 			_, ok := bridge.TcpListeners[name]
 			assert.Assert(t, ok, "router config update %d was partial: missing %s", i, name)
@@ -854,6 +896,19 @@ func TestRecoveryPreservesRouterBridgeConfig(t *testing.T) {
 	assert.Assert(t, configured != nil)
 	assert.Equal(t, configured.Status, metav1.ConditionFalse)
 	assert.Equal(t, configured.Message, "No matches for selector")
+	if !legacy {
+		// Restored exposure state must still support normal cleanup; preserving
+		// the old bridge alone would leak its Service when the Listener goes away.
+		assert.NilError(t, controller.checkListener("test/listener-a", nil))
+		_, err := clients.GetKubeClient().CoreV1().Services("test").Get(context.Background(), "pod-a", metav1.GetOptions{})
+		assert.Assert(t, errors.IsNotFound(err))
+		cm, err := clients.GetKubeClient().CoreV1().ConfigMaps("test").Get(context.Background(), "skupper-router", metav1.GetOptions{})
+		assert.NilError(t, err)
+		afterDelete, err := kubeqdr.GetRouterConfigFromConfigMap(cm)
+		assert.NilError(t, err)
+		_, present := afterDelete.Bridges.TcpListeners["listener/listener-a@pod-a"]
+		assert.Assert(t, !present)
+	}
 }
 
 func TestAttachedConnectorRecoveryDoesNotFlapStatus(t *testing.T) {
