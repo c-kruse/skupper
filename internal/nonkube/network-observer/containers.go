@@ -17,6 +17,7 @@ func GetNetworkObserverContainer(namespace string, p ports) container.Container 
 		Name:  fmt.Sprintf("%s-skupper-network-observer", namespace),
 		Image: images.GetNetworkObserverImageName(),
 		Command: []string{
+			fmt.Sprintf("-network-id=%s", namespace),
 			fmt.Sprintf("-listen=127.0.0.1:%d", p.netobs),
 			fmt.Sprintf("-listen-metrics=127.0.0.1:%d", p.metrics),
 			fmt.Sprintf("-prometheus-api=http://127.0.0.1:%d", p.prometheus),
