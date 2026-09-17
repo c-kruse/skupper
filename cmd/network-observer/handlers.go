@@ -41,28 +41,23 @@ func handleNoContent() http.Handler {
 	})
 }
 
-func handleProxyPrometheusAPI(prefix string, target *url.URL) http.Handler {
+func handleProxyPrometheusAPI(prefix string, target *url.URL, networkID string) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	return http.StripPrefix(prefix,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
-			case "/query/":
+			case "/query", "/query/":
 				r.URL.Path = "/query"
-				fallthrough
-			case "/query":
-				proxy.ServeHTTP(w, r)
-			case "/rangequery":
-				fallthrough
-			case "/rangequery/":
-				fallthrough
-			case "/query_range/":
+			case "/rangequery", "/rangequery/", "/query_range", "/query_range/":
 				r.URL.Path = "/query_range"
-				fallthrough
-			case "/query_range":
-				proxy.ServeHTTP(w, r)
 			default:
 				http.NotFound(w, r)
+				return
 			}
+			if !scopePrometheusRequest(w, r, networkID) {
+				return
+			}
+			proxy.ServeHTTP(w, r)
 		}),
 	)
 }

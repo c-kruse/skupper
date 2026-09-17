@@ -106,7 +106,7 @@ func run(cfg Config) error {
 		// add unspec'd api routes
 		apiMux.Path("/api/v2alpha1/user").Handler(handleGetUser())
 		apiMux.Path("/api/v2alpha1/logout").Handler(handleUserLogout())
-		promSubrouter.Handler(handleProxyPrometheusAPI("/api/v2alpha1/internal/prom", promAPI))
+		promSubrouter.Handler(handleProxyPrometheusAPI("/api/v2alpha1/internal/prom", promAPI, cfg.NetworkID))
 
 		apiMux.PathPrefix("/").Handler(handleSecuredConsoleAssets(cfg.ConsoleLocation))
 	}

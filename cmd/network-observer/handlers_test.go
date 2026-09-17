@@ -60,7 +60,7 @@ func TestHandleProxyPrometheusAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewTLSServer(handleProxyPrometheusAPI("/test", promAPI))
+	srv := httptest.NewTLSServer(handleProxyPrometheusAPI("/test", promAPI, "default"))
 	defer srv.Close()
 
 	client := srv.Client()
@@ -119,7 +119,7 @@ func TestHandleProxyPrometheusAPI(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+tc.Path, nil)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+tc.Path+"?query=skupper_sent_bytes_total", nil)
 		for k, v := range tc.RequestHeaders {
 			req.Header.Set(k, v)
 		}
