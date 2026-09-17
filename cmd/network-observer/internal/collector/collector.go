@@ -23,7 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func New(logger *slog.Logger, factory session.ContainerFactory, reg *prometheus.Registry, flowRecordTTL time.Duration, flowLogger func(vanflow.RecordMessage)) *Collector {
+func New(logger *slog.Logger, factory session.ContainerFactory, reg prometheus.Registerer, flowRecordTTL time.Duration, flowLogger func(vanflow.RecordMessage)) *Collector {
 	sessionCtr := factory.Create()
 
 	collector := &Collector{

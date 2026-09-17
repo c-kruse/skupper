@@ -19,6 +19,8 @@ type Config struct {
 	EnableConsole   bool
 	ConsoleLocation string
 	PrometheusAPI   string
+	NetworkID       string
+	ObserverID      string
 
 	RouterURL     string
 	RouterTLS     TLSSpec

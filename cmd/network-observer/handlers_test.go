@@ -7,7 +7,35 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestMetricsHandlersShareLabeledRegistry(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	registerer := prometheus.WrapRegistererWith(prometheus.Labels{
+		"network_id": "A", "observer_id": "one",
+	}, reg)
+	counter := prometheus.NewCounter(prometheus.CounterOpts{Name: "skupper_sent_bytes_total"})
+	registerer.MustRegister(counter)
+	counter.Add(7)
+	for _, handler := range []http.Handler{handleMetrics(reg), handleMetrics(reg)} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+		if w.Code != 200 {
+			t.Fatalf("scrape failed: %s", w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `skupper_sent_bytes_total{network_id="A",observer_id="one"} 7`) {
+			t.Fatalf("missing labeled counter: %s", w.Body.String())
+		}
+		for _, line := range strings.Split(w.Body.String(), "\n") {
+			if line != "" && !strings.HasPrefix(line, "#") &&
+				(!strings.Contains(line, `network_id="A"`) || !strings.Contains(line, `observer_id="one"`)) {
+				t.Errorf("unlabeled series: %s", line)
+			}
+		}
+	}
+}
 
 func TestHandleProxyPrometheusAPI(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

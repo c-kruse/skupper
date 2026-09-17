@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
@@ -36,6 +37,16 @@ func run(cfg Config) error {
 	logger.Info("Network Observer starting", slog.String("skupper_version", version.Version))
 
 	reg := prometheus.NewRegistry()
+	if cfg.NetworkID == "" {
+		cfg.NetworkID = "default"
+	}
+	if cfg.ObserverID == "" {
+		cfg.ObserverID = uuid.NewString()
+	}
+	registerer := prometheus.WrapRegistererWith(prometheus.Labels{
+		"network_id":  cfg.NetworkID,
+		"observer_id": cfg.ObserverID,
+	}, reg)
 
 	specFS, err := getSpecFS()
 	if err != nil {
@@ -64,7 +75,7 @@ func run(cfg Config) error {
 	collector := collector.New(
 		logger.With(slog.String("component", "collector")),
 		session.NewContainerFactory(cfg.RouterURL, sessionConfig),
-		reg,
+		registerer,
 		cfg.FlowRecordTTL,
 		flowLogger,
 	)
@@ -245,6 +256,8 @@ func main() {
 	flags.BoolVar(&cfg.EnableConsole, "enable-console", true, "Enables the web console")
 	flags.StringVar(&cfg.ConsoleLocation, "console-location", "/app/console", "Location where the console assets are installed")
 	flags.StringVar(&cfg.PrometheusAPI, "prometheus-api", "http://127.0.0.1:9090", "Prometheus API HTTP endpoint for console")
+	flags.StringVar(&cfg.NetworkID, "network-id", "default", "Metric partition in Prometheus; use the same ID for observers attached to the same network.")
+	flags.StringVar(&cfg.ObserverID, "observer-id", "", "Unique observer replica identity (defaults to a generated UUID)")
 
 	flags.DurationVar(&cfg.FlowRecordTTL, "flow-record-ttl", 15*time.Minute, "How long to retain flow records in memory")
 	flags.BoolVar(&cfg.CORSAllowAll, "cors-allow-all", false, "Development option to allow all origins")

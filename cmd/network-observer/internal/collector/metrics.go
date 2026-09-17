@@ -23,7 +23,7 @@ type metricsInternal struct {
 	pendingFlows       *prometheus.GaugeVec
 }
 
-func register(reg *prometheus.Registry) metrics {
+func register(reg prometheus.Registerer) metrics {
 	m := metrics{
 		flowOpenedCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "skupper",

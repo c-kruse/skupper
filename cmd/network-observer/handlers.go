@@ -12,8 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func handleMetrics(reg *prometheus.Registry) http.Handler {
-	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
+func handleMetrics(gatherer prometheus.Gatherer) http.Handler {
+	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
 }
 
 func handleSwagger(prefix string, content fs.FS) http.Handler {
