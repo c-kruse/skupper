@@ -64,6 +64,9 @@ spec:
           args:
             - -listen=127.0.0.1:8080
             - -prometheus-api=http://127.0.0.1:9090
+            {{- if .Values.networkId }}
+            - {{ printf "-network-id=%s" .Values.networkId | quote }}
+            {{- end }}
             - -router-endpoint={{ .Values.router.endpoint }}
             - -router-tls-ca=/etc/messaging/ca.crt
             - -router-tls-cert=/etc/messaging/tls.crt

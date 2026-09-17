@@ -137,3 +137,18 @@ kubectl patch secrets \
     my-custom-auth -p '{"data":{"htpasswd":"'$(base64 -w0 ./passwords)'"}}'
 
 ```
+
+## Network ID for centralized metrics collection
+
+`networkId` sets the `network_id` label on observer metrics. When collecting
+metrics in a central Prometheus for your own monitoring, set it in your Helm values:
+
+```yaml
+networkId: "my-network"
+```
+
+Use different IDs to separate metrics from observers attached to different Skupper
+networks. Without central collection, you can leave the default.
+
+This setting only labels metrics; it does not configure central collection. The
+observer and console continue to use the local Prometheus sidecar.

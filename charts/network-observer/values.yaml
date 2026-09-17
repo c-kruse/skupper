@@ -133,6 +133,11 @@ openshiftOauthProxy:
       drop:
         - ALL
 
+# networkId sets the network_id label on all observer metrics. Allows operators
+# to distinguish metrics from different networks when collecting metrics
+# centrally.
+networkId: "default"
+
 # extraArgs to pass to the network-observer container
 extraArgs:
   # - -enable-console=false
