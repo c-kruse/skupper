@@ -94,8 +94,9 @@
 		  "expr": "skupper_controller_leader{container=\"controller\"}",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": true,
+		  "instant": true,
 		  "legendFormat": "{{pod}} controller leader (0=standby)",
-		  "range": true,
+		  "range": false,
 		  "refId": "A",
 		  "useBackend": false
 		},
@@ -105,8 +106,9 @@
 		  "expr": "skupper_adaptor_control_stream_up{container=\"kube-adaptor\"}",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": true,
-		  "legendFormat": "{{namespace}} adaptor control stream (0=disconnected)",
-		  "range": true,
+		  "instant": true,
+		  "legendFormat": "{{namespace}} / {{pod}} adaptor control stream (0=disconnected)",
+		  "range": false,
 		  "refId": "B",
 		  "useBackend": false
 		},
@@ -116,8 +118,9 @@
 		  "expr": "skupper_adaptor_application_state{container=\"kube-adaptor\"} == 1",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": true,
-		  "legendFormat": "{{namespace}} application {{state}}",
-		  "range": true,
+		  "instant": true,
+		  "legendFormat": "{{namespace}} / {{pod}} application {{state}}",
+		  "range": false,
 		  "refId": "C",
 		  "useBackend": false
 		}
