@@ -130,10 +130,11 @@ func (r *AMQPLocalRouter) ApplyDependents(desired *qdr.RouterConfig) error {
 		r.managementFailed()
 		return fmt.Errorf("proxy profiles: %w", err)
 	}
-	if err := qdr.SyncBridgeConfig(r.Pool, &desired.Bridges); err != nil {
-		if !errors.Is(err, qdr.ErrNotConverged) {
-			r.managementFailed()
-		}
+	// ErrNotConverged means a bridge mutation succeeded and needs readback.
+	// Complete the remaining effects and let Reconcile verify them now, rather
+	// than deferring that verification to the periodic reconciliation tick.
+	if err := qdr.SyncBridgeConfig(r.Pool, &desired.Bridges); err != nil && !errors.Is(err, qdr.ErrNotConverged) {
+		r.managementFailed()
 		return fmt.Errorf("bridge config: %w", err)
 	}
 	if err := qdr.SyncRouterConfig(r.Pool, desired, true); err != nil {
