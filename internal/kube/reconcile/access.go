@@ -21,16 +21,18 @@ func deriveAccessComposition(snapshot Snapshot, desired *DesiredNamespace, site 
 	effective := make([]*skupperv2alpha1.RouterAccess, 0, len(accesses)+1)
 	var currentDefault *skupperv2alpha1.RouterAccess
 	for _, access := range accesses {
-		if access.Name == "skupper-router" && access.Annotations[controlledAnnotation] == "true" && ownedBy(access.OwnerReferences, site.UID) {
+		if site != nil && access.Name == "skupper-router" && access.Annotations[controlledAnnotation] == "true" && ownedBy(access.OwnerReferences, site.UID) {
 			currentDefault = access
 			continue
 		}
 		effective = append(effective, access)
 	}
-	if site.Spec.LinkAccess != "" && site.Spec.LinkAccess != "none" {
+	if site != nil && site.Spec.LinkAccess != "" && site.Spec.LinkAccess != "none" {
 		generated := defaultRouterAccess(site, currentDefault)
 		desired.GeneratedAccess = generated.DeepCopy()
-		effective = append(effective, generated)
+		if generated.UID != "" {
+			effective = append(effective, generated)
+		}
 	}
 	sort.Slice(effective, func(i, j int) bool { return effective[i].Name < effective[j].Name })
 
@@ -47,7 +49,11 @@ func deriveAccessComposition(snapshot Snapshot, desired *DesiredNamespace, site 
 			if index > 0 {
 				name = fmt.Sprintf("%s-%d", access.Name, index+1)
 			}
-			secured := desiredSecuredAccess(site.Namespace, name, group, access, site.DefaultIssuer())
+			defaultIssuer := ""
+			if site != nil {
+				defaultIssuer = site.DefaultIssuer()
+			}
+			secured := desiredSecuredAccess(snapshot.Namespace.Name, name, group, access, defaultIssuer)
 			if current := currentSecured[name]; current != nil && ownedBy(current.OwnerReferences, access.UID) {
 				secured.UID = current.UID
 				secured.ResourceVersion = current.ResourceVersion
@@ -160,12 +166,14 @@ func securedAccessService(access *skupperv2alpha1.SecuredAccess, defaultAccessTy
 }
 
 func deriveCertificates(snapshot Snapshot, desired *DesiredNamespace, site *skupperv2alpha1.Site, accesses map[string]*skupperv2alpha1.SecuredAccess) {
-	siteOwner := []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: site.Name, UID: site.UID}}
-	desired.Certificates = append(desired.Certificates,
-		desiredCertificate(site.Namespace, "skupper-site-ca", skupperv2alpha1.CertificateSpec{Subject: site.Name + " site CA", Signing: true}, siteOwner, nil),
-		desiredCertificate(site.Namespace, "skupper-local-ca", skupperv2alpha1.CertificateSpec{Subject: site.Name + " local CA", Signing: true}, siteOwner, nil),
-		desiredCertificate(site.Namespace, "skupper-local-server", skupperv2alpha1.CertificateSpec{Ca: "skupper-local-ca", Subject: "skupper-router-local", Hosts: []string{"skupper-router-local", "skupper-router-local." + site.Namespace, "skupper-router-local." + site.Namespace + ".svc.cluster.local"}, Server: true}, siteOwner, map[string][]string{string(site.UID): {"skupper-router-local", "skupper-router-local." + site.Namespace, "skupper-router-local." + site.Namespace + ".svc.cluster.local"}}),
-	)
+	if site != nil {
+		siteOwner := []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: site.Name, UID: site.UID}}
+		desired.Certificates = append(desired.Certificates,
+			desiredCertificate(site.Namespace, "skupper-site-ca", skupperv2alpha1.CertificateSpec{Subject: site.Name + " site CA", Signing: true}, siteOwner, nil),
+			desiredCertificate(site.Namespace, "skupper-local-ca", skupperv2alpha1.CertificateSpec{Subject: site.Name + " local CA", Signing: true}, siteOwner, nil),
+			desiredCertificate(site.Namespace, "skupper-local-server", skupperv2alpha1.CertificateSpec{Ca: "skupper-local-ca", Subject: "skupper-router-local", Hosts: []string{"skupper-router-local", "skupper-router-local." + site.Namespace, "skupper-router-local." + site.Namespace + ".svc.cluster.local"}, Server: true}, siteOwner, map[string][]string{string(site.UID): {"skupper-router-local", "skupper-router-local." + site.Namespace, "skupper-router-local." + site.Namespace + ".svc.cluster.local"}}),
+		)
+	}
 	byCertificate := map[string][]*skupperv2alpha1.SecuredAccess{}
 	for _, access := range accesses {
 		if access.UID == "" || access.Spec.Issuer == "" {
@@ -200,7 +208,7 @@ func deriveCertificates(snapshot Snapshot, desired *DesiredNamespace, site *skup
 		if existing := current[name]; existing != nil && len(existing.OwnerReferences) > 1 {
 			subject = existing.Spec.Subject
 		}
-		desired.Certificates = append(desired.Certificates, desiredCertificate(site.Namespace, name, skupperv2alpha1.CertificateSpec{Ca: accessList[0].Spec.Issuer, Subject: subject, Server: true}, owners, hostsByOwner))
+		desired.Certificates = append(desired.Certificates, desiredCertificate(snapshot.Namespace.Name, name, skupperv2alpha1.CertificateSpec{Ca: accessList[0].Spec.Issuer, Subject: subject, Server: true}, owners, hostsByOwner))
 	}
 	sort.Slice(desired.Certificates, func(i, j int) bool { return desired.Certificates[i].Name < desired.Certificates[j].Name })
 }

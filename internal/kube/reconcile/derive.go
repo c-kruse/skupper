@@ -32,8 +32,13 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		Allocations: AllocationState{Ports: map[string]int{}},
 		Bootstrap:   copyBootstrap(snapshot.Bootstrap),
 	}
+	if !snapshot.Assignment.Controlled {
+		return desired
+	}
 	active := activeSite(snapshot, &desired)
-	if active == nil || !snapshot.Assignment.Controlled {
+	if active == nil {
+		deriveAccessComposition(snapshot, &desired, nil, nil)
+		deriveStandaloneAccessStatuses(snapshot, &desired)
 		return desired
 	}
 	settings, validSettings := routerSettings(active, &desired)

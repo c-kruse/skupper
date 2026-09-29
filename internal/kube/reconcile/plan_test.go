@@ -85,6 +85,17 @@ func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
 	}
 }
 
+func TestAccessEffectsDoNotBlockPublicationOrStatus(t *testing.T) {
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site}
+	plan := (AccessPlanner{Next: publishPlanner{}}).Plan(Snapshot{Assignment: Assignment{Controlled: true}}, desired)
+	for _, operation := range plan.Operations {
+		if operation.Kind == "PublishRouterIntent" && len(operation.Dependencies) != 0 {
+			t.Fatalf("unrelated access effects block intent publication: %#v", operation.Dependencies)
+		}
+	}
+}
+
 func TestSupersededPlanIsRetried(t *testing.T) {
 	report := (Executor{}).Execute(context.Background(), Plan{Operations: []Operation{{ID: "write", Run: func(context.Context) error { return SupersededError{Reason: "UID changed"} }}}})
 	if !report.NeedsRetry() || report.Results[0].State != Superseded {

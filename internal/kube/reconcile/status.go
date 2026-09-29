@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/skupperproject/skupper/internal/certs"
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -246,11 +247,10 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range certificatesInOrder {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		state := pendingState("Certificate Secret has not been realized")
-		if secret := secretByName[updated.Name]; secret != nil && certificates.SecretCorrectAt(updated, secret, evaluationTime) {
-			state = skupperv2alpha1.ReadyCondition()
-		}
+		state, expiration := certificateState(updated, secretByName[updated.Name], evaluationTime)
+		updated.Status.Expiration = expiration
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_READY, state, updated.Generation, now)
+		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_READY)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.Certificates = append(desired.Statuses.Certificates, updated)
 		}
@@ -314,6 +314,21 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	if !reflect.DeepEqual(*beforeSite, site.Status) {
 		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
 	}
+}
+
+func certificateState(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret, evaluationTime time.Time) (skupperv2alpha1.ConditionState, string) {
+	state := pendingState("Certificate Secret has not been realized")
+	if secret == nil {
+		return state, ""
+	}
+	expiration := ""
+	if decoded, err := certs.DecodeCertificate(secret.Data[corev1.TLSCertKey]); err == nil {
+		expiration = decoded.NotAfter.UTC().Format(time.RFC3339)
+	}
+	if certificates.SecretCorrectAt(certificate, secret, evaluationTime) {
+		state = skupperv2alpha1.ReadyCondition()
+	}
+	return state, expiration
 }
 
 func currentTargetObservations(snapshot Snapshot, target RouterTarget) ([]Observation, int) {

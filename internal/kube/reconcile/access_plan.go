@@ -11,7 +11,7 @@ import (
 )
 
 type AccessEnsurer interface {
-	EnsureAccessComposition(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Service, []*routev1.Route, []*skupperv2alpha1.Certificate, []*corev1.Secret, time.Time) error
+	EnsureAccessComposition(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Service, []*routev1.Route, []*skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Secret, time.Time) error
 }
 
 type AccessPlanner struct {
@@ -21,11 +21,14 @@ type AccessPlanner struct {
 
 func (p AccessPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	plan := p.Next.Plan(snapshot, desired)
-	if desired.Site == nil {
+	if !snapshot.Assignment.Controlled {
 		return plan
 	}
 	namespace := desired.Namespace
-	site := desired.Site.DeepCopy()
+	var site *skupperv2alpha1.Site
+	if desired.Site != nil {
+		site = desired.Site.DeepCopy()
+	}
 	var generated *skupperv2alpha1.RouterAccess
 	if desired.GeneratedAccess != nil {
 		generated = desired.GeneratedAccess.DeepCopy()
@@ -35,18 +38,23 @@ func (p AccessPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	services := copyServices(desired.AccessServices)
 	routes := copyRoutes(desired.AccessRoutes)
 	currentCertificates := copyCertificates(snapshot.Certificates)
+	currentRouterAccesses := copyRouterAccesses(snapshot.RouterAccesses)
+	currentSecuredAccesses := copySecuredAccesses(snapshot.SecuredAccesses)
 	secrets := copySecrets(snapshot.Secrets)
 	evaluationTime := snapshot.EvaluationTime
 	const operationID OperationID = "ensure-access-composition"
 	plan.Operations = append(plan.Operations, Operation{ID: operationID, Kind: "EnsureAccessComposition", Run: func(ctx context.Context) error {
-		return p.Ensurer.EnsureAccessComposition(ctx, namespace, site, generated, secured, certificates, services, routes, currentCertificates, secrets, evaluationTime)
+		return p.Ensurer.EnsureAccessComposition(ctx, namespace, site, generated, secured, certificates, services, routes, currentRouterAccesses, currentSecuredAccesses, currentCertificates, secrets, evaluationTime)
 	}})
-	for i := range plan.Operations {
-		if plan.Operations[i].Kind == "PublishRouterIntent" {
-			plan.Operations[i].Dependencies = append(plan.Operations[i].Dependencies, operationID)
-		}
-	}
 	return plan
+}
+
+func copyRouterAccesses(values []*skupperv2alpha1.RouterAccess) []*skupperv2alpha1.RouterAccess {
+	result := make([]*skupperv2alpha1.RouterAccess, 0, len(values))
+	for _, value := range values {
+		result = append(result, value.DeepCopy())
+	}
+	return result
 }
 
 func copyRoutes(values []*routev1.Route) []*routev1.Route {

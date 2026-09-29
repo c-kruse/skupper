@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/skupperproject/skupper/internal/kube/certificates"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
@@ -20,6 +21,11 @@ func TestAccessCompositionWaitsForRealParentUIDAndThenCreatesHAChildren(t *testi
 	}
 	if len(desired.SecuredAccesses) != 0 {
 		t.Fatalf("children were derived with a fabricated parent UID: %#v", desired.SecuredAccesses)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.RouterListeners) != 0 {
+			t.Fatalf("RouterAccess without a UID contributed router resources: %#v", intent.RouterListeners)
+		}
 	}
 
 	access := desired.GeneratedAccess.DeepCopy()
@@ -37,6 +43,42 @@ func TestAccessCompositionWaitsForRealParentUIDAndThenCreatesHAChildren(t *testi
 		if len(secured.OwnerReferences) != 1 || secured.OwnerReferences[0].UID != access.UID || secured.OwnerReferences[0].Controller == nil || !*secured.OwnerReferences[0].Controller {
 			t.Fatalf("generated SecuredAccess is not controller-owned by RouterAccess: %#v", secured.OwnerReferences)
 		}
+	}
+}
+
+func TestStandaloneAccessAndCertificateDeriveWithoutSite(t *testing.T) {
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "controller-ns", UID: "namespace-uid"}, Assignment: Assignment{Controller: "controller-ns/skupper-controller", Controlled: true}, DefaultAccessType: "local"}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{{ObjectMeta: metav1.ObjectMeta{Name: "enrollment", Namespace: "controller-ns", UID: "access-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{Selector: map[string]string{"app": "controller"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443, TargetPort: 8443, Protocol: "TCP"}}, Certificate: "enrollment", Issuer: "issuer"}}}
+	snapshot.Certificates = []*skupperv2alpha1.Certificate{{ObjectMeta: metav1.ObjectMeta{Name: "issuer", Namespace: "controller-ns", UID: "issuer-uid"}, Spec: skupperv2alpha1.CertificateSpec{Subject: "issuer", Signing: true}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.Site != nil || len(desired.Intents) != 0 {
+		t.Fatalf("standalone derivation fabricated Site/router intent: %#v", desired)
+	}
+	if len(desired.AccessServices) != 1 || desired.AccessServices[0].Name != "enrollment" {
+		t.Fatalf("standalone SecuredAccess Service was not derived: %#v", desired.AccessServices)
+	}
+	if len(desired.Certificates) != 1 || desired.Certificates[0].Name != "enrollment" {
+		t.Fatalf("standalone SecuredAccess Certificate request was not derived: %#v", desired.Certificates)
+	}
+	if len(desired.Statuses.SecuredAccesses) != 1 || len(desired.Statuses.Certificates) != 1 {
+		t.Fatalf("standalone status was not projected without a Site: %#v", desired.Statuses)
+	}
+}
+
+func TestCertificateStatusIncludesSummaryAndExpiration(t *testing.T) {
+	certificate := &skupperv2alpha1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "issuer", Namespace: "controller-ns", UID: "issuer-uid", Generation: 2}, Spec: skupperv2alpha1.CertificateSpec{Subject: "issuer", Signing: true}}
+	secret, err := certificates.GenerateSecret(certificate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "controller-ns", UID: "namespace-uid"}, Assignment: Assignment{Controller: "controller-ns/skupper-controller", Controlled: true}, Certificates: []*skupperv2alpha1.Certificate{certificate}, Secrets: []*corev1.Secret{secret}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.Certificates) != 1 {
+		t.Fatalf("Certificate status was not projected: %#v", desired.Statuses.Certificates)
+	}
+	status := desired.Statuses.Certificates[0].Status
+	if status.StatusType != skupperv2alpha1.StatusReady || status.Message != "OK" || status.Expiration == "" {
+		t.Fatalf("Certificate columns were not populated: %#v", status)
 	}
 }
 
