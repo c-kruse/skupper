@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
+	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -241,4 +243,56 @@ func listenerServiceTestController(t *testing.T) (*NamespaceController, internal
 		t.Fatal(err)
 	}
 	return controller, clients, namespace, site
+}
+
+func TestNamespaceControllerOwnsSizingAndLabellingConfiguration(t *testing.T) {
+	clients, err := fakeclient.NewFakeClient("controller-ns", nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{WatchNamespace: "site-ns", ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if controller.configurationFactory == nil {
+		t.Fatal("namespace-scoped controller did not create a controller-namespace configuration informer")
+	}
+	sizeConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "small", Namespace: "controller-ns", Labels: map[string]string{sizing.SiteSizingLabel: "small"}, Annotations: map[string]string{sizing.DefaultSiteSizingAnnotation: "true"}}, Data: map[string]string{"router-cpu-request": "250m"}}
+	labelConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "labels", Namespace: "site-ns", Labels: map[string]string{"skupper.io/label-template": "", "acme.example/environment": "test"}}, Data: map[string]string{"kind": "Deployment"}}
+	controller.updateConfiguration(sizeConfig, false)
+	controller.updateConfiguration(labelConfig, false)
+	siteSize, err := controller.sizing.GetSizing(&skupperv2alpha1.Site{})
+	if err != nil || siteSize.Router.Requests[string(corev1.ResourceCPU)] != "250m" {
+		t.Fatalf("cached default sizing was not applied: size=%#v err=%v", siteSize, err)
+	}
+	metadata := &metav1.ObjectMeta{}
+	if !controller.labelling.SetObjectMetadata("site-ns", "skupper-router", "Deployment", metadata) || metadata.Labels["acme.example/environment"] != "test" {
+		t.Fatalf("cached labelling template was not applied: %#v", metadata)
+	}
+
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for iteration := 0; iteration < 100; iteration++ {
+				controller.updateConfiguration(sizeConfig, false)
+				_, _ = controller.sizing.GetSizing(&skupperv2alpha1.Site{})
+				controller.updateConfiguration(labelConfig, false)
+				controller.labelling.SetObjectMetadata("site-ns", "skupper-router", "Deployment", &metav1.ObjectMeta{})
+			}
+		}()
+	}
+	workers.Wait()
+	controller.updateConfiguration(sizeConfig, true)
+	controller.updateConfiguration(labelConfig, true)
+	siteSize, err = controller.sizing.GetSizing(&skupperv2alpha1.Site{})
+	if err != nil || siteSize.Router.NotEmpty() {
+		t.Fatalf("deleted sizing remained active: size=%#v err=%v", siteSize, err)
+	}
+	metadata = &metav1.ObjectMeta{}
+	controller.labelling.SetObjectMetadata("site-ns", "skupper-router", "Deployment", metadata)
+	if metadata.Labels["acme.example/environment"] != "" {
+		t.Fatalf("deleted labelling template remained active: %#v", metadata)
+	}
 }

@@ -3,6 +3,7 @@ package labels
 import (
 	"log/slog"
 	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -11,6 +12,7 @@ import (
 )
 
 type LabelsAndAnnotations struct {
+	mu                  sync.RWMutex
 	namespaces          map[string]*Registry
 	controllerNamespace string
 	log                 *slog.Logger
@@ -30,6 +32,8 @@ func NewLabelsAndAnnotations(controllerNamespace string) *LabelsAndAnnotations {
 }
 
 func (l *LabelsAndAnnotations) Update(key string, cm *corev1.ConfigMap) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	namespace, _, _ := cache.SplitMetaNamespaceKey(key)
 	if existing, ok := l.namespaces[namespace]; ok {
 		return existing.update(key, cm)
@@ -42,6 +46,8 @@ func (l *LabelsAndAnnotations) Update(key string, cm *corev1.ConfigMap) error {
 }
 
 func (l *LabelsAndAnnotations) SetLabels(namespace string, name string, kind string, labels map[string]string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	desired := map[string]string{}
 	if registry, ok := l.namespaces[namespace]; ok {
 		registry.setLabels(name, kind, labels, desired, false)
@@ -55,6 +61,8 @@ func (l *LabelsAndAnnotations) SetLabels(namespace string, name string, kind str
 }
 
 func (l *LabelsAndAnnotations) SetAnnotations(namespace string, name string, kind string, annotations map[string]string) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	desired := map[string]string{}
 	if registry, ok := l.namespaces[namespace]; ok {
 		registry.setAnnotations(name, kind, annotations, desired, false)
@@ -76,6 +84,8 @@ func (l *LabelsAndAnnotations) SetPodObjectMetadata(namespace string, name strin
 }
 
 func (l *LabelsAndAnnotations) setObjectMetadata(namespace string, name string, kind string, meta *metav1.ObjectMeta, requireIncludePods bool) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if meta == nil {
 		return false
 	}

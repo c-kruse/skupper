@@ -22,6 +22,7 @@ import (
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
+	sitelabels "github.com/skupperproject/skupper/internal/kube/site/labels"
 	siteresources "github.com/skupperproject/skupper/internal/kube/site/resources"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
@@ -43,6 +44,7 @@ type NamespaceController struct {
 	clients                internalclient.Clients
 	controllerID           string
 	coreFactory            informers.SharedInformerFactory
+	configurationFactory   informers.SharedInformerFactory
 	skupperFactory         skupperinformers.SharedInformerFactory
 	informers              namespaceInformers
 	queue                  *reconcile.Queue
@@ -52,6 +54,10 @@ type NamespaceController struct {
 	disableSecurityContext bool
 	sizing                 SiteSizing
 	labelling              siteresources.Labelling
+	controllerNamespace    string
+	sizingUpdater          func(string, *corev1.ConfigMap) error
+	labellingUpdater       func(string, *corev1.ConfigMap) error
+	configurationConfigMap cache.SharedIndexInformer
 	bootstrapMu            sync.RWMutex
 	leaderRunning          bool
 	synced                 atomic.Bool
@@ -103,7 +109,27 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	coreFactory := informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(options.WatchNamespace))
 	skupperFactory := skupperinformers.NewSharedInformerFactoryWithOptions(clients.GetSkupperClient(), 5*time.Minute, skupperinformers.WithNamespace(options.WatchNamespace))
 	crs := skupperFactory.Skupper().V2alpha1()
-	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling}
+	controllerNamespace := options.ControllerID
+	if separator := strings.IndexByte(controllerNamespace, '/'); separator >= 0 {
+		controllerNamespace = controllerNamespace[:separator]
+	} else if options.WatchNamespace != "" {
+		controllerNamespace = options.WatchNamespace
+	}
+	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace}
+	if c.sizing == nil {
+		registry := sizing.NewRegistry()
+		c.sizing = registry
+		c.sizingUpdater = registry.Update
+	}
+	if c.labelling == nil {
+		registry := sitelabels.NewLabelsAndAnnotations(controllerNamespace)
+		c.labelling = registry
+		c.labellingUpdater = registry.Update
+	}
+	if options.WatchNamespace != "" && options.WatchNamespace != controllerNamespace {
+		c.configurationFactory = informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(controllerNamespace))
+		c.configurationConfigMap = c.configurationFactory.Core().V1().ConfigMaps().Informer()
+	}
 	c.informers = namespaceInformers{
 		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
@@ -119,6 +145,9 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 
 func (c *NamespaceController) StartCaches(ctx context.Context) {
 	c.coreFactory.Start(ctx.Done())
+	if c.configurationFactory != nil {
+		c.configurationFactory.Start(ctx.Done())
+	}
 	c.skupperFactory.Start(ctx.Done())
 }
 
@@ -128,9 +157,24 @@ func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
 			return fmt.Errorf("core informer %v did not synchronize", kind)
 		}
 	}
+	if c.configurationFactory != nil {
+		for kind, ok := range c.configurationFactory.WaitForCacheSync(ctx.Done()) {
+			if !ok {
+				return fmt.Errorf("configuration informer %v did not synchronize", kind)
+			}
+		}
+	}
 	for kind, ok := range c.skupperFactory.WaitForCacheSync(ctx.Done()) {
 		if !ok {
 			return fmt.Errorf("Skupper informer %v did not synchronize", kind)
+		}
+	}
+	for _, value := range c.informers.configMaps.GetStore().List() {
+		c.updateConfiguration(value.(*corev1.ConfigMap), false)
+	}
+	if c.configurationConfigMap != nil {
+		for _, value := range c.configurationConfigMap.GetStore().List() {
+			c.updateConfiguration(value.(*corev1.ConfigMap), false)
 		}
 	}
 	c.synced.Store(true)
@@ -226,9 +270,17 @@ func (c *NamespaceController) RunLeader(ctx context.Context) error {
 }
 
 func (c *NamespaceController) registerInvalidations() error {
-	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.configMaps, c.informers.services, c.informers.secrets, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
+	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.services, c.informers.secrets, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
 	for _, informer := range local {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.invalidateObject, UpdateFunc: func(old, current interface{}) { c.invalidateObject(old); c.invalidateObject(current) }, DeleteFunc: c.invalidateObject}); err != nil {
+			return err
+		}
+	}
+	if _, err := c.informers.configMaps.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted}); err != nil {
+		return err
+	}
+	if c.configurationConfigMap != nil {
+		if _, err := c.configurationConfigMap.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted}); err != nil {
 			return err
 		}
 	}
@@ -242,6 +294,71 @@ func (c *NamespaceController) registerInvalidations() error {
 		return err
 	}
 	return nil
+}
+
+func (c *NamespaceController) configurationAdded(value interface{}) {
+	if config, ok := eventObject(value).(*corev1.ConfigMap); ok {
+		c.updateConfiguration(config, false)
+		if configurationAffectsAll(config, c.controllerNamespace) {
+			c.invalidateAllSiteNamespaces()
+		}
+	}
+	c.invalidateObject(value)
+}
+
+func (c *NamespaceController) configurationUpdated(old, current interface{}) {
+	oldConfig, _ := eventObject(old).(*corev1.ConfigMap)
+	currentConfig, _ := eventObject(current).(*corev1.ConfigMap)
+	if currentConfig != nil {
+		c.updateConfiguration(currentConfig, false)
+	}
+	c.invalidateObject(old)
+	c.invalidateObject(current)
+	if configurationAffectsAll(oldConfig, c.controllerNamespace) || configurationAffectsAll(currentConfig, c.controllerNamespace) {
+		c.invalidateAllSiteNamespaces()
+	}
+}
+
+func (c *NamespaceController) configurationDeleted(value interface{}) {
+	if config, ok := eventObject(value).(*corev1.ConfigMap); ok {
+		c.updateConfiguration(config, true)
+		if configurationAffectsAll(config, c.controllerNamespace) {
+			c.invalidateAllSiteNamespaces()
+		}
+	}
+	c.invalidateObject(value)
+}
+
+func (c *NamespaceController) updateConfiguration(config *corev1.ConfigMap, deleted bool) {
+	if config == nil {
+		return
+	}
+	key := config.Namespace + "/" + config.Name
+	value := config
+	if deleted {
+		value = nil
+	}
+	if c.sizingUpdater != nil && config.Namespace == c.controllerNamespace {
+		_ = c.sizingUpdater(key, value)
+	}
+	if c.labellingUpdater != nil {
+		_ = c.labellingUpdater(key, value)
+	}
+}
+
+func configurationAffectsAll(config *corev1.ConfigMap, controllerNamespace string) bool {
+	if config == nil || config.Namespace != controllerNamespace {
+		return false
+	}
+	_, sizingConfig := config.Labels[sizing.SiteSizingLabel]
+	_, labelTemplate := config.Labels["skupper.io/label-template"]
+	return sizingConfig || labelTemplate
+}
+
+func (c *NamespaceController) invalidateAllSiteNamespaces() {
+	for _, value := range c.informers.sites.GetStore().List() {
+		c.queue.Add(value.(*skupperv2alpha1.Site).Namespace)
+	}
 }
 
 func objectFromEvent(value interface{}) metav1.Object {

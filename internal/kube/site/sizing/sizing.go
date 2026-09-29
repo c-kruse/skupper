@@ -3,6 +3,7 @@ package sizing
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -16,6 +17,7 @@ const (
 )
 
 type Registry struct {
+	mu          sync.RWMutex
 	sizes       map[string]*corev1.ConfigMap //keyed on size name
 	names       map[string]string            //ConfigMap key -> size name
 	defaultSize string
@@ -29,6 +31,8 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Update(key string, cm *corev1.ConfigMap) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if name, ok := getSizeName(cm); ok {
 		if existing, ok := r.names[key]; ok {
 			delete(r.sizes, existing)
@@ -64,6 +68,8 @@ func isDefault(cm *corev1.ConfigMap) bool {
 }
 
 func (r *Registry) GetSizing(site *skupperv2alpha1.Site) (Sizing, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if config := r.getSizeConfiguration(desiredSize(site)); config != nil {
 		return parse(config)
 	}
