@@ -3,6 +3,7 @@ package adaptor
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/skupperproject/skupper/internal/qdr"
@@ -159,9 +160,76 @@ func verifyOwnedConfig(actual, desired *qdr.RouterConfig, profiles bool) error {
 		d.ProxyProfiles = nil
 	}
 	if !reflect.DeepEqual(a, d) {
-		return fmt.Errorf("local router read-back does not match desired owned configuration")
+		return fmt.Errorf("local router read-back mismatch: %s", firstOwnedMismatch(a, d))
 	}
 	return nil
+}
+
+func firstOwnedMismatch(actual, desired qdr.RouterConfig) string {
+	checks := []string{
+		firstMapMismatch("sslProfile", actual.SslProfiles, desired.SslProfiles),
+		firstMapMismatch("proxyProfile", actual.ProxyProfiles, desired.ProxyProfiles),
+		firstMapMismatch("listener", actual.Listeners, desired.Listeners),
+		firstMapMismatch("connector", actual.Connectors, desired.Connectors),
+		firstMapMismatch("address", actual.Addresses, desired.Addresses),
+		firstMapMismatch("tcpListener", actual.Bridges.TcpListeners, desired.Bridges.TcpListeners),
+		firstMapMismatch("tcpConnector", actual.Bridges.TcpConnectors, desired.Bridges.TcpConnectors),
+		firstMapMismatch("listenerAddress", actual.Bridges.ListenerAddresses, desired.Bridges.ListenerAddresses),
+	}
+	for _, mismatch := range checks {
+		if mismatch != "" {
+			return mismatch
+		}
+	}
+	return `owned configuration field "unknown"`
+}
+
+func firstMapMismatch[T any](category string, actual, desired map[string]T) string {
+	if len(actual) == 0 && len(desired) == 0 {
+		if (actual == nil) != (desired == nil) {
+			return fmt.Sprintf(`%s field "collection"`, category)
+		}
+		return ""
+	}
+	names := make([]string, 0, len(actual)+len(desired))
+	seen := map[string]struct{}{}
+	for name := range actual {
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for name := range desired {
+		if _, found := seen[name]; !found {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		a, actualFound := actual[name]
+		d, desiredFound := desired[name]
+		if actualFound != desiredFound {
+			return fmt.Sprintf(`%s %q field "presence"`, category, name)
+		}
+		if reflect.DeepEqual(a, d) {
+			continue
+		}
+		actualValue, desiredValue := reflect.ValueOf(a), reflect.ValueOf(d)
+		if actualValue.Kind() == reflect.Struct && desiredValue.Kind() == reflect.Struct {
+			typeOfValue := actualValue.Type()
+			for field := 0; field < actualValue.NumField(); field++ {
+				if !reflect.DeepEqual(actualValue.Field(field).Interface(), desiredValue.Field(field).Interface()) {
+					nameOfField := typeOfValue.Field(field).Name
+					if tag := typeOfValue.Field(field).Tag.Get("json"); tag != "" {
+						if jsonName := strings.Split(tag, ",")[0]; jsonName != "" && jsonName != "-" {
+							nameOfField = jsonName
+						}
+					}
+					return fmt.Sprintf(`%s %q field %q`, category, name, nameOfField)
+				}
+			}
+		}
+		return fmt.Sprintf(`%s %q field "value"`, category, name)
+	}
+	return ""
 }
 
 func normalizeManagedReadback(config, desired *qdr.RouterConfig) {

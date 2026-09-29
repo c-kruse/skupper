@@ -253,6 +253,51 @@ func boundedErrorReason(err error) string {
 	return reason
 }
 
+type applicationReportLogger struct {
+	logger    *slog.Logger
+	lastState string
+}
+
+func (l *applicationReportLogger) Log(report routercontrol.ApplicationReport) {
+	if report.State == routercontrol.ApplicationApplied {
+		l.lastState = ""
+		return
+	}
+	type diagnostic struct{ resourceID, reason string }
+	diagnostics := make([]diagnostic, 0, len(report.Resources))
+	for _, resource := range report.Resources {
+		if resource.Reason != "" {
+			diagnostics = append(diagnostics, diagnostic{resourceID: string(resource.ResourceID), reason: boundedErrorReason(errors.New(resource.Reason))})
+		}
+	}
+	if len(diagnostics) == 0 {
+		diagnostics = append(diagnostics, diagnostic{reason: "no resource reason reported"})
+	}
+	if len(diagnostics) > 8 {
+		diagnostics = diagnostics[:8]
+	}
+	var signature strings.Builder
+	fmt.Fprintf(&signature, "%d\x00%s\x00%s\x00", report.Sequence, report.IntentDigest, report.State)
+	for _, item := range diagnostics {
+		fmt.Fprintf(&signature, "%s\x00%s\x00", item.resourceID, item.reason)
+	}
+	if signature.String() == l.lastState {
+		return
+	}
+	l.lastState = signature.String()
+	logger := l.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	for _, item := range diagnostics {
+		attributes := []any{slog.String("state", string(report.State)), slog.String("reason", item.reason)}
+		if item.resourceID != "" {
+			attributes = append(attributes, slog.String("resourceID", item.resourceID))
+		}
+		logger.Warn("router application not applied", attributes...)
+	}
+}
+
 func validateSupportedIntent(intent routercontrol.RouterIntent) error {
 	for _, listener := range intent.ServiceListeners {
 		if listener.Protocol != routercontrol.ProtocolTCP {
@@ -394,6 +439,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 	var compiled CompiledIntent
 	var compiledValid bool
 	var sample uint64
+	applicationLog := applicationReportLogger{logger: slog.Default()}
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,6 +465,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 				if err := boundedSessionCall(ctx, cancel, func() error { return session.SendApplication(report) }); err != nil {
 					return err
 				}
+				applicationLog.Log(report)
 			}
 		case item := <-events:
 			<-receiverDone
@@ -477,6 +524,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 				if err := boundedSessionCall(ctx, cancel, func() error { return session.SendApplication(report) }); err != nil {
 					return err
 				}
+				applicationLog.Log(report)
 			}
 			events, receiverDone = startControlReceiver(ctx, session)
 		}

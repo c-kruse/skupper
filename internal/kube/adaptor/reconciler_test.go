@@ -2,6 +2,7 @@ package adaptor
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/skupperproject/skupper/internal/qdr"
@@ -103,6 +104,27 @@ func TestReconcileIgnoresOperationalReadbackAndRouterDefaults(t *testing.T) {
 	result := Reconcile(fake, CompiledIntent{Config: *desired})
 	if !result.Applied {
 		t.Fatalf("QDR runtime/default fields caused false mismatch: %v", result.Err)
+	}
+}
+
+func TestVerifyOwnedReportsFirstCategoryAndFieldWithoutValues(t *testing.T) {
+	name := ownedNamePrefix + "listener"
+	desired := basicConfig()
+	desired.Bridges.TcpListeners[name] = qdr.TcpEndpoint{Name: name, Host: "desired-sensitive-host", Port: "8080", Address: "orders"}
+	actual := cloneRouterConfig(desired)
+	listener := actual.Bridges.TcpListeners[name]
+	listener.Host = "actual-sensitive-host"
+	actual.Bridges.TcpListeners[name] = listener
+	err := verifyOwned(&actual, desired)
+	if err == nil {
+		t.Fatal("owned field mismatch was accepted")
+	}
+	message := err.Error()
+	if !strings.Contains(message, `tcpListener "`+name+`" field "host"`) {
+		t.Fatalf("mismatch is not actionable: %q", message)
+	}
+	if strings.Contains(message, "desired-sensitive-host") || strings.Contains(message, "actual-sensitive-host") {
+		t.Fatalf("mismatch leaked values: %q", message)
 	}
 }
 

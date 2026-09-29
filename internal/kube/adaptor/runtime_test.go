@@ -1,8 +1,10 @@
 package adaptor
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -133,6 +135,30 @@ func TestBoundedErrorReasonIsSingleLineAndBounded(t *testing.T) {
 	reason := boundedErrorReason(errors.New(strings.Repeat("x", 600) + "\nbody"))
 	if len(reason) != 515 || strings.ContainsAny(reason, "\r\n") || !strings.HasSuffix(reason, "...") {
 		t.Fatalf("unsafe reconnect reason %q (length %d)", reason, len(reason))
+	}
+}
+
+func TestApplicationPendingLoggingIsBoundedDeduplicatedAndOmitsCredentials(t *testing.T) {
+	var output bytes.Buffer
+	logger := applicationReportLogger{logger: slog.New(slog.NewTextHandler(&output, nil))}
+	report := routercontrol.ApplicationReport{
+		State:       routercontrol.ApplicationPending,
+		Credentials: []routercontrol.CredentialRevision{{BindingID: "traffic", Revision: "credential-value-must-not-appear"}},
+		Resources:   []routercontrol.ResourceApplication{{ResourceID: "listener", State: routercontrol.ApplicationPending, Reason: "local router read-back mismatch: tcpListener field host"}},
+	}
+	logger.Log(report)
+	logger.Log(report)
+	report.Resources[0].Reason = strings.Repeat("x", 600) + "\nbody"
+	logger.Log(report)
+	logged := output.String()
+	if count := strings.Count(logged, "router application not applied"); count != 2 {
+		t.Fatalf("logged %d diagnostics, want one per distinct report: %q", count, logged)
+	}
+	if !strings.Contains(logged, "tcpListener") || strings.Contains(logged, "credential-value-must-not-appear") || strings.Contains(logged, "\nbody") {
+		t.Fatalf("application diagnostic is missing or unsafe: %q", logged)
+	}
+	if len(logged) > 1400 {
+		t.Fatalf("application diagnostic was not bounded: %d bytes", len(logged))
 	}
 }
 
