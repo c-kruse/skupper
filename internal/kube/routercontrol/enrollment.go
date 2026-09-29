@@ -93,7 +93,10 @@ func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*En
 	if ttl <= 0 || ttl > DefaultCertTTL {
 		ttl = DefaultCertTTL
 	}
-	notAfter := minTime(now.Add(ttl), minTime(tokenExpiry, e.Installation.ClientCA.NotAfter))
+	// X.509 DER encodes certificate validity at whole-second precision. Use the
+	// signed precision for both the leaf and response metadata so clients can
+	// compare them exactly without rejecting a legitimate TTL-bounded issuance.
+	notAfter := minTime(now.Add(ttl), minTime(tokenExpiry, e.Installation.ClientCA.NotAfter)).UTC().Truncate(time.Second)
 	if !notAfter.After(now.Add(time.Minute)) {
 		return nil, fmt.Errorf("authenticated token or client issuer expires too soon")
 	}

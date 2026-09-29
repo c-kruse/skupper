@@ -63,6 +63,24 @@ func TestEnrollValidatesAudienceOwnershipCSRAndLifetime(t *testing.T) {
 	}
 }
 
+func TestEnrollNormalizesTTLLimitedExpiryToCertificatePrecision(t *testing.T) {
+	_, _, enroller := enrollmentFixture(t)
+	now := testNow.Add(123456789 * time.Nanosecond)
+	enroller.Now = func() time.Time { return now }
+	enrollment, err := enroller.Enroll(context.Background(), testToken(now.Add(time.Hour)), testCSR(t, pkix.Name{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := now.Add(DefaultCertTTL).UTC().Truncate(time.Second)
+	leaf, err := x509.ParseCertificate(enrollment.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !enrollment.NotAfter.Equal(want) || !leaf.NotAfter.Equal(want) {
+		t.Fatalf("expiry metadata=%v leaf=%v, want %v", enrollment.NotAfter, leaf.NotAfter, want)
+	}
+}
+
 func TestEnrollRejectsForgedCSRIdentityAndReplacedPod(t *testing.T) {
 	client, _, enroller := enrollmentFixture(t)
 	forged, _ := url.Parse("spiffe://attacker.invalid/admin")

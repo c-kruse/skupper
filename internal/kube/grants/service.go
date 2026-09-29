@@ -69,11 +69,11 @@ func NewService(options ServiceOptions) (*Service, error) {
 		service.enabled = newEnabled(events, options.CurrentNamespace, options.WatchNamespace, options.Config, options.Generator, options.IsControlled, true)
 		service.enabled.grants.authorize = service.checkAuthority
 		service.enabled.grants.effectContext = service.apiContext
-		events.WatchAccessTokens(options.WatchNamespace, service.checkAccessToken)
 	} else {
 		service.disabled = &GrantsDisabled{clients: events, logger: slog.Default()}
 		events.WatchAccessGrants(options.WatchNamespace, service.markGrantDisabled)
 	}
+	events.WatchAccessTokens(options.WatchNamespace, service.checkAccessToken)
 	return service, nil
 }
 

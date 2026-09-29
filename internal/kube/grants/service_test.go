@@ -219,7 +219,10 @@ func TestServiceRejectsEffectsAfterLeadershipLoss(t *testing.T) {
 
 func TestServiceStandbyCachesAndLeaderLifecycle(t *testing.T) {
 	grant := tf.grant("grant", "test", "grant-uid")
-	clients, err := fake.NewFakeClient("test", nil, []runtime.Object{grant}, "")
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	token.UID = types.UID("token-uid")
+	token.Annotations = map[string]string{redemptionAttemptAnnotation: string(token.UID)}
+	clients, err := fake.NewFakeClient("test", nil, []runtime.Object{grant, token}, "")
 	assert.NilError(t, err)
 	service, err := NewService(ServiceOptions{
 		Clients:        clients,
@@ -227,6 +230,7 @@ func TestServiceStandbyCachesAndLeaderLifecycle(t *testing.T) {
 		Config:         &GrantConfig{Enabled: false},
 	})
 	assert.NilError(t, err)
+	assert.Assert(t, service.enabled == nil, "disabled AccessGrant serving must not construct an HTTP server")
 	cacheCtx, stopCaches := context.WithCancel(context.Background())
 	defer stopCaches()
 	assert.NilError(t, service.StartCaches(cacheCtx))
@@ -248,6 +252,15 @@ func TestServiceStandbyCachesAndLeaderLifecycle(t *testing.T) {
 		assert.NilError(t, err)
 	}
 	assert.Equal(t, latest.Status.Message, "AccessGrants are not enabled")
+	latestToken, err := clients.GetSkupperClient().SkupperV2alpha1().AccessTokens("test").Get(context.Background(), token.Name, metav1.GetOptions{})
+	assert.NilError(t, err)
+	deadline = time.Now().Add(5 * time.Second)
+	for latestToken.Status.Message != "Redemption outcome is unknown; replace the AccessToken to retry" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		latestToken, err = clients.GetSkupperClient().SkupperV2alpha1().AccessTokens("test").Get(context.Background(), token.Name, metav1.GetOptions{})
+		assert.NilError(t, err)
+	}
+	assert.Equal(t, latestToken.Status.Message, "Redemption outcome is unknown; replace the AccessToken to retry")
 	close(gate.done)
 	select {
 	case err := <-result:
