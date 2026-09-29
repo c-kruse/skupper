@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,9 +17,11 @@ import (
 	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/skupperproject/skupper/internal/kube/client/fake"
 	"github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	fakev2alpha1 "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/typed/skupper/v2alpha1/fake"
 )
 
 func dummyGenerator(namespace string, name string, subject string, writer io.Writer) error {
@@ -147,6 +151,126 @@ func TestGrantRegistryGeneral(t *testing.T) {
 		assert.Equal(t, latest.Status.Redemptions, 1)
 	}
 	//TODO: test bad input values in spec
+}
+
+func TestConcurrentGrantRedemptionHonorsLimit(t *testing.T) {
+	grant := &v2alpha1.AccessGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "grant", Namespace: "test", UID: "grant-uid"},
+		Spec:       v2alpha1.AccessGrantSpec{RedemptionsAllowed: 1},
+		Status: v2alpha1.AccessGrantStatus{
+			Code:           "secret",
+			ExpirationTime: time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{grant}, "")
+	assert.NilError(t, err)
+	var generated atomic.Int32
+	registry := newGrants(client, func(string, string, string, io.Writer) error {
+		generated.Add(1)
+		return nil
+	}, "https", "host")
+	registry.record("test/grant", grant)
+
+	const requests = 20
+	var successes atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			request := httptest.NewRequest(http.MethodPost, "/grant-uid", bytes.NewBufferString("secret"))
+			response := httptest.NewRecorder()
+			registry.ServeHTTP(response, request)
+			if response.Code == http.StatusOK {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, successes.Load(), int32(1))
+	assert.Equal(t, generated.Load(), int32(1))
+	live, err := client.GetSkupperClient().SkupperV2alpha1().AccessGrants("test").Get(context.Background(), grant.Name, metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, live.Status.Redemptions, 1)
+}
+
+func TestGrantRedemptionRevalidatesAssignmentAndUID(t *testing.T) {
+	grant := &v2alpha1.AccessGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "grant", Namespace: "test", UID: "grant-uid"},
+		Spec:       v2alpha1.AccessGrantSpec{RedemptionsAllowed: 1},
+		Status: v2alpha1.AccessGrantStatus{
+			Code:           "secret",
+			ExpirationTime: time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{grant}, "")
+	assert.NilError(t, err)
+	var controlled atomic.Bool
+	controlled.Store(true)
+	var generated atomic.Int32
+	registry := newGrants(client, func(string, string, string, io.Writer) error {
+		generated.Add(1)
+		return nil
+	}, "https", "host")
+	registry.filter = func(string) bool { return controlled.Load() }
+	registry.record("test/grant", grant)
+
+	controlled.Store(false)
+	request := httptest.NewRequest(http.MethodPost, "/grant-uid", bytes.NewBufferString("secret"))
+	response := httptest.NewRecorder()
+	registry.ServeHTTP(response, request)
+	assert.Equal(t, response.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, generated.Load(), int32(0))
+
+	controlled.Store(true)
+	assert.NilError(t, client.GetSkupperClient().SkupperV2alpha1().AccessGrants("test").Delete(context.Background(), grant.Name, metav1.DeleteOptions{}))
+	replacement := grant.DeepCopy()
+	replacement.UID = "replacement-uid"
+	replacement.ResourceVersion = ""
+	_, err = client.GetSkupperClient().SkupperV2alpha1().AccessGrants("test").Create(context.Background(), replacement, metav1.CreateOptions{})
+	assert.NilError(t, err)
+	request = httptest.NewRequest(http.MethodPost, "/grant-uid", bytes.NewBufferString("secret"))
+	response = httptest.NewRecorder()
+	registry.ServeHTTP(response, request)
+	assert.Equal(t, response.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, generated.Load(), int32(0))
+}
+
+func TestGrantRedemptionRevalidatesBeforeGenerator(t *testing.T) {
+	grant := &v2alpha1.AccessGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "grant", Namespace: "test", UID: "grant-uid", ResourceVersion: "1"},
+		Spec:       v2alpha1.AccessGrantSpec{RedemptionsAllowed: 1},
+		Status: v2alpha1.AccessGrantStatus{
+			Code:           "secret",
+			ExpirationTime: time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{grant}, "")
+	assert.NilError(t, err)
+	var controlled atomic.Bool
+	controlled.Store(true)
+	client.GetSkupperClient().SkupperV2alpha1().(*fakev2alpha1.FakeSkupperV2alpha1).PrependReactor("update", "accessgrants", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() == "status" {
+			controlled.Store(false)
+		}
+		return false, nil, nil
+	})
+	var generated atomic.Int32
+	registry := newGrants(client, func(string, string, string, io.Writer) error {
+		generated.Add(1)
+		return nil
+	}, "https", "host")
+	registry.filter = func(string) bool { return controlled.Load() }
+	registry.record("test/grant", grant)
+
+	request := httptest.NewRequest(http.MethodPost, "/grant-uid", bytes.NewBufferString("secret"))
+	response := httptest.NewRecorder()
+	registry.ServeHTTP(response, request)
+	assert.Equal(t, response.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, generated.Load(), int32(0))
+	live, err := client.GetSkupperClient().SkupperV2alpha1().AccessGrants("test").Get(context.Background(), grant.Name, metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, live.Status.Redemptions, 1)
 }
 
 func Test_ServeHttp(t *testing.T) {

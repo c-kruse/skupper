@@ -18,7 +18,10 @@ import (
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
-const redemptionAttemptAnnotation = "internal.skupper.io/redemption-attempt-uid"
+const (
+	redemptionAttemptAnnotation = "internal.skupper.io/redemption-attempt-uid"
+	redemptionSiteAnnotation    = "internal.skupper.io/redemption-site-uid"
+)
 
 var ErrNotLeader = errors.New("grant service is not the active leader")
 
@@ -48,8 +51,6 @@ type Service struct {
 	isControlled     NamespaceFilter
 	enabled          *GrantsEnabled
 	disabled         *GrantsDisabled
-	tokenWatcher     *watchers.AccessTokenWatcher
-	grantWatcher     *watchers.AccessGrantWatcher
 
 	mu        sync.RWMutex
 	gate      EffectGate
@@ -68,11 +69,10 @@ func NewService(options ServiceOptions) (*Service, error) {
 		service.enabled = newEnabled(events, options.CurrentNamespace, options.WatchNamespace, options.Config, options.Generator, options.IsControlled, true)
 		service.enabled.grants.authorize = service.checkAuthority
 		service.enabled.grants.effectContext = service.apiContext
-		service.grantWatcher = service.enabled.grantWatcher
-		service.tokenWatcher = events.WatchAccessTokens(options.WatchNamespace, service.checkAccessToken)
+		events.WatchAccessTokens(options.WatchNamespace, service.checkAccessToken)
 	} else {
 		service.disabled = &GrantsDisabled{clients: events, logger: slog.Default()}
-		service.grantWatcher = events.WatchAccessGrants(options.WatchNamespace, service.markGrantDisabled)
+		events.WatchAccessGrants(options.WatchNamespace, service.markGrantDisabled)
 	}
 	return service, nil
 }
@@ -134,9 +134,9 @@ func (s *Service) RunLeader(ctx context.Context, gate EffectGate) error {
 		s.events.Stop()
 	}()
 
-	if err := s.recover(); err != nil {
-		return err
-	}
+	// Initial informer Add events were queued while caches warmed. Starting the
+	// processor drains them independently, so one invalid resource cannot block
+	// grant serving or the rest of the initial state.
 	s.events.Start(runCtx.Done())
 	if s.enabled == nil {
 		<-runCtx.Done()
@@ -150,46 +150,6 @@ func (s *Service) RunLeader(ctx context.Context, gate EffectGate) error {
 		}
 	}
 	return s.enabled.server.run(runCtx, gate)
-}
-
-func (s *Service) recover() error {
-	if s.enabled != nil {
-		for _, grant := range s.grantWatcher.List() {
-			if !s.controlled(grant.Namespace) {
-				continue
-			}
-			if err := s.enabled.grants.checkGrant(grant.Namespace+"/"+grant.Name, grant); err != nil {
-				return err
-			}
-		}
-		for _, secret := range s.enabled.secretWatcher.List() {
-			if !s.controlled(secret.Namespace) {
-				continue
-			}
-			if err := s.enabled.tlsCredentialsUpdated(secret.Namespace+"/"+secret.Name, secret); err != nil {
-				return err
-			}
-		}
-		if s.enabled.autoConfigure != nil {
-			for _, access := range s.enabled.autoConfigure.watcher.List() {
-				if err := s.enabled.securedAccessChanged(access.Namespace+"/"+access.Name, access); err != nil {
-					return err
-				}
-			}
-		}
-		for _, token := range s.tokenWatcher.List() {
-			if err := s.checkAccessToken(token.Namespace+"/"+token.Name, token); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for _, grant := range s.grantWatcher.List() {
-		if err := s.markGrantDisabled(grant.Namespace+"/"+grant.Name, grant); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Service) checkAuthority() error {
@@ -247,11 +207,18 @@ func (s *Service) checkAccessToken(_ string, token *skupperv2alpha1.AccessToken)
 		return err
 	}
 	if live.Annotations[redemptionAttemptAnnotation] == string(live.UID) {
-		body, found, err := loadRedemptionResponse(ctx, live, s.clients)
+		attemptSiteUID := types.UID(live.Annotations[redemptionSiteAnnotation])
+		if attemptSiteUID == "" {
+			return s.markRedemptionUnknown(ctx, live)
+		}
+		body, stagedSiteUID, found, err := loadRedemptionResponse(ctx, live, s.clients)
 		if err != nil {
 			return err
 		}
 		if found {
+			if stagedSiteUID != attemptSiteUID {
+				return fmt.Errorf("stored redemption response Site ownership changed")
+			}
 			if s.lookupSite == nil {
 				return fmt.Errorf("site lookup is required for token redemption")
 			}
@@ -259,7 +226,10 @@ func (s *Service) checkAccessToken(_ string, token *skupperv2alpha1.AccessToken)
 			if err != nil || site == nil {
 				return err
 			}
-			return handleTokenResponseContext(ctx, bytes.NewReader(body), live, site, s.clients, s.redemptionAuthority(live, site.UID))
+			if site.UID != attemptSiteUID {
+				return fmt.Errorf("Site ownership changed")
+			}
+			return handleTokenResponseContext(ctx, bytes.NewReader(body), live, site, s.clients, s.redemptionAuthority(live, attemptSiteUID))
 		}
 		return s.markRedemptionUnknown(ctx, live)
 	}
@@ -274,16 +244,20 @@ func (s *Service) checkAccessToken(_ string, token *skupperv2alpha1.AccessToken)
 	if live.Spec.Ca == "" || err != nil || parsedURL.Scheme != "https" {
 		return RedeemAccessTokenContext(ctx, live, site, s.clients, func(context.Context) error { return s.checkAuthority() })
 	}
+	beforeEffects := s.redemptionAuthority(live, site.UID)
+	if err := beforeEffects(ctx); err != nil {
+		return err
+	}
 	live = live.DeepCopy()
 	if live.Annotations == nil {
 		live.Annotations = map[string]string{}
 	}
 	live.Annotations[redemptionAttemptAnnotation] = string(live.UID)
+	live.Annotations[redemptionSiteAnnotation] = string(site.UID)
 	live, err = s.clients.GetSkupperClient().SkupperV2alpha1().AccessTokens(live.Namespace).Update(ctx, live, metav1.UpdateOptions{})
 	if err != nil {
 		return err // No remote request occurred; informer conflict may retry safely.
 	}
-	beforeEffects := s.redemptionAuthority(live, site.UID)
 	if err := beforeEffects(ctx); err != nil {
 		return nil // Marker is durable; a successor reports Unknown without POST.
 	}
@@ -298,7 +272,7 @@ func (s *Service) checkAccessToken(_ string, token *skupperv2alpha1.AccessToken)
 	if err := beforeEffects(ctx); err != nil {
 		return nil
 	}
-	if err := saveRedemptionResponse(ctx, live, body, s.clients); err != nil {
+	if err := saveRedemptionResponse(ctx, live, site.UID, body, s.clients); err != nil {
 		return nil // A create with an ambiguous result is recovered by UID on the next leader.
 	}
 	_ = handleTokenResponseContext(ctx, bytes.NewReader(body), live, site, s.clients, beforeEffects)

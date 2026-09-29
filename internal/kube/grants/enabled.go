@@ -25,6 +25,7 @@ func newEnabled(controller *watchers.EventProcessor, currentNamespace string, wa
 		lifecycle:  lifecycle,
 		serveReady: make(chan struct{}),
 	}
+	gc.grants.filter = filter
 	gc.server = newServer(config.addr(), config.tlsEnabled(), gc.grants)
 
 	gc.grantWatcher = controller.WatchAccessGrants(watchNamespace, watchers.FilterByNamespace(filter, gc.grants.checkGrant))

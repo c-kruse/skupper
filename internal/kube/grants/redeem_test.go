@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"gotest.tools/v3/assert"
+	corev1 "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -322,6 +323,37 @@ func TestHandleTokenResponseIsRetryableAndFenced(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotLeader)
 	_, err = client.GetSkupperClient().SkupperV2alpha1().Links("test").Get(context.Background(), "other", metav1.GetOptions{})
 	assert.ErrorContains(t, err, "not found")
+}
+
+func TestEnsureResponseSecretAcceptsAPIDefaultedOpaqueType(t *testing.T) {
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "response", Namespace: "test"},
+		Data:       map[string][]byte{"value": []byte("same")},
+	}
+	existing := desired.DeepCopy()
+	existing.Type = corev1.SecretTypeOpaque
+	client, err := fake.NewFakeClient("test", []runtime.Object{existing}, nil, "")
+	assert.NilError(t, err)
+	assert.NilError(t, ensureResponseSecret(context.Background(), "test", desired, client))
+}
+
+func TestHandleTokenResponseRejectsMalformedTrailingDocument(t *testing.T) {
+	credential, err := tf.secret("received", "", "subject", nil)
+	assert.NilError(t, err)
+	response := &CertToken{tlsCredentials: credential}
+	var body bytes.Buffer
+	assert.NilError(t, response.Write(&body))
+	body.WriteString("---\ninvalid: [")
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	site := tf.site("site", "test")
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{token, site}, "")
+	assert.NilError(t, err)
+	assert.NilError(t, handleTokenResponse(&body, token, site, client))
+	_, err = client.GetKubeClient().CoreV1().Secrets("test").Get(context.Background(), credential.Name, metav1.GetOptions{})
+	assert.ErrorContains(t, err, "not found")
+	live, err := client.GetSkupperClient().SkupperV2alpha1().AccessTokens("test").Get(context.Background(), token.Name, metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, live.Status.Message, "Controller could not decode response")
 }
 
 func stringP(val string) *string {

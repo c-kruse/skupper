@@ -39,12 +39,18 @@ type TokenGenerator struct {
 }
 
 func NewTokenGenerator(site *skupperv2alpha1.Site, clients internalclient.Clients) (*TokenGenerator, error) {
+	return NewTokenGeneratorContext(context.Background(), site, clients)
+}
+
+// NewTokenGeneratorContext loads the issuing CA using the caller's lifecycle
+// context so leader loss can cancel an in-flight Kubernetes API request.
+func NewTokenGeneratorContext(ctx context.Context, site *skupperv2alpha1.Site, clients internalclient.Clients) (*TokenGenerator, error) {
 	generator := &TokenGenerator{
 		namespace: site.Namespace,
 		clients:   clients,
 		logger:    slog.New(slog.Default().Handler()).With(slog.String("component", "kube.grants.tokenGenerator")),
 	}
-	if err := generator.loadCA(site.DefaultIssuer()); err != nil {
+	if err := generator.loadCA(ctx, site.DefaultIssuer()); err != nil {
 		generator.logger.Error("Error retrieving default issuer for site",
 			slog.String("defaultIssuer", site.DefaultIssuer()),
 			slog.String("namespace", site.Namespace),
@@ -59,8 +65,8 @@ func NewTokenGenerator(site *skupperv2alpha1.Site, clients internalclient.Client
 	return generator, nil
 }
 
-func (g *TokenGenerator) loadCA(name string) error {
-	ca, err := g.clients.GetKubeClient().CoreV1().Secrets(g.namespace).Get(context.TODO(), name, metav1.GetOptions{})
+func (g *TokenGenerator) loadCA(ctx context.Context, name string) error {
+	ca, err := g.clients.GetKubeClient().CoreV1().Secrets(g.namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}

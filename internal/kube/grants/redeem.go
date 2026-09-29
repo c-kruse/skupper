@@ -18,13 +18,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
-const redemptionResponseKey = "response"
+const (
+	redemptionResponseKey = "response"
+	redemptionSiteUIDKey  = "site-uid"
+)
 
 func RedeemAccessToken(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients) error {
 	return RedeemAccessTokenContext(context.Background(), token, site, clients, nil)
@@ -198,34 +202,42 @@ func redemptionResponseOwner(token *skupperv2alpha1.AccessToken) metav1.OwnerRef
 	}
 }
 
-func saveRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, body []byte, clients internalclient.Clients) error {
+func saveRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, siteUID types.UID, body []byte, clients internalclient.Clients) error {
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            redemptionResponseName(token),
 			Namespace:       token.Namespace,
 			OwnerReferences: []metav1.OwnerReference{redemptionResponseOwner(token)},
 		},
-		Data: map[string][]byte{redemptionResponseKey: body},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			redemptionResponseKey: body,
+			redemptionSiteUIDKey:  []byte(siteUID),
+		},
 	}
 	return ensureResponseSecret(ctx, token.Namespace, desired, clients)
 }
 
-func loadRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, clients internalclient.Clients) ([]byte, bool, error) {
+func loadRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, clients internalclient.Clients) ([]byte, types.UID, bool, error) {
 	secret, err := clients.GetKubeClient().CoreV1().Secrets(token.Namespace).Get(ctx, redemptionResponseName(token), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, false, nil
+		return nil, "", false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
 	if !reflect.DeepEqual(secret.OwnerReferences, []metav1.OwnerReference{redemptionResponseOwner(token)}) {
-		return nil, false, fmt.Errorf("stored redemption response ownership changed")
+		return nil, "", false, fmt.Errorf("stored redemption response ownership changed")
 	}
 	body, ok := secret.Data[redemptionResponseKey]
 	if !ok {
-		return nil, false, fmt.Errorf("stored redemption response is missing")
+		return nil, "", false, fmt.Errorf("stored redemption response is missing")
 	}
-	return body, true, nil
+	siteUID := types.UID(secret.Data[redemptionSiteUIDKey])
+	if siteUID == "" {
+		return nil, "", false, fmt.Errorf("stored redemption response Site UID is missing")
+	}
+	return body, siteUID, true, nil
 }
 
 func ensureResponseSecret(ctx context.Context, namespace string, desired *corev1.Secret, clients internalclient.Clients) error {
@@ -237,10 +249,17 @@ func ensureResponseSecret(ctx context.Context, namespace string, desired *corev1
 	if getErr != nil {
 		return getErr
 	}
-	if !reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) || !reflect.DeepEqual(existing.Data, desired.Data) || existing.Type != desired.Type {
+	if !reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) || !reflect.DeepEqual(existing.Data, desired.Data) || normalizedSecretType(existing.Type) != normalizedSecretType(desired.Type) {
 		return err
 	}
 	return nil
+}
+
+func normalizedSecretType(secretType corev1.SecretType) corev1.SecretType {
+	if secretType == "" {
+		return corev1.SecretTypeOpaque
+	}
+	return secretType
 }
 
 func ensureResponseLink(ctx context.Context, namespace string, desired *skupperv2alpha1.Link, clients internalclient.Clients) error {
@@ -287,7 +306,13 @@ func (d *LinkDecoder) decodeAll() error {
 	if err := d.decodeSecret(); err != nil {
 		return err
 	}
-	for err := d.decodeLink(); err == nil; err = d.decodeLink() {
+	for {
+		err := d.decodeLink()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return nil
 }

@@ -30,9 +30,11 @@ type Grants struct {
 	grantIndex    map[string]kubetypes.UID
 	keyRedeem     bool
 	lock          sync.Mutex
+	consumeLock   sync.Mutex
 	logger        *slog.Logger
 	authorize     func() error
 	effectContext func() (context.Context, context.CancelFunc)
+	filter        NamespaceFilter
 }
 
 func newGrants(clients internalclient.Clients, generator GrantResponse, scheme string, url string) *Grants {
@@ -70,7 +72,7 @@ func (g *Grants) record(key string, grant *skupperv2alpha1.AccessGrant) {
 		delete(g.grants, uid)
 	}
 	g.grantIndex[key] = grant.ObjectMeta.UID
-	g.grants[grant.ObjectMeta.UID] = grant
+	g.grants[grant.ObjectMeta.UID] = grant.DeepCopy()
 }
 
 func (g *Grants) remove(key string) {
@@ -85,7 +87,7 @@ func (g *Grants) remove(key string) {
 func (g *Grants) put(grant *skupperv2alpha1.AccessGrant) error {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	g.grants[grant.ObjectMeta.UID] = grant
+	g.grants[grant.ObjectMeta.UID] = grant.DeepCopy()
 	return nil
 }
 
@@ -99,7 +101,7 @@ func (g *Grants) get(key string) *skupperv2alpha1.AccessGrant {
 		}
 	}
 	if grant, ok := g.grants[kubetypes.UID(key)]; ok {
-		return grant
+		return grant.DeepCopy()
 	}
 	return nil
 }
@@ -109,7 +111,7 @@ func (g *Grants) getAll() []*skupperv2alpha1.AccessGrant {
 	defer g.lock.Unlock()
 	var grants []*skupperv2alpha1.AccessGrant
 	for _, grant := range g.grants {
-		grants = append(grants, grant)
+		grants = append(grants, grant.DeepCopy())
 	}
 	return grants
 }
@@ -188,7 +190,6 @@ func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) erro
 		g.remove(key)
 		return nil
 	}
-
 	// if RedemptionsAllowed is not set default to 1 so that grant is usable
 	if grant.Spec.RedemptionsAllowed == 0 {
 		grant.Spec.RedemptionsAllowed = 1
@@ -197,12 +198,11 @@ func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) erro
 		if err := g.authorizeEffect(); err != nil {
 			return err
 		}
-		_, e := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).Update(ctx, grant, metav1.UpdateOptions{})
+		updated, e := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).Update(ctx, grant, metav1.UpdateOptions{})
 		if e != nil {
 			return fmt.Errorf("%s", fmt.Sprintf("Failed updating Redemptions Allowed %s", e))
-		} else {
-			return nil
 		}
+		*grant = *updated.DeepCopy()
 	}
 
 	g.record(key, grant)
@@ -292,10 +292,18 @@ func (g *Grants) updateGrantStatus(grant *skupperv2alpha1.AccessGrant) error {
 }
 
 func (g *Grants) checkAndUpdateAccessToken(key string, data []byte) (*skupperv2alpha1.AccessGrant, *HttpError) {
+	g.consumeLock.Lock()
+	defer g.consumeLock.Unlock()
 	g.logger.Info("Checking access token", slog.String("key", key))
 	grant := g.get(key)
 	if grant == nil {
 		return nil, httpError("No such claim", http.StatusNotFound)
+	}
+	ctx, cancel := g.newEffectContext()
+	defer cancel()
+	grant, err := g.liveGrant(ctx, grant)
+	if err != nil {
+		return nil, httpError("Claim is no longer authorized", http.StatusServiceUnavailable)
 	}
 
 	expiration, err := time.Parse(time.RFC3339, grant.Status.ExpirationTime)
@@ -361,6 +369,13 @@ func (g *Grants) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Grant server lost authority", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, cancel := g.newEffectContext()
+	defer cancel()
+	grant, err = g.liveGrant(ctx, grant)
+	if err != nil {
+		http.Error(w, "Grant is no longer authorized", http.StatusServiceUnavailable)
+		return
+	}
 
 	name := r.Header.Get("name")
 	if name == "" {
@@ -382,6 +397,23 @@ func (g *Grants) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.logger.Info("Redemption of access token succeeded", slog.String("namespace", grant.Namespace), slog.String("name", grant.Name))
+}
+
+func (g *Grants) liveGrant(ctx context.Context, grant *skupperv2alpha1.AccessGrant) (*skupperv2alpha1.AccessGrant, error) {
+	if err := g.authorizeEffect(); err != nil {
+		return nil, err
+	}
+	if g.filter != nil && !g.filter(grant.Namespace) {
+		return nil, fmt.Errorf("namespace %q is no longer controlled", grant.Namespace)
+	}
+	live, err := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.Namespace).Get(ctx, grant.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if live.UID != grant.UID {
+		return nil, fmt.Errorf("AccessGrant ownership changed")
+	}
+	return live.DeepCopy(), nil
 }
 
 func (g *Grants) authorizeEffect() error {

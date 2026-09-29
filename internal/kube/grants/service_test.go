@@ -81,7 +81,7 @@ func TestServicePersistsMarkerBeforeRedemptionRequest(t *testing.T) {
 	var markerSeen atomic.Bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		live, err := clients.GetSkupperClient().SkupperV2alpha1().AccessTokens("test").Get(context.Background(), "token", metav1.GetOptions{})
-		if err == nil && live.Annotations[redemptionAttemptAnnotation] == string(live.UID) {
+		if err == nil && live.Annotations[redemptionAttemptAnnotation] == string(live.UID) && live.Annotations[redemptionSiteAnnotation] == "site-uid" {
 			markerSeen.Store(true)
 		}
 		_, _ = w.Write([]byte("invalid response"))
@@ -113,6 +113,91 @@ func TestServicePersistsMarkerBeforeRedemptionRequest(t *testing.T) {
 	assert.Assert(t, markerSeen.Load())
 	_, err = clients.GetKubeClient().CoreV1().Secrets("test").Get(context.Background(), redemptionResponseName(token), metav1.GetOptions{})
 	assert.NilError(t, err)
+}
+
+func TestServiceRejectsStagedResponseAfterSiteReplacement(t *testing.T) {
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	token.UID = types.UID("token-uid")
+	token.Annotations = map[string]string{
+		redemptionAttemptAnnotation: string(token.UID),
+		redemptionSiteAnnotation:    "old-site-uid",
+	}
+	oldSite := tf.site("site", "test")
+	oldSite.UID = types.UID("old-site-uid")
+	clients, err := fake.NewFakeClient("test", nil, []runtime.Object{token, oldSite}, "")
+	assert.NilError(t, err)
+	assert.NilError(t, saveRedemptionResponse(context.Background(), token, oldSite.UID, []byte("response"), clients))
+	assert.NilError(t, clients.GetSkupperClient().SkupperV2alpha1().Sites("test").Delete(context.Background(), oldSite.Name, metav1.DeleteOptions{}))
+	replacement := oldSite.DeepCopy()
+	replacement.ResourceVersion = ""
+	replacement.UID = types.UID("new-site-uid")
+	_, err = clients.GetSkupperClient().SkupperV2alpha1().Sites("test").Create(context.Background(), replacement, metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	service, err := NewService(ServiceOptions{
+		Clients: clients,
+		Config:  &GrantConfig{Enabled: true},
+		LookupSite: func(ctx context.Context, namespace string) (*skupperv2alpha1.Site, error) {
+			return clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Get(ctx, replacement.Name, metav1.GetOptions{})
+		},
+	})
+	assert.NilError(t, err)
+	activateService(service, &testEffectGate{done: make(chan struct{})})
+	assert.ErrorContains(t, service.checkAccessToken("test/token", token), "Site ownership changed")
+}
+
+func TestServiceChecksAuthorityBeforeAttemptMarker(t *testing.T) {
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	token.UID = types.UID("token-uid")
+	site := tf.site("site", "test")
+	site.UID = types.UID("site-uid")
+	clients, err := fake.NewFakeClient("test", nil, []runtime.Object{token, site}, "")
+	assert.NilError(t, err)
+	gate := &testEffectGate{done: make(chan struct{})}
+	service, err := NewService(ServiceOptions{
+		Clients: clients,
+		Config:  &GrantConfig{Enabled: true},
+		LookupSite: func(context.Context, string) (*skupperv2alpha1.Site, error) {
+			close(gate.done)
+			return site, nil
+		},
+	})
+	assert.NilError(t, err)
+	activateService(service, gate)
+	assert.ErrorIs(t, service.checkAccessToken("test/token", token), ErrNotLeader)
+	live, err := clients.GetSkupperClient().SkupperV2alpha1().AccessTokens("test").Get(context.Background(), token.Name, metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, live.Annotations[redemptionAttemptAnnotation], "")
+}
+
+func TestServiceRecoveryErrorDoesNotStopServing(t *testing.T) {
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	token.UID = types.UID("token-uid")
+	clients, err := fake.NewFakeClient("test", nil, []runtime.Object{token}, "")
+	assert.NilError(t, err)
+	service, err := NewService(ServiceOptions{Clients: clients, WatchNamespace: "test", Config: &GrantConfig{Enabled: true}, Generator: dummyGenerator})
+	assert.NilError(t, err)
+	cacheCtx, stopCaches := context.WithCancel(context.Background())
+	defer stopCaches()
+	assert.NilError(t, service.StartCaches(cacheCtx))
+	syncCtx, cancelSync := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSync()
+	assert.Assert(t, service.WaitForCacheSync(syncCtx))
+
+	gate := &testEffectGate{done: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() { result <- service.RunLeader(context.Background(), gate) }()
+	select {
+	case err := <-result:
+		t.Fatalf("one invalid token stopped leader serving: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate.done)
+	select {
+	case <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader service did not stop")
+	}
 }
 
 func TestServiceRejectsEffectsAfterLeadershipLoss(t *testing.T) {
