@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -51,11 +52,18 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 	observations := newObservationCache(func(names ...string) { namespaces.InvalidateNamespaces(names...) })
 	bootstrap := reconcile.DefaultRouterControlBootstrap(config.Namespace)
 	var err error
+	var gatewayOwner *metav1.OwnerReference
+	if config.SecuredAccessConfig != nil && slices.Contains(config.SecuredAccessConfig.EnabledAccessTypes, "gateway") {
+		gatewayOwner, err = controllerOwner(ctx, clients, config)
+		if err != nil {
+			return fmt.Errorf("resolve Gateway owner: %w", err)
+		}
+	}
 	namespaces, err = controller.NewNamespaceController(clients, controller.NamespaceControllerOptions{
 		WatchNamespace: config.WatchNamespace, ControllerID: config.Namespace + "/" + config.Name,
 		RequireExplicitControl: config.WatchNamespace != "" || config.RequireExplicitControl,
 		Workers:                config.Workers, DisableSecurityContext: config.DisableSecurityContext, Bootstrap: bootstrap,
-		SecuredAccess: config.SecuredAccessConfig,
+		SecuredAccess: config.SecuredAccessConfig, GatewayOwner: gatewayOwner,
 	}, publisher, observations)
 	if err != nil {
 		return err
@@ -160,6 +168,25 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 		})
 	})
 	return group.Wait()
+}
+
+// A shared Gateway belongs to the stable StatefulSet, never to a particular
+// leader Pod. This lookup is read-only and runs only when Gateway is enabled.
+func controllerOwner(ctx context.Context, clients internalclient.Clients, config *controller.Config) (*metav1.OwnerReference, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	pod, err := clients.GetKubeClient().CoreV1().Pods(config.Namespace).Get(ctx, config.PodName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if string(pod.UID) != config.PodUID || pod.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("controller Pod identity changed or is deleting")
+	}
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil || owner.APIVersion != "apps/v1" || owner.Kind != "StatefulSet" || owner.Name == "" || owner.UID == "" {
+		return nil, fmt.Errorf("controller Pod must be owned by an apps/v1 StatefulSet")
+	}
+	return owner, nil
 }
 
 func serveLeader(ctx context.Context, clients internalclient.Clients, config *controller.Config, namespaces *controller.NamespaceController, observations *observationCache, publisher *protocol.Publisher, prepared leaderResources, fence *leadership.Fence) error {

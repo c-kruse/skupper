@@ -135,5 +135,20 @@ func TestKindGrants(t *testing.T) {
 	if err != nil || grant.Status.Redemptions != 1 {
 		t.Fatalf("grant redemption limit was not preserved: %v", err)
 	}
-	t.Log("standalone grant TLS/autoconfiguration served HTTPS; one redemption durably staged credentials and two HA Links with cost 7; spent grant produced terminal Unknown without a second redemption")
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
+		current, err := links.List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+		ready := 0
+		for _, link := range current.Items {
+			if strings.HasPrefix(link.Name, name+"-") && link.IsReady() {
+				ready++
+			}
+		}
+		return ready == 2, nil
+	}); err != nil {
+		t.Fatalf("generated dual-role HA Links did not both connect from the edge Site: %v", err)
+	}
+	t.Log("standalone grant TLS/autoconfiguration served HTTPS; one redemption durably staged credentials and two operational HA Links with cost 7; spent grant produced terminal Unknown without a second redemption")
 }
