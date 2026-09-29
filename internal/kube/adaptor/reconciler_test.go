@@ -10,10 +10,12 @@ import (
 )
 
 type fakeLocalRouter struct {
-	current *qdr.RouterConfig
-	apply   func(*qdr.RouterConfig)
-	reads   int
-	readErr error
+	current         *qdr.RouterConfig
+	runningSettings *qdr.RouterConfig
+	apply           func(*qdr.RouterConfig)
+	applies         int
+	reads           int
+	readErr         error
 }
 
 func (f *fakeLocalRouter) Read() (*qdr.RouterConfig, error) {
@@ -25,6 +27,7 @@ func (f *fakeLocalRouter) Read() (*qdr.RouterConfig, error) {
 	return &c, nil
 }
 func (f *fakeLocalRouter) Apply(config *qdr.RouterConfig) error {
+	f.applies++
 	if f.apply != nil {
 		f.apply(config)
 	} else {
@@ -32,6 +35,18 @@ func (f *fakeLocalRouter) Apply(config *qdr.RouterConfig) error {
 		f.current = &c
 	}
 	return nil
+}
+
+func (f *fakeLocalRouter) ReadRunningSettings() (*qdr.RouterConfig, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	settings := f.runningSettings
+	if settings == nil {
+		settings = f.current
+	}
+	c := cloneRouterConfig(settings)
+	return &c, nil
 }
 
 func basicConfig() *qdr.RouterConfig {

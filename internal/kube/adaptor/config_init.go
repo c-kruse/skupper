@@ -18,6 +18,33 @@ type TrafficCredentialResolver interface {
 	Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error)
 }
 
+type RestartConfigStore interface {
+	Persist(qdr.RouterConfig) error
+}
+
+type FileRestartConfigStore struct {
+	Directory string
+}
+
+// Persist atomically replaces the complete router startup configuration. A
+// semantic comparison avoids rewriting an unchanged file despite map ordering
+// in the JSON representation.
+func (s FileRestartConfigStore) Persist(config qdr.RouterConfig) error {
+	value, err := qdr.MarshalRouterConfig(config)
+	if err != nil {
+		return err
+	}
+	name := filepath.Join(s.Directory, "skrouterd.json")
+	current, err := os.ReadFile(name)
+	if err == nil && qdr.RouterConfigEquals(string(current), value) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return atomicWrite(name, []byte(value), 0600)
+}
+
 // InitialiseFromIntent is the config-init path. It fetches a complete intent,
 // materializes traffic credentials, and atomically writes the normal router
 // startup file. It cannot and does not report Applied before router startup.
@@ -45,11 +72,7 @@ func InitialiseFromIntent(ctx context.Context, source InitialIntentSource, crede
 	if err != nil {
 		return err
 	}
-	value, err := qdr.MarshalRouterConfig(compiled.Config)
-	if err != nil {
-		return err
-	}
-	return atomicWrite(filepath.Join(path, "skrouterd.json"), []byte(value), 0600)
+	return (FileRestartConfigStore{Directory: path}).Persist(compiled.Config)
 }
 
 func atomicWrite(name string, data []byte, mode os.FileMode) error {

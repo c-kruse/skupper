@@ -98,6 +98,30 @@ func (r *AMQPLocalRouter) Read() (*qdr.RouterConfig, error) {
 	return &qdr.RouterConfig{Listeners: listeners, Connectors: connectors, Bridges: *bridges, SslProfiles: profiles, ProxyProfiles: proxyProfiles, Addresses: map[string]qdr.Address{}, LogConfig: map[string]qdr.LogConfig{}}, nil
 }
 
+// ReadRunningSettings reads startup-only settings from the running router.
+// The restart file is intentionally not used as evidence: the adaptor and
+// router containers can restart independently.
+func (r *AMQPLocalRouter) ReadRunningSettings() (*qdr.RouterConfig, error) {
+	agent, err := r.Pool.Get()
+	if err != nil {
+		r.managementFailed()
+		return nil, err
+	}
+	defer r.Pool.Put(agent)
+	metadata, err := agent.GetLocalRouterMetadata()
+	if err != nil {
+		r.managementFailed()
+		return nil, err
+	}
+	logging, err := agent.GetLocalLogConfig()
+	if err != nil {
+		r.managementFailed()
+		return nil, err
+	}
+	r.managementSucceeded()
+	return &qdr.RouterConfig{Metadata: metadata, LogConfig: logging}, nil
+}
+
 func (r *AMQPLocalRouter) ReadConnections() ([]qdr.Connection, error) {
 	agent, err := r.Pool.Get()
 	if err != nil {

@@ -13,14 +13,18 @@ import (
 type Engine struct {
 	Router            LocalRouter
 	Credentials       TrafficCredentialResolver
+	RestartConfig     RestartConfigStore
 	RouterIncarnation string // fallback used only before local management is available
-	StartupConfig     *qdr.RouterConfig
 	Metrics           RuntimeMetrics
 }
 
 type routerRealizationEvidence interface {
 	CurrentRouterIncarnation() (string, bool)
 	MarkRouterVerified() string
+}
+
+type runningSettingsReader interface {
+	ReadRunningSettings() (*qdr.RouterConfig, error)
 }
 
 // Realize resolves current dependency revisions and reconciles the accepted
@@ -53,9 +57,25 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 		report.State = routercontrol.ApplicationFailed
 		return report, CompiledIntent{}
 	}
-	result := ReconcileWithMetrics(e.Router, compiled, e.Metrics)
-	restartReason := e.restartRequired(compiled.Config)
+	persisted := true
+	result := ApplyResult{}
+	if e.RestartConfig == nil {
+		persisted = false
+		result.Err = fmt.Errorf("persist router restart configuration: store unavailable")
+	} else {
+		if err := e.RestartConfig.Persist(compiled.Config); err != nil {
+			persisted = false
+			result.Err = fmt.Errorf("persist router restart configuration: %w", err)
+		}
+	}
+	if persisted {
+		result = ReconcileWithMetrics(e.Router, compiled, e.Metrics)
+	}
+	restartReason := ""
 	if result.Applied {
+		restartReason = e.restartRequired(compiled.Config)
+	}
+	if result.Applied && restartReason == "" {
 		if retiree, ok := e.Credentials.(interface {
 			Retire(map[string]struct{}) error
 		}); ok {
@@ -142,12 +162,33 @@ func resourcesUsingCredential(intent routercontrol.RouterIntent, binding routerc
 }
 
 func (e *Engine) restartRequired(desired qdr.RouterConfig) string {
-	if e.StartupConfig == nil {
-		return ""
+	reader, ok := e.Router.(runningSettingsReader)
+	if !ok {
+		return "router startup settings are unverified; router restart required"
 	}
-	startup := e.StartupConfig
-	if startup.Metadata.Mode != desired.Metadata.Mode || startup.Metadata.DataConnectionCount != desired.Metadata.DataConnectionCount || !reflect.DeepEqual(startup.LogConfig, desired.LogConfig) {
+	running, err := reader.ReadRunningSettings()
+	if err != nil || running == nil {
+		return "router startup settings are unverified; router restart required"
+	}
+	if normalizeDataConnectionCount(running.Metadata.DataConnectionCount) != normalizeDataConnectionCount(desired.Metadata.DataConnectionCount) ||
+		running.Metadata.Mode != desired.Metadata.Mode ||
+		!reflect.DeepEqual(normalizeLogConfig(running.LogConfig), normalizeLogConfig(desired.LogConfig)) {
 		return "router startup settings changed; router restart required"
 	}
 	return ""
+}
+
+func normalizeDataConnectionCount(value string) string {
+	if value == "" {
+		return "auto"
+	}
+	return value
+}
+
+func normalizeLogConfig(config map[string]qdr.LogConfig) map[string]qdr.LogConfig {
+	result := cloneMap(config)
+	if _, found := result["DEFAULT"]; !found {
+		result["DEFAULT"] = qdr.LogConfig{Module: "DEFAULT", Enable: "info+"}
+	}
+	return result
 }

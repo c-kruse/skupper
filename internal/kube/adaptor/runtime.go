@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,7 +45,7 @@ type controlRuntime struct {
 	enrollment  *kuberoutercontrol.EnrollmentClient
 	credentials *SecretCredentialProvider
 	router      *AMQPLocalRouter
-	startup     *qdr.RouterConfig
+	restart     RestartConfigStore
 	incarnation string
 	instance    string
 }
@@ -80,7 +79,7 @@ func newControlRuntime(config ControlConfig, secrets corev1client.SecretInterfac
 	if config.Metrics == nil {
 		config.Metrics = NoopRuntimeMetrics{}
 	}
-	return &controlRuntime{config: config, enrollment: enrollment, credentials: NewSecretCredentialProvider(secrets, config.ConfigDir), router: &AMQPLocalRouter{Pool: qdr.NewAgentPool("amqp://localhost:5672", nil)}, incarnation: "unverified-" + string(uuid.NewUUID()), instance: string(uuid.NewUUID())}, nil
+	return &controlRuntime{config: config, enrollment: enrollment, credentials: NewSecretCredentialProvider(secrets, config.ConfigDir), router: &AMQPLocalRouter{Pool: qdr.NewAgentPool("amqp://localhost:5672", nil)}, restart: FileRestartConfigStore{Directory: config.ConfigDir}, incarnation: "unverified-" + string(uuid.NewUUID()), instance: string(uuid.NewUUID())}, nil
 }
 
 func (r *controlRuntime) connect(ctx context.Context) (*routercontrol.ClientSession, *grpc.ClientConn, time.Time, string, error) {
@@ -383,15 +382,6 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 	if err != nil {
 		return err
 	}
-	startupData, err := os.ReadFile(filepath.Join(config.ConfigDir, "skrouterd.json"))
-	if err != nil {
-		return fmt.Errorf("read router startup config: %w", err)
-	}
-	startup, err := qdr.UnmarshalRouterConfig(string(startupData))
-	if err != nil {
-		return fmt.Errorf("parse router startup config: %w", err)
-	}
-	runtime.startup = &startup
 	backoff := time.Second
 	for ctx.Err() == nil {
 		_, _ = runtime.router.Read()
@@ -446,7 +436,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 	defer reconcile.Stop()
 	receiveInactivity := time.NewTimer(controlReceiveInactivityTimeout)
 	defer receiveInactivity.Stop()
-	engine := Engine{Router: r.router, Credentials: r.credentials, RouterIncarnation: sessionIncarnation, StartupConfig: r.startup, Metrics: r.config.Metrics}
+	engine := Engine{Router: r.router, Credentials: r.credentials, RestartConfig: r.restart, RouterIncarnation: sessionIncarnation, Metrics: r.config.Metrics}
 	var accepted *routercontrol.IntentUpdate
 	var acceptedAt time.Time
 	var appliedRecorded bool

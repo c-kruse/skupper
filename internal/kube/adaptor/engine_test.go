@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +20,12 @@ import (
 type rotatingResolver struct{ revision string }
 
 func (r *rotatingResolver) Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error) {
-	return CredentialRealization{RealizationID: r.revision, Profile: qdr.SslProfile{CaCertFile: "/ca"}}, nil
+	return CredentialRealization{RealizationID: r.revision, Profile: qdr.SslProfile{CaCertFile: "/" + r.revision + "/ca"}}, nil
 }
+
+type memoryRestartStore struct{}
+
+func (memoryRestartStore) Persist(qdr.RouterConfig) error { return nil }
 
 type failingResolver struct{ err error }
 
@@ -42,7 +48,7 @@ func TestEngineReportsCredentialRotationWithoutIntentChange(t *testing.T) {
 	}
 	resolver := &rotatingResolver{revision: "revision-1"}
 	router := &fakeLocalRouter{current: basicConfig()}
-	engine := Engine{Router: router, Credentials: resolver, RouterIncarnation: "router-1"}
+	engine := Engine{Router: router, Credentials: resolver, RestartConfig: memoryRestartStore{}, RouterIncarnation: "router-1"}
 	first := engine.Realize(context.Background(), "session", 1, intent, digest)
 	resolver.revision = "revision-2"
 	second := engine.Realize(context.Background(), "session", 1, intent, digest)
@@ -63,7 +69,7 @@ func TestEngineReportsMissingCredentialOnAffectedResourceWithoutSecretDetails(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: failingResolver{err: errors.New(`secret "sensitive-name" not found`)}, RouterIncarnation: "router-1"}
+	engine := Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: failingResolver{err: errors.New(`secret "sensitive-name" not found`)}, RestartConfig: memoryRestartStore{}, RouterIncarnation: "router-1"}
 	report := engine.Realize(context.Background(), "session", 1, intent, digest)
 	if report.State != routercontrol.ApplicationFailed || len(report.Resources) != 1 || report.Resources[0].ResourceID != "connector" || report.Resources[0].Reason != "required traffic credential is unavailable" {
 		t.Fatalf("missing credential was not reported on the affected resource: %#v", report)
@@ -80,9 +86,9 @@ func TestEngineReportsRestartRequiredSettingsAsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	startup := basicConfig()
-	startup.Metadata.DataConnectionCount = "3"
-	engine := Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: noCredentials{}, RouterIncarnation: "router-1", StartupConfig: startup}
+	running := basicConfig()
+	running.Metadata.DataConnectionCount = "3"
+	engine := Engine{Router: &fakeLocalRouter{current: basicConfig(), runningSettings: running}, Credentials: noCredentials{}, RestartConfig: memoryRestartStore{}, RouterIncarnation: "router-1"}
 	report := engine.Realize(context.Background(), "session", 1, intent, digest)
 	if report.State != routercontrol.ApplicationPending || len(report.Resources) == 0 || !strings.Contains(report.Resources[0].Reason, "restart required") {
 		t.Fatalf("startup-only change was not explicit pending: %#v", report)
@@ -124,7 +130,7 @@ func TestEngineDocumentOnlyFailuresPassApplicationTransport(t *testing.T) {
 					ID: "link", Host: "peer", Port: 55671, Role: "inter-router", TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}, ProxyCredentialBinding: "proxy",
 				}},
 			},
-			engine:    Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: &rotatingResolver{revision: "proxy-revision"}, RouterIncarnation: "router-1"},
+			engine:    Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: &rotatingResolver{revision: "proxy-revision"}, RestartConfig: memoryRestartStore{}, RouterIncarnation: "router-1"},
 			wantState: routercontrol.ApplicationFailed,
 		},
 		{
@@ -135,9 +141,9 @@ func TestEngineDocumentOnlyFailuresPassApplicationTransport(t *testing.T) {
 				Settings:      routercontrol.RouterSettings{Mode: routercontrol.RoutingModeInterior, DataConnectionCount: 7},
 			},
 			engine: func() Engine {
-				startup := basicConfig()
-				startup.Metadata.DataConnectionCount = "3"
-				return Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: noCredentials{}, RouterIncarnation: "router-1", StartupConfig: startup}
+				running := basicConfig()
+				running.Metadata.DataConnectionCount = "3"
+				return Engine{Router: &fakeLocalRouter{current: basicConfig(), runningSettings: running}, Credentials: noCredentials{}, RestartConfig: memoryRestartStore{}, RouterIncarnation: "router-1"}
 			}(),
 			wantState: routercontrol.ApplicationPending,
 		},
@@ -200,5 +206,110 @@ func TestEngineDocumentOnlyFailuresPassApplicationTransport(t *testing.T) {
 				t.Fatal("server did not receive application report")
 			}
 		})
+	}
+}
+
+type failingRestartStore struct{ err error }
+
+func (s failingRestartStore) Persist(qdr.RouterConfig) error { return s.err }
+
+type retiringResolver struct {
+	revision string
+	retired  []map[string]struct{}
+}
+
+func (r *retiringResolver) Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error) {
+	return CredentialRealization{RealizationID: r.revision, Profile: qdr.SslProfile{CaCertFile: "/" + r.revision + "/ca"}}, nil
+}
+
+func (r *retiringResolver) Retire(live map[string]struct{}) error {
+	copy := make(map[string]struct{}, len(live))
+	for id := range live {
+		copy[id] = struct{}{}
+	}
+	r.retired = append(r.retired, copy)
+	return nil
+}
+
+func TestEnginePersistsSameDigestCredentialRotationBeforeApplying(t *testing.T) {
+	intent := credentialIntent()
+	digest, err := DigestIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	resolver := &retiringResolver{revision: "revision-1"}
+	router := &fakeLocalRouter{current: basicConfig()}
+	engine := Engine{Router: router, Credentials: resolver, RestartConfig: FileRestartConfigStore{Directory: directory}, RouterIncarnation: "router-1"}
+	if report := engine.Realize(context.Background(), "session", 1, intent, digest); report.State != routercontrol.ApplicationApplied {
+		t.Fatalf("initial realization failed: %#v", report)
+	}
+	resolver.revision = "revision-2"
+	if report := engine.Realize(context.Background(), "session", 1, intent, digest); report.State != routercontrol.ApplicationApplied {
+		t.Fatalf("credential rotation failed: %#v", report)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "skrouterd.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "/revision-2/ca") || strings.Contains(string(data), "/revision-1/ca") {
+		t.Fatalf("restart config does not contain only the current credential revision: %s", data)
+	}
+	if len(resolver.retired) != 2 {
+		t.Fatalf("credential retirement calls = %d, want 2 successful complete realizations", len(resolver.retired))
+	}
+}
+
+func TestEnginePersistenceFailurePreservesLiveRouterAndCredentials(t *testing.T) {
+	intent := credentialIntent()
+	digest, _ := DigestIntent(intent)
+	resolver := &retiringResolver{revision: "new"}
+	router := &fakeLocalRouter{current: basicConfig()}
+	engine := Engine{Router: router, Credentials: resolver, RestartConfig: failingRestartStore{err: errors.New("disk full")}, RouterIncarnation: "router-1"}
+	report := engine.Realize(context.Background(), "session", 1, intent, digest)
+	if report.State != routercontrol.ApplicationPending || !strings.Contains(report.Resources[0].Reason, "persist router restart configuration") {
+		t.Fatalf("persistence failure was not reported pending: %#v", report)
+	}
+	if router.applies != 0 {
+		t.Fatalf("router was mutated %d times after persistence failure", router.applies)
+	}
+	if len(resolver.retired) != 0 {
+		t.Fatal("credential material was retired after persistence failure")
+	}
+}
+
+func TestEnginePartialRealizationDoesNotRetireCredentials(t *testing.T) {
+	intent := credentialIntent()
+	digest, _ := DigestIntent(intent)
+	resolver := &retiringResolver{revision: "new"}
+	router := &fakeLocalRouter{current: basicConfig(), apply: func(*qdr.RouterConfig) {}}
+	engine := Engine{Router: router, Credentials: resolver, RestartConfig: FileRestartConfigStore{Directory: t.TempDir()}, RouterIncarnation: "router-1"}
+	if report := engine.Realize(context.Background(), "session", 1, intent, digest); report.State != routercontrol.ApplicationPending {
+		t.Fatalf("partial realization was not pending: %#v", report)
+	}
+	if len(resolver.retired) != 0 {
+		t.Fatal("credential material was retired after incomplete live realization")
+	}
+}
+
+func TestEngineAdaptorRestartDoesNotUseUpdatedFileAsRunningEvidence(t *testing.T) {
+	intent := testIntent()
+	intent.Settings.DataConnectionCount = 7
+	digest, _ := DigestIntent(intent)
+	running := basicConfig()
+	running.Metadata.DataConnectionCount = "3"
+	router := &fakeLocalRouter{current: basicConfig(), runningSettings: running}
+	directory := t.TempDir()
+	engine := Engine{Router: router, Credentials: noCredentials{}, RestartConfig: FileRestartConfigStore{Directory: directory}, RouterIncarnation: "router-1"}
+	first := engine.Realize(context.Background(), "session", 1, intent, digest)
+	if first.State != routercontrol.ApplicationPending || !strings.Contains(first.Resources[0].Reason, "restart required") {
+		t.Fatalf("running old settings were not pending: %#v", first)
+	}
+	// A new adaptor process sees the newly persisted file, but the same router
+	// process still reports its old settings through management.
+	restartedAdaptor := Engine{Router: router, Credentials: noCredentials{}, RestartConfig: FileRestartConfigStore{Directory: directory}, RouterIncarnation: "router-1"}
+	second := restartedAdaptor.Realize(context.Background(), "session-2", 1, intent, digest)
+	if second.State != routercontrol.ApplicationPending || !strings.Contains(second.Resources[0].Reason, "restart required") {
+		t.Fatalf("disk state was mistaken for running settings: %#v", second)
 	}
 }

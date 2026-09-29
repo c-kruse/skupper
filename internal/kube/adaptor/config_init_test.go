@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 )
 
@@ -44,5 +45,55 @@ func TestInitialiseFromIntentRejectsCorruptDigest(t *testing.T) {
 	err := InitialiseFromIntent(context.Background(), staticIntentSource{testIntent(), "wrong"}, noCredentials{}, t.TempDir())
 	if err == nil {
 		t.Fatal("corrupt initial intent was written")
+	}
+}
+
+func TestFileRestartConfigStoreUpdatesAndRemovesRoutes(t *testing.T) {
+	directory := t.TempDir()
+	store := FileRestartConfigStore{Directory: directory}
+	withRoute := *basicConfig()
+	name := ownedNamePrefix + "route"
+	withRoute.Bridges.TcpConnectors[name] = qdr.TcpEndpoint{Name: name, Host: "backend", Port: "8080", Address: "orders"}
+	if err := store.Persist(withRoute); err != nil {
+		t.Fatal(err)
+	}
+	withoutRoute := *basicConfig()
+	if err := store.Persist(withoutRoute); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "skrouterd.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := qdr.UnmarshalRouterConfig(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Bridges.TcpConnectors) != 0 || string(parsed.Metadata.Mode) != string(qdr.ModeInterior) {
+		t.Fatalf("restart config did not reflect complete route removal: %#v", parsed)
+	}
+}
+
+func TestFileRestartConfigStoreDoesNotRewriteEquivalentConfig(t *testing.T) {
+	directory := t.TempDir()
+	store := FileRestartConfigStore{Directory: directory}
+	config := *basicConfig()
+	if err := store.Persist(config); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(directory, "skrouterd.json")
+	before, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Persist(config); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("equivalent restart config was atomically rewritten")
 	}
 }

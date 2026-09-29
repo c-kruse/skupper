@@ -1280,6 +1280,56 @@ func (a *Agent) GetLocalRouter() (*Router, error) {
 	}
 }
 
+func (a *Agent) GetLocalRouterMetadata() (RouterMetadata, error) {
+	records, err := a.Query("io.skupper.router.router", []string{})
+	if err != nil {
+		return RouterMetadata{}, err
+	}
+	if len(records) != 1 {
+		return RouterMetadata{}, fmt.Errorf("Unexpected number of router records: %d", len(records))
+	}
+	id, err := records[0].String("id")
+	if err != nil {
+		return RouterMetadata{}, err
+	}
+	mode, err := records[0].String("mode")
+	if err != nil {
+		return RouterMetadata{}, err
+	}
+	dataConnectionCount, err := records[0].String("dataConnectionCount")
+	if err != nil {
+		return RouterMetadata{}, err
+	}
+	if mode != string(ModeInterior) && mode != string(ModeEdge) {
+		return RouterMetadata{}, fmt.Errorf("unexpected running router mode %q", mode)
+	}
+	return RouterMetadata{Id: id, Mode: Mode(mode), DataConnectionCount: dataConnectionCount}, nil
+}
+
+func (a *Agent) GetLocalLogConfig() (map[string]LogConfig, error) {
+	records, err := a.Query("io.skupper.router.log", []string{})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]LogConfig, len(records))
+	for _, record := range records {
+		module, err := record.String("module")
+		if err != nil {
+			return nil, err
+		}
+		value, found := record["enable"]
+		if !found || value == nil {
+			continue
+		}
+		enable, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("management attribute %q has type %T, want string", "enable", value)
+		}
+		result[module] = LogConfig{Module: module, Enable: enable}
+	}
+	return result, nil
+}
+
 func (a *Agent) isEdgeRouter() bool {
 	return a.local.Edge
 }
