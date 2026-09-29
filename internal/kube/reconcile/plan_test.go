@@ -7,8 +7,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/skupperproject/skupper/internal/routercontrol"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -45,6 +48,58 @@ func (w *recordingStatusWriter) ApplyStatuses(context.Context, NamespaceIdentity
 type fixedPlanner struct{ plan Plan }
 
 func (p fixedPlanner) Plan(Snapshot, DesiredNamespace) Plan { return p.plan }
+
+type workloadOrderPublisher struct {
+	events    *[]string
+	published []routercontrol.RouterIntent
+	err       error
+}
+
+func (p *workloadOrderPublisher) Publish(intent routercontrol.RouterIntent) (routercontrol.Digest, error) {
+	*p.events = append(*p.events, "publish")
+	if p.err != nil {
+		return "", p.err
+	}
+	p.published = append(p.published, intent)
+	return "digest", nil
+}
+
+func (*workloadOrderPublisher) SetUnavailable(routercontrol.TargetIdentity) {}
+
+type workloadOrderEnsurer struct {
+	events              *[]string
+	publisher           *workloadOrderPublisher
+	prerequisiteError   error
+	caError             error
+	observedConnections uint32
+}
+
+func (e *workloadOrderEnsurer) EnsureRouterPrerequisites(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding) error {
+	*e.events = append(*e.events, "prerequisites")
+	return e.prerequisiteError
+}
+
+func (e *workloadOrderEnsurer) EnsureRouterControlCA(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, RouterControlBootstrap) error {
+	*e.events = append(*e.events, "trust")
+	return e.caError
+}
+
+func (e *workloadOrderEnsurer) EnsureSite(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string, RouterControlBootstrap) error {
+	*e.events = append(*e.events, "workload")
+	if len(e.publisher.published) > 0 {
+		e.observedConnections = e.publisher.published[len(e.publisher.published)-1].Settings.DataConnectionCount
+	}
+	return nil
+}
+
+func (*workloadOrderEnsurer) EnsureListenerService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service) error {
+	return nil
+}
+
+func (e *workloadOrderEnsurer) RetireListenerServices(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string) error {
+	*e.events = append(*e.events, "retire-listeners")
+	return nil
+}
 
 func TestStatusProjectionFollowsEffectsEvenOnFailure(t *testing.T) {
 	for _, effectError := range []error{nil, errors.New("foreign prerequisite"), SupersededError{Reason: "external edit"}} {
@@ -149,6 +204,92 @@ func TestRouterPrerequisitesPrecedeCAAndWorkload(t *testing.T) {
 	}
 }
 
+func TestCurrentIntentIsPublishedBeforeWorkloadUpdate(t *testing.T) {
+	events := []string{}
+	target := routercontrol.TargetIdentity{NamespaceUID: "namespace-uid", SiteUID: "site-uid", RouterGroup: "skupper-router"}
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+	oldIntent := routercontrol.RouterIntent{Target: target, Settings: routercontrol.RouterSettings{DataConnectionCount: 1}}
+	newIntent := routercontrol.RouterIntent{Target: target, Settings: routercontrol.RouterSettings{DataConnectionCount: 2}}
+	allocations := AllocationState{SiteUID: site.UID, Ports: map[string]int{}}
+	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site, Allocations: copyAllocations(allocations), Intents: map[RouterTarget]routercontrol.RouterIntent{target: newIntent}}
+	publisher := &workloadOrderPublisher{events: &events, published: []routercontrol.RouterIntent{oldIntent}}
+	ensurer := &workloadOrderEnsurer{events: &events, publisher: publisher}
+	publication := PublicationPlanner{Allocations: &recordingCommitter{}, Publisher: publisher, Validator: func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, map[string]types.UID) error {
+		events = append(events, "validate")
+		return nil
+	}}
+	plan := (WorkloadPlanner{Next: publication, Ensurer: ensurer}).Plan(Snapshot{Namespace: desired.Namespace, Allocations: allocations}, desired)
+	report := (Executor{}).Execute(context.Background(), plan)
+	if report.NeedsRetry() {
+		t.Fatalf("ordered rollout unexpectedly failed: %#v", report)
+	}
+	if want := []string{"prerequisites", "trust", "validate", "publish", "workload", "retire-listeners"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("workload did not follow current intent publication: got %v, want %v", events, want)
+	}
+	if ensurer.observedConnections != 2 {
+		t.Fatalf("replacement workload observed stale publisher state: data connections=%d", ensurer.observedConnections)
+	}
+}
+
+func TestWorkloadAndPublicationRespectPreparationFailures(t *testing.T) {
+	tests := []struct {
+		name              string
+		allocationError   error
+		prerequisiteError error
+		caError           error
+		validationError   error
+		publicationError  error
+		wantEvents        []string
+	}{
+		{name: "allocation", allocationError: errors.New("allocation conflict"), wantEvents: []string{}},
+		{name: "prerequisites", prerequisiteError: errors.New("foreign ServiceAccount"), wantEvents: []string{"prerequisites"}},
+		{name: "trust", caError: errors.New("CA write failed"), wantEvents: []string{"prerequisites", "trust"}},
+		{name: "validation", validationError: errors.New("Site superseded"), wantEvents: []string{"prerequisites", "trust", "validate"}},
+		{name: "publication", publicationError: errors.New("publisher rejected intent"), wantEvents: []string{"prerequisites", "trust", "validate", "publish"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := []string{}
+			target := routercontrol.TargetIdentity{NamespaceUID: "namespace-uid", SiteUID: "site-uid", RouterGroup: "skupper-router"}
+			site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+			allocations := AllocationState{SiteUID: site.UID, Ports: map[string]int{"listener": 1024}}
+			snapshotAllocations := copyAllocations(allocations)
+			if test.allocationError != nil {
+				snapshotAllocations = AllocationState{Ports: map[string]int{}}
+			}
+			desired := DesiredNamespace{
+				Namespace:   NamespaceIdentity{Name: "site", UID: "namespace-uid"},
+				SiteUID:     site.UID,
+				Site:        site,
+				Allocations: copyAllocations(allocations),
+				Intents:     map[RouterTarget]routercontrol.RouterIntent{target: {Target: target}},
+				Statuses:    StatusProjection{Sites: []*skupperv2alpha1.Site{site.DeepCopy()}},
+			}
+			publisher := &workloadOrderPublisher{events: &events, err: test.publicationError}
+			ensurer := &workloadOrderEnsurer{events: &events, publisher: publisher, prerequisiteError: test.prerequisiteError, caError: test.caError}
+			publication := PublicationPlanner{Allocations: &recordingCommitter{err: test.allocationError}, Publisher: publisher, Validator: func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, map[string]types.UID) error {
+				events = append(events, "validate")
+				return test.validationError
+			}}
+			writer := &recordingStatusWriter{}
+			plan := (StatusPlanner{Next: WorkloadPlanner{Next: publication, Ensurer: ensurer}, Writer: writer}).Plan(Snapshot{Namespace: desired.Namespace, Allocations: snapshotAllocations}, desired)
+			report := (Executor{}).Execute(context.Background(), plan)
+			if !report.NeedsRetry() {
+				t.Fatalf("failed preparation/publication was not retryable: %#v", report)
+			}
+			if !reflect.DeepEqual(events, test.wantEvents) {
+				t.Fatalf("effects crossed failed boundary: got %v, want %v", events, test.wantEvents)
+			}
+			if ensurer.observedConnections != 0 {
+				t.Fatalf("workload ran despite %s failure", test.name)
+			}
+			if writer.calls != 1 {
+				t.Fatalf("%s failure suppressed status projection", test.name)
+			}
+		})
+	}
+}
+
 func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
 	desired := DesiredNamespace{
@@ -165,8 +306,11 @@ func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
 	for _, operation := range plan.Operations {
 		dependencies[operation.ID] = operation.Dependencies
 	}
-	if !reflect.DeepEqual(dependencies["publish/skupper-router"], []OperationID{"ensure-site-workloads"}) {
+	if !reflect.DeepEqual(dependencies["publish/skupper-router"], []OperationID{"ensure-router-control-ca"}) {
 		t.Fatalf("publication is coupled to listener Service effects: %#v", dependencies["publish/skupper-router"])
+	}
+	if !reflect.DeepEqual(dependencies["ensure-site-workloads"], []OperationID{"publish/skupper-router"}) {
+		t.Fatalf("workload does not wait for intent publication: %#v", dependencies["ensure-site-workloads"])
 	}
 	if !reflect.DeepEqual(dependencies["ensure-listener-service/one"], []OperationID{"ensure-site-workloads"}) || !reflect.DeepEqual(dependencies["ensure-listener-service/two"], []OperationID{"ensure-site-workloads"}) {
 		t.Fatalf("listener Service operations are not independently planned: %#v", dependencies)

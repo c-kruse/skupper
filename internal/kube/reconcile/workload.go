@@ -46,6 +46,19 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 			break
 		}
 	}
+	// Config init accepts the current published intent when a new Pod connects.
+	// Publish only after preparation, but before a workload can create that Pod.
+	var publishIDs []OperationID
+	for i := range plan.Operations {
+		if plan.Operations[i].Kind == "PublishRouterIntent" {
+			plan.Operations[i].Dependencies = append(plan.Operations[i].Dependencies, caID)
+			publishIDs = append(publishIDs, plan.Operations[i].ID)
+		}
+	}
+	workloadDependencies := []OperationID{caID}
+	if len(publishIDs) > 0 {
+		workloadDependencies = publishIDs
+	}
 	var serviceAccount *corev1.ServiceAccount
 	if desired.ServiceAccount != nil {
 		serviceAccount = desired.ServiceAccount.DeepCopy()
@@ -64,7 +77,7 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 	plan.Operations = append(plan.Operations, Operation{ID: caID, Kind: "EnsureRouterControlCA", Dependencies: []OperationID{prerequisitesID}, Run: func(ctx context.Context) error {
 		return p.Ensurer.EnsureRouterControlCA(ctx, namespace, site, bootstrap)
 	}})
-	plan.Operations = append(plan.Operations, Operation{ID: ensureID, Kind: "EnsureSiteWorkloads", Dependencies: []OperationID{caID}, Run: func(ctx context.Context) error {
+	plan.Operations = append(plan.Operations, Operation{ID: ensureID, Kind: "EnsureSiteWorkloads", Dependencies: workloadDependencies, Run: func(ctx context.Context) error {
 		return p.Ensurer.EnsureSite(ctx, namespace, site, groups, bootstrap)
 	}})
 	serviceNames := make([]string, 0, len(desired.ListenerServices))
@@ -78,10 +91,5 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 	plan.Operations = append(plan.Operations, Operation{ID: "retire-listener-services", Kind: "RetireListenerServices", Dependencies: []OperationID{ensureID}, Run: func(ctx context.Context) error {
 		return p.Ensurer.RetireListenerServices(ctx, namespace, site, serviceNames)
 	}})
-	for i := range plan.Operations {
-		if plan.Operations[i].Kind == "PublishRouterIntent" {
-			plan.Operations[i].Dependencies = append(plan.Operations[i].Dependencies, ensureID)
-		}
-	}
 	return plan
 }
