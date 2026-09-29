@@ -113,6 +113,14 @@ type ServiceConnector struct {
 	TLS        TLSIntent      `json:"tls"`
 }
 
+const (
+	CredentialProviderKubernetesSecret = "kubernetes-secret"
+
+	CredentialUsageServerAuth = "server-auth"
+	CredentialUsageClientAuth = "client-auth"
+	CredentialUsageProxy      = "proxy"
+)
+
 // CredentialBinding contains only a provider reference and requirements. It
 // must never contain credential bytes, private keys, file paths, or local QDR
 // profile ordinals.

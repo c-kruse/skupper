@@ -63,6 +63,44 @@ func TestCanonicalIntentDeterministicAndPreservesPriority(t *testing.T) {
 	}
 }
 
+func TestCredentialBindingLiteralsAndRequiredUsages(t *testing.T) {
+	intent := testIntent()
+	intent.CredentialBindings = []CredentialBinding{{
+		ID:        "shared-secret",
+		Provider:  CredentialProviderKubernetesSecret,
+		Reference: "traffic-credentials",
+		Usages:    []string{CredentialUsageServerAuth, CredentialUsageProxy, CredentialUsageClientAuth},
+	}}
+	intent.RouterConnections[0].ProxyCredentialBinding = "shared-secret"
+	intent.RouterListeners = []RouterListener{{
+		ID: "router-listener", Host: "0.0.0.0", Port: 55671, Role: "inter-router",
+		TLS: TLSIntent{Mode: TLSModeServer, CredentialBinding: "shared-secret"},
+	}}
+	intent.ServiceConnectors[0].TLS = TLSIntent{Mode: TLSModeClient, CredentialBinding: "shared-secret"}
+
+	canonical, _, err := CanonicalIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(canonical), `"usages":["client-auth","proxy","server-auth"]`) {
+		t.Fatalf("merged credential usages were not canonicalized: %s", canonical)
+	}
+
+	wrongProvider := intent
+	wrongProvider.CredentialBindings = append([]CredentialBinding(nil), intent.CredentialBindings...)
+	wrongProvider.CredentialBindings[0].Provider = "kubernetes"
+	if _, _, err := CanonicalIntent(wrongProvider); err == nil {
+		t.Fatal("accepted obsolete kubernetes credential provider")
+	}
+
+	missingUsage := intent
+	missingUsage.CredentialBindings = append([]CredentialBinding(nil), intent.CredentialBindings...)
+	missingUsage.CredentialBindings[0].Usages = []string{CredentialUsageServerAuth, CredentialUsageProxy}
+	if _, _, err := CanonicalIntent(missingUsage); err == nil {
+		t.Fatal("accepted connector binding without client-auth usage")
+	}
+}
+
 func TestDecodeIntentRejectsAmbiguousAndCorruptContent(t *testing.T) {
 	intent := testIntent()
 	canonical, digest, err := CanonicalIntent(intent)

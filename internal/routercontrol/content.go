@@ -180,7 +180,7 @@ func ValidateIntent(intent RouterIntent) error {
 		return err
 	}
 	ids := map[ResourceID]string{}
-	bindings := map[ResourceID]struct{}{}
+	bindings := map[ResourceID]CredentialBinding{}
 	add := func(kind string, id ResourceID) error {
 		if id == "" {
 			return fmt.Errorf("%s has empty ID", kind)
@@ -195,11 +195,18 @@ func ValidateIntent(intent RouterIntent) error {
 		if err := add(ResourceCredentialBinding, item.ID); err != nil {
 			return err
 		}
-		if item.Provider == "" || item.Reference == "" {
-			return fmt.Errorf("credential binding %q requires provider and reference", item.ID)
+		if item.Provider != CredentialProviderKubernetesSecret || item.Reference == "" {
+			return fmt.Errorf("credential binding %q requires provider %q and a reference", item.ID, CredentialProviderKubernetesSecret)
 		}
 		if err := uniqueStrings("credential usage", item.Usages); err != nil {
 			return fmt.Errorf("credential binding %q: %w", item.ID, err)
+		}
+		for _, usage := range item.Usages {
+			switch usage {
+			case CredentialUsageServerAuth, CredentialUsageClientAuth, CredentialUsageProxy:
+			default:
+				return fmt.Errorf("credential binding %q has invalid usage %q", item.ID, usage)
+			}
 		}
 		seen := map[string]struct{}{}
 		for _, property := range item.Properties {
@@ -211,17 +218,29 @@ func ValidateIntent(intent RouterIntent) error {
 			}
 			seen[property.Name] = struct{}{}
 		}
-		bindings[item.ID] = struct{}{}
+		bindings[item.ID] = item
 	}
-	checkTLS := func(owner ResourceID, value TLSIntent) error {
+	requireUsage := func(owner, bindingID ResourceID, usage string) error {
+		binding, found := bindings[bindingID]
+		if !found {
+			return fmt.Errorf("resource %q references unknown credential binding %q", owner, bindingID)
+		}
+		for _, actual := range binding.Usages {
+			if actual == usage {
+				return nil
+			}
+		}
+		return fmt.Errorf("resource %q credential binding %q lacks usage %q", owner, bindingID, usage)
+	}
+	checkTLS := func(owner ResourceID, value TLSIntent, usage string) error {
 		switch value.Mode {
 		case TLSModeDisabled:
 			if value.CredentialBinding != "" {
 				return fmt.Errorf("resource %q has credential with disabled TLS", owner)
 			}
 		case TLSModeServer, TLSModeClient, TLSModeMutual:
-			if _, found := bindings[value.CredentialBinding]; !found {
-				return fmt.Errorf("resource %q references unknown credential binding %q", owner, value.CredentialBinding)
+			if err := requireUsage(owner, value.CredentialBinding, usage); err != nil {
+				return err
 			}
 		default:
 			return fmt.Errorf("resource %q has invalid TLS mode %q", owner, value.Mode)
@@ -235,12 +254,12 @@ func ValidateIntent(intent RouterIntent) error {
 		if item.Host == "" || item.Port == 0 || item.Role == "" {
 			return fmt.Errorf("router connection %q requires host, port, and role", item.ID)
 		}
-		if err := checkTLS(item.ID, item.TLS); err != nil {
+		if err := checkTLS(item.ID, item.TLS, CredentialUsageClientAuth); err != nil {
 			return err
 		}
 		if item.ProxyCredentialBinding != "" {
-			if _, found := bindings[item.ProxyCredentialBinding]; !found {
-				return fmt.Errorf("router connection %q references unknown proxy credential binding %q", item.ID, item.ProxyCredentialBinding)
+			if err := requireUsage(item.ID, item.ProxyCredentialBinding, CredentialUsageProxy); err != nil {
+				return err
 			}
 		}
 	}
@@ -251,7 +270,7 @@ func ValidateIntent(intent RouterIntent) error {
 		if item.Host == "" || item.Port == 0 || item.Role == "" {
 			return fmt.Errorf("router listener %q requires host, port, and role", item.ID)
 		}
-		if err := checkTLS(item.ID, item.TLS); err != nil {
+		if err := checkTLS(item.ID, item.TLS, CredentialUsageServerAuth); err != nil {
 			return err
 		}
 	}
@@ -268,7 +287,7 @@ func ValidateIntent(intent RouterIntent) error {
 		if err := uniqueStrings("routing key", item.RoutingKeys); err != nil {
 			return fmt.Errorf("service listener %q: %w", item.ID, err)
 		}
-		if err := checkTLS(item.ID, item.TLS); err != nil {
+		if err := checkTLS(item.ID, item.TLS, CredentialUsageServerAuth); err != nil {
 			return err
 		}
 	}
@@ -295,7 +314,7 @@ func ValidateIntent(intent RouterIntent) error {
 			}
 			endpointIDs[endpoint.ID] = struct{}{}
 		}
-		if err := checkTLS(item.ID, item.TLS); err != nil {
+		if err := checkTLS(item.ID, item.TLS, CredentialUsageClientAuth); err != nil {
 			return err
 		}
 	}
