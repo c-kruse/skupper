@@ -138,9 +138,6 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			if strings.TrimSpace(key) == "" {
 				invalidStrategy = "MultiKeyListener routing keys must not be empty"
 			}
-			if strategy == routercontrol.RoutingStrategyWeighted && weights[key] == 0 {
-				invalidStrategy = fmt.Sprintf("MultiKeyListener routing key %q requires a positive weight", key)
-			}
 		}
 		if invalidStrategy != "" {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "InvalidStrategy", Message: invalidStrategy})

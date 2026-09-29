@@ -119,14 +119,24 @@ func TestCanonicalWeightedListenerPreservesWeightsAndNormalizesKeyOrder(t *testi
 	}
 }
 
-func TestWeightedListenerRequiresExactPositiveWeights(t *testing.T) {
-	for _, weights := range []map[string]uint{{"priority-a": 1}, {"priority-a": 1, "priority-b": 0}, {"priority-a": 1, "priority-b": 2, "extra": 3}} {
+func TestWeightedListenerRequiresExactWeights(t *testing.T) {
+	for _, weights := range []map[string]uint{{"priority-a": 1}, {"priority-a": 1, "priority-b": 2, "extra": 3}} {
 		intent := testIntent()
 		intent.ServiceListeners[0].RoutingStrategy = RoutingStrategyWeighted
 		intent.ServiceListeners[0].RoutingKeyWeights = weights
 		if _, _, err := CanonicalIntent(intent); err == nil {
 			t.Fatalf("accepted invalid weights %#v", weights)
 		}
+	}
+	intent := testIntent()
+	intent.ServiceListeners[0].RoutingStrategy = RoutingStrategyWeighted
+	intent.ServiceListeners[0].RoutingKeyWeights = map[string]uint{"priority-a": 0, "priority-b": 1}
+	canonical, _, err := CanonicalIntent(intent)
+	if err != nil {
+		t.Fatalf("zero weight accepted by the Kubernetes API was rejected: %v", err)
+	}
+	if !strings.Contains(string(canonical), `"routingKeyWeights":{"priority-a":0,"priority-b":1}`) {
+		t.Fatalf("zero weight was not preserved exactly: %s", canonical)
 	}
 }
 

@@ -355,17 +355,20 @@ func TestUnsupportedUDPIsIsolatedFromValidTCPIntent(t *testing.T) {
 	}
 }
 
-func TestInvalidWeightedListenerIsIsolatedFromValidRouting(t *testing.T) {
+func TestZeroWeightedListenerPreservesKubernetesCompatibility(t *testing.T) {
 	snapshot := baseSnapshot()
-	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "invalid", Namespace: "site", UID: "invalid-weight"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"bad": 0}}}}}}
-	snapshot.Listeners = []*skupperv2alpha1.Listener{listener("valid", "valid-listener", "valid")}
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "zero", Namespace: "site", UID: "zero-weight"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"foo": 0, "xfoo": 1}}}}}}
 	desired := (NamespaceDeriver{}).Derive(snapshot)
-	if len(desired.Diagnostics) != 1 || desired.Diagnostics[0].Resource != "invalid-weight" || desired.Diagnostics[0].Reason != "InvalidStrategy" {
-		t.Fatalf("invalid weight was not isolated: %#v", desired.Diagnostics)
+	if len(desired.Diagnostics) != 0 {
+		t.Fatalf("zero weight accepted by the Kubernetes API was diagnosed: %#v", desired.Diagnostics)
 	}
 	for _, intent := range desired.Intents {
-		if len(intent.ServiceListeners) != 1 || intent.ServiceListeners[0].ID != "valid-listener/listener" {
-			t.Fatalf("invalid weighted listener blocked valid routing: %#v", intent.ServiceListeners)
+		if len(intent.ServiceListeners) != 1 {
+			t.Fatalf("zero-weight listener was not derived: %#v", intent.ServiceListeners)
+		}
+		foo, found := intent.ServiceListeners[0].RoutingKeyWeights["foo"]
+		if !found || foo != 0 || intent.ServiceListeners[0].RoutingKeyWeights["xfoo"] != 1 {
+			t.Fatalf("zero weight was omitted or changed: %#v", intent.ServiceListeners)
 		}
 	}
 }

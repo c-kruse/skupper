@@ -73,7 +73,7 @@ func TestCompileIntentRejectsUnsupportedApplicationProtocols(t *testing.T) {
 func TestCompileIntentPreservesWeightedAndPriorityStrategies(t *testing.T) {
 	intent := testIntent()
 	intent.ServiceListeners = []routercontrol.ServiceListener{
-		{ID: "weighted", Host: "0.0.0.0", Port: 8080, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"foo", "xfoo"}, RoutingStrategy: routercontrol.RoutingStrategyWeighted, RoutingKeyWeights: map[string]uint{"foo": 1, "xfoo": 3}, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}},
+		{ID: "weighted", Host: "0.0.0.0", Port: 8080, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"foo", "xfoo"}, RoutingStrategy: routercontrol.RoutingStrategyWeighted, RoutingKeyWeights: map[string]uint{"foo": 0, "xfoo": 1}, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}},
 		{ID: "priority", Host: "0.0.0.0", Port: 8081, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"xfoo", "foo"}, RoutingStrategy: routercontrol.RoutingStrategyPriority, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}},
 	}
 	compiled, err := CompileIntent(intent, nil)
@@ -89,7 +89,8 @@ func TestCompileIntentPreservesWeightedAndPriorityStrategies(t *testing.T) {
 	for _, address := range compiled.Config.Bridges.ListenerAddresses {
 		values[address.Listener+"/"+address.Address] = address.Value
 	}
-	if values[weightedName+"/foo"] != 1 || values[weightedName+"/xfoo"] != 3 {
+	fooValue, fooFound := values[weightedName+"/foo"]
+	if !fooFound || fooValue != 0 || values[weightedName+"/xfoo"] != 1 {
 		t.Fatalf("weighted values were not compiled exactly: %#v", values)
 	}
 	if values[priorityName+"/xfoo"] != 1 || values[priorityName+"/foo"] != 0 {

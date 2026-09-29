@@ -334,12 +334,11 @@ func ValidateIntent(intent RouterIntent) error {
 			}
 		case RoutingStrategyWeighted:
 			if len(item.RoutingKeyWeights) != len(item.RoutingKeys) {
-				return fmt.Errorf("service listener %q requires one positive weight for every routing key", item.ID)
+				return fmt.Errorf("service listener %q requires one weight for every routing key", item.ID)
 			}
 			for _, key := range item.RoutingKeys {
-				weight, found := item.RoutingKeyWeights[key]
-				if !found || weight == 0 {
-					return fmt.Errorf("service listener %q routing key %q requires a positive weight", item.ID, key)
+				if _, found := item.RoutingKeyWeights[key]; !found {
+					return fmt.Errorf("service listener %q routing key %q requires a weight", item.ID, key)
 				}
 			}
 		default:
