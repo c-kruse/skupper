@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -71,7 +72,34 @@ func deriveStandaloneAccessStatuses(snapshot Snapshot, desired *DesiredNamespace
 					}
 				}
 			case "ingress", "ingress-nginx":
-				endpoints = ingressEndpoints(snapshot.Ingresses, updated)
+				endpoints = ingressEndpoints(snapshot.Ingresses, updated, snapshot.AccessConfig.IngressDomain)
+			case "contour-http-proxy":
+				configured = pendingState("HTTPProxy has not been realized")
+				for _, port := range updated.Spec.Ports {
+					for _, proxy := range snapshot.HTTPProxies {
+						if proxy.GetName() != updated.Name+"-"+port.Name || proxy.GetAnnotations()[controlledAnnotation] != "true" || !ownedBy(proxy.GetOwnerReferences(), updated.UID) {
+							continue
+						}
+						host, _, _ := unstructured.NestedString(proxy.Object, "spec", "virtualhost", "fqdn")
+						if host != "" {
+							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
+						}
+					}
+				}
+			case "gateway":
+				configured = pendingState("TLSRoute has not been realized")
+				domain := gatewayDomain(snapshot)
+				if domain == "" {
+					resolved = unknownState("Gateway domain has not been resolved")
+					break
+				}
+				for _, port := range updated.Spec.Ports {
+					for _, route := range snapshot.TLSRoutes {
+						if route.GetName() == updated.Name+"-"+port.Name && route.GetAnnotations()[controlledAnnotation] == "true" && ownedBy(route.GetOwnerReferences(), updated.UID) {
+							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: route.GetName() + "." + updated.Namespace + "." + domain, Port: strconv.Itoa(snapshot.AccessConfig.GatewayPort)})
+						}
+					}
+				}
 			case "nodeport":
 				if snapshot.ClusterHost == "" {
 					resolved = unknownState("Cluster host is not configured for nodeport access")
@@ -86,6 +114,7 @@ func deriveStandaloneAccessStatuses(snapshot Snapshot, desired *DesiredNamespace
 				resolved = unknownState("Endpoint observation for this access type is unavailable")
 			}
 			if len(endpoints) > 0 {
+				configured = skupperv2alpha1.ReadyCondition()
 				resolved = skupperv2alpha1.ReadyCondition()
 			}
 		}

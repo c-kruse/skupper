@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/skupperproject/skupper/internal/routercontrol"
@@ -81,6 +83,9 @@ type Snapshot struct {
 	Services          []*corev1.Service
 	Routes            []*routev1.Route
 	Ingresses         []*networkingv1.Ingress
+	HTTPProxies       []*unstructured.Unstructured
+	TLSRoutes         []*unstructured.Unstructured
+	Gateway           *unstructured.Unstructured
 	Secrets           []*corev1.Secret
 	Observations      map[RouterTarget][]Observation
 	Allocations       AllocationState
@@ -92,15 +97,17 @@ type Snapshot struct {
 }
 
 type AccessConfig struct {
-	EnabledTypes     []string
-	DefaultType      string
-	ClusterHost      string
-	IngressDomain    string
-	IngressClassName string
-	HTTPProxyDomain  string
-	GatewayPort      int
-	GatewayClass     string
-	GatewayDomain    string
+	EnabledTypes        []string
+	DefaultType         string
+	ClusterHost         string
+	IngressDomain       string
+	IngressClassName    string
+	HTTPProxyDomain     string
+	GatewayPort         int
+	GatewayClass        string
+	GatewayDomain       string
+	ControllerNamespace string
+	GatewayOwner        *metav1.OwnerReference
 }
 
 // RouterControlBootstrap contains only public endpoint/trust and projected-token
@@ -137,24 +144,27 @@ type AllocationState struct {
 }
 
 type DesiredNamespace struct {
-	Namespace        NamespaceIdentity
-	SiteUID          types.UID
-	Intents          map[RouterTarget]routercontrol.RouterIntent
-	Allocations      AllocationState
-	Diagnostics      []Diagnostic
-	Bootstrap        RouterControlBootstrap
-	Site             *skupperv2alpha1.Site
-	ListenerServices []*corev1.Service
-	ServiceAccount   *corev1.ServiceAccount
-	Role             *rbacv1.Role
-	RoleBinding      *rbacv1.RoleBinding
-	GeneratedAccess  *skupperv2alpha1.RouterAccess
-	SecuredAccesses  []*skupperv2alpha1.SecuredAccess
-	Certificates     []*skupperv2alpha1.Certificate
-	AccessServices   []*corev1.Service
-	AccessRoutes     []*routev1.Route
-	AccessIngresses  []*networkingv1.Ingress
-	Statuses         StatusProjection
+	Namespace         NamespaceIdentity
+	SiteUID           types.UID
+	Intents           map[RouterTarget]routercontrol.RouterIntent
+	Allocations       AllocationState
+	Diagnostics       []Diagnostic
+	Bootstrap         RouterControlBootstrap
+	Site              *skupperv2alpha1.Site
+	ListenerServices  []*corev1.Service
+	ServiceAccount    *corev1.ServiceAccount
+	Role              *rbacv1.Role
+	RoleBinding       *rbacv1.RoleBinding
+	GeneratedAccess   *skupperv2alpha1.RouterAccess
+	SecuredAccesses   []*skupperv2alpha1.SecuredAccess
+	Certificates      []*skupperv2alpha1.Certificate
+	AccessServices    []*corev1.Service
+	AccessRoutes      []*routev1.Route
+	AccessIngresses   []*networkingv1.Ingress
+	AccessHTTPProxies []*unstructured.Unstructured
+	AccessTLSRoutes   []*unstructured.Unstructured
+	AccessGateway     *unstructured.Unstructured
+	Statuses          StatusProjection
 }
 
 type StatusProjection struct {

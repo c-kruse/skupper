@@ -141,8 +141,12 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range sortedLinks(snapshot.Links) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		ids := make([]routercontrol.ResourceID, 0, len(updated.Spec.Endpoints))
-		for _, endpoint := range updated.Spec.Endpoints {
+		role := "inter-router"
+		if desired.Site.Spec.Edge {
+			role = "edge"
+		}
+		ids := []routercontrol.ResourceID{}
+		if endpoint, found := updated.Spec.GetEndpointForRole(role); found && endpoint.Host != "" {
 			ids = append(ids, resourceID(updated.UID, "link/"+endpoint.Name))
 		}
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, combineStates(configuredState(desired.Diagnostics, updated.UID), resourcesApplied(evidence, ids)), updated.Generation, now)
@@ -210,7 +214,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 					}
 				}
 			case "ingress", "ingress-nginx":
-				endpoints = ingressEndpoints(snapshot.Ingresses, updated)
+				endpoints = ingressEndpoints(snapshot.Ingresses, updated, snapshot.AccessConfig.IngressDomain)
 			case "nodeport":
 				if snapshot.ClusterHost == "" {
 					resolved = unknownState("Cluster host is not configured for nodeport access")
@@ -341,14 +345,25 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	}
 }
 
-func ingressEndpoints(ingresses []*networkingv1.Ingress, access *skupperv2alpha1.SecuredAccess) []skupperv2alpha1.Endpoint {
+func ingressEndpoints(ingresses []*networkingv1.Ingress, access *skupperv2alpha1.SecuredAccess, configuredDomain string) []skupperv2alpha1.Endpoint {
 	for _, ingress := range ingresses {
 		if ingress.Name != access.Name || !ownedBy(ingress.OwnerReferences, access.UID) {
 			continue
 		}
+		domain := strings.TrimSpace(configuredDomain)
+		if domain == "" && len(ingress.Status.LoadBalancer.Ingress) > 0 {
+			address := ingress.Status.LoadBalancer.Ingress[0]
+			domain = address.Hostname
+			if domain == "" && address.IP != "" {
+				domain = address.IP + ".nip.io"
+			}
+		}
+		if domain == "" {
+			return nil
+		}
 		result := make([]skupperv2alpha1.Endpoint, 0, len(ingress.Spec.Rules))
 		for _, rule := range ingress.Spec.Rules {
-			if rule.Host == "" {
+			if rule.Host == "" || !strings.HasSuffix(rule.Host, "."+domain) {
 				continue
 			}
 			name := strings.SplitN(rule.Host, ".", 2)[0]

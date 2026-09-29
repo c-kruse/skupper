@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"time"
 
 	routev1 "github.com/openshift/api/route/v1"
@@ -12,7 +13,7 @@ import (
 )
 
 type AccessEnsurer interface {
-	EnsureAccessComposition(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Service, []*routev1.Route, []*networkingv1.Ingress, []*skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Secret, time.Time) error
+	EnsureAccessComposition(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Service, []*routev1.Route, []*networkingv1.Ingress, []*unstructured.Unstructured, []*unstructured.Unstructured, *unstructured.Unstructured, []*skupperv2alpha1.RouterAccess, []*skupperv2alpha1.SecuredAccess, []*skupperv2alpha1.Certificate, []*corev1.Secret, time.Time) error
 }
 
 type AccessPlanner struct {
@@ -39,6 +40,12 @@ func (p AccessPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	services := copyServices(desired.AccessServices)
 	routes := copyRoutes(desired.AccessRoutes)
 	ingresses := copyIngresses(desired.AccessIngresses)
+	httpProxies := copyUnstructured(desired.AccessHTTPProxies)
+	tlsRoutes := copyUnstructured(desired.AccessTLSRoutes)
+	var gateway *unstructured.Unstructured
+	if desired.AccessGateway != nil {
+		gateway = desired.AccessGateway.DeepCopy()
+	}
 	currentCertificates := copyCertificates(snapshot.Certificates)
 	currentRouterAccesses := copyRouterAccesses(snapshot.RouterAccesses)
 	currentSecuredAccesses := copySecuredAccesses(snapshot.SecuredAccesses)
@@ -46,9 +53,17 @@ func (p AccessPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	evaluationTime := snapshot.EvaluationTime
 	const operationID OperationID = "ensure-access-composition"
 	plan.Operations = append(plan.Operations, Operation{ID: operationID, Kind: "EnsureAccessComposition", Run: func(ctx context.Context) error {
-		return p.Ensurer.EnsureAccessComposition(ctx, namespace, site, generated, secured, certificates, services, routes, ingresses, currentRouterAccesses, currentSecuredAccesses, currentCertificates, secrets, evaluationTime)
+		return p.Ensurer.EnsureAccessComposition(ctx, namespace, site, generated, secured, certificates, services, routes, ingresses, httpProxies, tlsRoutes, gateway, currentRouterAccesses, currentSecuredAccesses, currentCertificates, secrets, evaluationTime)
 	}})
 	return plan
+}
+
+func copyUnstructured(values []*unstructured.Unstructured) []*unstructured.Unstructured {
+	result := make([]*unstructured.Unstructured, 0, len(values))
+	for _, value := range values {
+		result = append(result, value.DeepCopy())
+	}
+	return result
 }
 
 func copyIngresses(values []*networkingv1.Ingress) []*networkingv1.Ingress {

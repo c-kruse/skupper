@@ -37,6 +37,27 @@ func TestDeriveIsPermutationInvariantAndDoesNotMutateSnapshot(t *testing.T) {
 	}
 }
 
+func TestLinkSelectsOnlyEndpointForSiteRole(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edge bool
+		role string
+		host string
+	}{{name: "edge", edge: true, role: "edge", host: "edge.example"}, {name: "interior", role: "inter-router", host: "interior.example"}} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := baseSnapshot()
+			snapshot.Sites[0].Spec.Edge = test.edge
+			snapshot.Links = []*skupperv2alpha1.Link{{ObjectMeta: metav1.ObjectMeta{Name: "grant-link", Namespace: "site", UID: "link-uid"}, Spec: skupperv2alpha1.LinkSpec{Endpoints: []skupperv2alpha1.Endpoint{{Name: "edge", Host: "edge.example", Port: "45671"}, {Name: "inter-router", Host: "interior.example", Port: "55671"}}}}}
+			desired := (NamespaceDeriver{}).Derive(snapshot)
+			for _, intent := range desired.Intents {
+				if len(intent.RouterConnections) != 1 || intent.RouterConnections[0].Role != test.role || intent.RouterConnections[0].Host != test.host {
+					t.Fatalf("wrong role endpoint selected: %#v", intent.RouterConnections)
+				}
+			}
+		})
+	}
+}
+
 func TestAllocationIsStableWhenEarlierResourceIsInserted(t *testing.T) {
 	snapshot := baseSnapshot()
 	existing := listener("existing", "uid-z", "existing")

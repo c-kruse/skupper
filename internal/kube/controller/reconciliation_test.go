@@ -23,6 +23,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	skupperfake "github.com/skupperproject/skupper/pkg/generated/client/clientset/versioned/fake"
 )
 
 type testIntentPublisher struct {
@@ -333,6 +334,32 @@ func TestStaleSecuredAccessSnapshotPreventsServiceMutations(t *testing.T) {
 				t.Fatalf("%s occurred with stale parent: service=%#v err=%v", operation, actual, err)
 			}
 		})
+	}
+}
+
+func TestAssignmentRevokedBetweenOwnerCheckAndMutationPreventsWrite(t *testing.T) {
+	controller, clients, namespace, _ := listenerServiceTestController(t)
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid"}}
+	if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), parent, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	revoked := false
+	clients.GetSkupperClient().(*skupperfake.Clientset).PrependReactor("get", "securedaccesses", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if !revoked {
+			revoked = true
+			_, err := clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name).Create(context.Background(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "skupper", Namespace: namespace.Name}, Data: map[string]string{"controller": ""}}, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false, nil, nil
+	})
+	desired := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "blocked", Namespace: namespace.Name, OwnerReferences: []metav1.OwnerReference{accessOwner(parent)}}}
+	if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, []*corev1.Service{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err == nil {
+		t.Fatal("assignment revocation was not reported")
+	}
+	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), desired.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Service was written after assignment revocation: %v", err)
 	}
 }
 

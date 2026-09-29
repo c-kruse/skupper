@@ -18,9 +18,12 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
@@ -89,6 +92,10 @@ type NamespaceControllerOptions struct {
 	DefaultAccessType      string
 	ClusterHost            string
 	SecuredAccess          *securedaccess.Config
+	// GatewayOwner is the controller Deployment (or another stable controller
+	// object) that exclusively owns the shared skupper Gateway. Its UID is
+	// revalidated before writes, preventing takeover of a foreign Gateway.
+	GatewayOwner *metav1.OwnerReference
 }
 
 type namespaceInformers struct {
@@ -109,6 +116,9 @@ type namespaceInformers struct {
 	routes            cache.SharedIndexInformer
 	attached          cache.SharedIndexInformer
 	bindings          cache.SharedIndexInformer
+	httpProxies       cache.SharedIndexInformer
+	tlsRoutes         cache.SharedIndexInformer
+	gateway           cache.SharedIndexInformer
 }
 
 func NewNamespaceController(clients internalclient.Clients, options NamespaceControllerOptions, publisher routercontrol.IntentPublisher, observations ObservationSource) (*NamespaceController, error) {
@@ -126,6 +136,9 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 			return nil, fmt.Errorf("secured access config: %w", err)
 		}
 	}
+	if options.SecuredAccess != nil && accessTypeEnabled(options.SecuredAccess.EnabledAccessTypes, "gateway") && (options.GatewayOwner == nil || options.GatewayOwner.APIVersion == "" || options.GatewayOwner.UID == "" || options.GatewayOwner.Name == "" || options.GatewayOwner.Kind == "" || options.GatewayOwner.Controller == nil || !*options.GatewayOwner.Controller) {
+		return nil, fmt.Errorf("gateway access requires GatewayOwner with apiVersion, kind, name, and UID")
+	}
 	coreFactory := informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(options.WatchNamespace))
 	skupperFactory := skupperinformers.NewSharedInformerFactoryWithOptions(clients.GetSkupperClient(), 5*time.Minute, skupperinformers.WithNamespace(options.WatchNamespace))
 	crs := skupperFactory.Skupper().V2alpha1()
@@ -137,7 +150,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	}
 	accessConfig := reconcile.AccessConfig{}
 	if options.SecuredAccess != nil {
-		accessConfig = reconcile.AccessConfig{EnabledTypes: append([]string(nil), options.SecuredAccess.EnabledAccessTypes...), DefaultType: options.SecuredAccess.DefaultAccessType, ClusterHost: options.SecuredAccess.ClusterHost, IngressDomain: options.SecuredAccess.IngressDomain, IngressClassName: options.SecuredAccess.IngressClassName, HTTPProxyDomain: options.SecuredAccess.HttpProxyDomain, GatewayPort: options.SecuredAccess.GatewayPort, GatewayClass: options.SecuredAccess.GatewayClass, GatewayDomain: options.SecuredAccess.GatewayDomain}
+		accessConfig = reconcile.AccessConfig{EnabledTypes: append([]string(nil), options.SecuredAccess.EnabledAccessTypes...), DefaultType: options.SecuredAccess.DefaultAccessType, ClusterHost: options.SecuredAccess.ClusterHost, IngressDomain: options.SecuredAccess.IngressDomain, IngressClassName: options.SecuredAccess.IngressClassName, HTTPProxyDomain: options.SecuredAccess.HttpProxyDomain, GatewayPort: options.SecuredAccess.GatewayPort, GatewayClass: options.SecuredAccess.GatewayClass, GatewayDomain: options.SecuredAccess.GatewayDomain, ControllerNamespace: controllerNamespace, GatewayOwner: options.GatewayOwner}
 	}
 	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace, defaultAccessType: options.DefaultAccessType, clusterHost: options.ClusterHost, accessConfig: accessConfig}
 	if c.sizing == nil {
@@ -165,6 +178,13 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 			return routeClient.Routes(options.WatchNamespace).Watch(context.Background(), listOptions)
 		}}, &routev1.Route{}, 5*time.Minute, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	}
+	if accessTypeEnabled(accessConfig.EnabledTypes, "contour-http-proxy") {
+		c.informers.httpProxies = dynamicinformer.NewFilteredDynamicSharedInformerFactory(clients.GetDynamicClient(), 5*time.Minute, options.WatchNamespace, nil).ForResource(reconcile.HTTPProxyGVR).Informer()
+	}
+	if accessTypeEnabled(accessConfig.EnabledTypes, "gateway") {
+		c.informers.tlsRoutes = dynamicinformer.NewFilteredDynamicSharedInformerFactory(clients.GetDynamicClient(), 5*time.Minute, options.WatchNamespace, nil).ForResource(reconcile.TLSRouteGVR).Informer()
+		c.informers.gateway = dynamicinformer.NewFilteredDynamicSharedInformerFactory(clients.GetDynamicClient(), 5*time.Minute, controllerNamespace, nil).ForResource(reconcile.GatewayGVR).Informer()
+	}
 	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
 	accesses := reconcile.AccessPlanner{Next: planner, Ensurer: c}
 	workloads := reconcile.WorkloadPlanner{Next: accesses, Ensurer: c}
@@ -183,6 +203,11 @@ func (c *NamespaceController) StartCaches(ctx context.Context) {
 	c.skupperFactory.Start(ctx.Done())
 	if c.informers.routes != nil {
 		go c.informers.routes.Run(ctx.Done())
+	}
+	for _, informer := range []cache.SharedIndexInformer{c.informers.httpProxies, c.informers.tlsRoutes, c.informers.gateway} {
+		if informer != nil {
+			go informer.Run(ctx.Done())
+		}
 	}
 }
 
@@ -206,6 +231,11 @@ func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
 	}
 	if c.informers.routes != nil && !cache.WaitForCacheSync(ctx.Done(), c.informers.routes.HasSynced) {
 		return fmt.Errorf("Route informer did not synchronize")
+	}
+	for name, informer := range map[string]cache.SharedIndexInformer{"HTTPProxy": c.informers.httpProxies, "TLSRoute": c.informers.tlsRoutes, "Gateway": c.informers.gateway} {
+		if informer != nil && !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+			return fmt.Errorf("%s informer did not synchronize", name)
+		}
 	}
 	for _, handler := range c.configurationHandlers {
 		if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
@@ -308,6 +338,16 @@ func (c *NamespaceController) registerInvalidations() error {
 	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.services, c.informers.secrets, c.informers.ingresses, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
 	if c.informers.routes != nil {
 		local = append(local, c.informers.routes)
+	}
+	for _, informer := range []cache.SharedIndexInformer{c.informers.httpProxies, c.informers.tlsRoutes} {
+		if informer != nil {
+			local = append(local, informer)
+		}
+	}
+	if c.informers.gateway != nil {
+		if _, err := c.informers.gateway.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: func(interface{}) { c.invalidateAllSiteNamespaces() }, UpdateFunc: func(interface{}, interface{}) { c.invalidateAllSiteNamespaces() }, DeleteFunc: func(interface{}) { c.invalidateAllSiteNamespaces() }}); err != nil {
+			return err
+		}
 	}
 	for _, informer := range local {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.invalidateObject, UpdateFunc: func(old, current interface{}) { c.invalidateObject(old); c.invalidateObject(current) }, DeleteFunc: c.invalidateObject}); err != nil {
@@ -478,6 +518,11 @@ func (c *NamespaceController) enqueueAll() {
 	if c.informers.routes != nil {
 		informers = append(informers, c.informers.routes)
 	}
+	for _, informer := range []cache.SharedIndexInformer{c.informers.httpProxies, c.informers.tlsRoutes} {
+		if informer != nil {
+			informers = append(informers, informer)
+		}
+	}
 	for _, informer := range informers {
 		for _, value := range informer.GetStore().List() {
 			c.invalidateObject(value)
@@ -509,9 +554,24 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	if c.informers.routes != nil {
 		snapshot.Routes = listNamespace[*routev1.Route](c.informers.routes, namespace)
 	}
+	if c.informers.httpProxies != nil {
+		snapshot.HTTPProxies = listNamespace[*unstructured.Unstructured](c.informers.httpProxies, namespace)
+	}
+	if c.informers.tlsRoutes != nil {
+		snapshot.TLSRoutes = listNamespace[*unstructured.Unstructured](c.informers.tlsRoutes, namespace)
+	}
+	if c.informers.gateway != nil {
+		if value, exists, _ := c.informers.gateway.GetStore().GetByKey(c.controllerNamespace + "/skupper"); exists {
+			snapshot.Gateway = value.(*unstructured.Unstructured).DeepCopy()
+		}
+	}
 	snapshot.ClusterHost = c.clusterHost
 	snapshot.AccessConfig = c.accessConfig
 	snapshot.AccessConfig.EnabledTypes = append([]string(nil), c.accessConfig.EnabledTypes...)
+	if c.accessConfig.GatewayOwner != nil {
+		owner := *c.accessConfig.GatewayOwner
+		snapshot.AccessConfig.GatewayOwner = &owner
+	}
 	if snapshot.AccessConfig.ClusterHost != "" {
 		snapshot.ClusterHost = snapshot.AccessConfig.ClusterHost
 	}
@@ -939,7 +999,7 @@ func (c *NamespaceController) RetireListenerServices(ctx context.Context, namesp
 	return nil
 }
 
-func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, generated *skupperv2alpha1.RouterAccess, secured []*skupperv2alpha1.SecuredAccess, desiredCertificates []*skupperv2alpha1.Certificate, services []*corev1.Service, routes []*routev1.Route, ingresses []*networkingv1.Ingress, snapshotRouterAccesses []*skupperv2alpha1.RouterAccess, snapshotSecuredAccesses []*skupperv2alpha1.SecuredAccess, snapshotCertificates []*skupperv2alpha1.Certificate, _ []*corev1.Secret, evaluationTime time.Time) error {
+func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, generated *skupperv2alpha1.RouterAccess, secured []*skupperv2alpha1.SecuredAccess, desiredCertificates []*skupperv2alpha1.Certificate, services []*corev1.Service, routes []*routev1.Route, ingresses []*networkingv1.Ingress, httpProxies, tlsRoutes []*unstructured.Unstructured, gateway *unstructured.Unstructured, snapshotRouterAccesses []*skupperv2alpha1.RouterAccess, snapshotSecuredAccesses []*skupperv2alpha1.SecuredAccess, snapshotCertificates []*skupperv2alpha1.Certificate, _ []*corev1.Secret, evaluationTime time.Time) error {
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
 	}
@@ -960,6 +1020,21 @@ func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, names
 	}
 	if err := c.ensureAccessIngresses(ctx, namespace, site, ingresses, snapshotSecuredAccesses); err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure SecuredAccess Ingresses: %w", err))
+	}
+	if c.informers.httpProxies != nil {
+		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.HTTPProxyGVR, httpProxies, snapshotSecuredAccesses); err != nil {
+			effectErrors = append(effectErrors, fmt.Errorf("ensure HTTPProxies: %w", err))
+		}
+	}
+	if c.informers.tlsRoutes != nil {
+		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.TLSRouteGVR, tlsRoutes, snapshotSecuredAccesses); err != nil {
+			effectErrors = append(effectErrors, fmt.Errorf("ensure TLSRoutes: %w", err))
+		}
+	}
+	if gateway != nil {
+		if err := c.ensureGateway(ctx, namespace, site, gateway); err != nil {
+			effectErrors = append(effectErrors, fmt.Errorf("ensure Gateway: %w", err))
+		}
 	}
 	applied, err := c.ensureCertificates(ctx, namespace, site, desiredCertificates, snapshotSecuredAccesses)
 	if err != nil {
@@ -991,6 +1066,130 @@ func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, names
 		}
 	}
 	return errors.Join(effectErrors...)
+}
+
+func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, gvr schema.GroupVersionResource, desired []*unstructured.Unstructured, expected []*skupperv2alpha1.SecuredAccess) error {
+	api := c.clients.GetDynamicClient().Resource(gvr).Namespace(namespace.Name)
+	names := map[string]bool{}
+	var failures []error
+	for _, value := range desired {
+		names[value.GetName()] = true
+		if err := c.verifyAccessOwners(ctx, namespace, site, value.GetOwnerReferences(), nil, expected); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", value.GetName(), err))
+			continue
+		}
+		current, err := api.Get(ctx, value.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if e := c.verifyAccessOwners(ctx, namespace, site, value.GetOwnerReferences(), nil, expected); e != nil {
+				failures = append(failures, e)
+				continue
+			}
+			_, err = api.Create(ctx, value, metav1.CreateOptions{})
+		} else if err == nil {
+			owner := value.GetOwnerReferences()[0].UID
+			if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != value.GroupVersionKind() || !hasOwnerUID(current.GetOwnerReferences(), owner) {
+				failures = append(failures, fmt.Errorf("%s is foreign", value.GetName()))
+				continue
+			}
+			if reflect.DeepEqual(current.Object["spec"], value.Object["spec"]) {
+				continue
+			}
+			updated := current.DeepCopy()
+			updated.Object["spec"] = runtime.DeepCopyJSONValue(value.Object["spec"])
+			updated.SetLabels(value.GetLabels())
+			updated.SetAnnotations(value.GetAnnotations())
+			updated.SetOwnerReferences(value.GetOwnerReferences())
+			if e := c.verifyAccessOwners(ctx, namespace, site, value.GetOwnerReferences(), nil, expected); e != nil {
+				failures = append(failures, e)
+				continue
+			}
+			_, err = api.Update(ctx, updated, metav1.UpdateOptions{})
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", value.GetName(), classifyWriteError(err)))
+		}
+	}
+	current, err := api.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
+	if err != nil {
+		return errors.Join(append(failures, classifyWriteError(err))...)
+	}
+	for i := range current.Items {
+		value := &current.Items[i]
+		if names[value.GetName()] || value.GetAnnotations()["internal.skupper.io/controlled"] != "true" {
+			continue
+		}
+		owner := metav1.GetControllerOf(value)
+		if owner == nil || owner.Kind != "SecuredAccess" {
+			continue
+		}
+		parent := expectedSecuredAccess(expected, owner)
+		if parent == nil {
+			continue
+		}
+		if e := c.verifySecuredAccess(ctx, namespace, parent); e != nil {
+			failures = append(failures, e)
+			continue
+		}
+		uid := value.GetUID()
+		if e := api.Delete(ctx, value.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); e != nil && !apierrors.IsNotFound(e) {
+			failures = append(failures, classifyWriteError(e))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (c *NamespaceController) ensureGateway(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired *unstructured.Unstructured) error {
+	owner := metav1.GetControllerOf(desired)
+	if owner == nil {
+		return fmt.Errorf("owner is required")
+	}
+	verifyOwner := func() error {
+		if owner.Kind != "Deployment" {
+			return fmt.Errorf("Gateway owner kind %q is not supported", owner.Kind)
+		}
+		live, err := c.clients.GetKubeClient().AppsV1().Deployments(desired.GetNamespace()).Get(ctx, owner.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if live.UID != owner.UID || live.DeletionTimestamp != nil {
+			return reconcile.SupersededError{Reason: "Gateway owner changed or is deleting"}
+		}
+		return nil
+	}
+	if err := verifyOwner(); err != nil {
+		return err
+	}
+	api := c.clients.GetDynamicClient().Resource(reconcile.GatewayGVR).Namespace(desired.GetNamespace())
+	current, err := api.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := verifyOwner(); err != nil {
+			return err
+		}
+		_, err = api.Create(ctx, desired, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != desired.GroupVersionKind() || !hasOwnerUID(current.GetOwnerReferences(), owner.UID) {
+		return fmt.Errorf("Gateway is foreign and will not be claimed")
+	}
+	if reflect.DeepEqual(current.Object["spec"], desired.Object["spec"]) {
+		return nil
+	}
+	updated := current.DeepCopy()
+	updated.Object["spec"] = runtime.DeepCopyJSONValue(desired.Object["spec"])
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	if err := verifyOwner(); err != nil {
+		return err
+	}
+	_, err = api.Update(ctx, updated, metav1.UpdateOptions{})
+	return err
 }
 
 func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*networkingv1.Ingress, expected []*skupperv2alpha1.SecuredAccess) error {
@@ -1484,6 +1683,9 @@ func expectedSecuredAccess(values []*skupperv2alpha1.SecuredAccess, owner *metav
 }
 
 func (c *NamespaceController) verifyRouterAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, expected *skupperv2alpha1.RouterAccess) error {
+	if err := c.verifyControlledNamespace(ctx, namespace.Name, namespace.UID); err != nil {
+		return err
+	}
 	current, err := c.clients.GetSkupperClient().SkupperV2alpha1().RouterAccesses(namespace.Name).Get(ctx, expected.Name, metav1.GetOptions{})
 	if err != nil {
 		return classifyWriteError(err)
@@ -1495,6 +1697,9 @@ func (c *NamespaceController) verifyRouterAccess(ctx context.Context, namespace 
 }
 
 func (c *NamespaceController) verifySecuredAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, expected *skupperv2alpha1.SecuredAccess) error {
+	if err := c.verifyControlledNamespace(ctx, namespace.Name, namespace.UID); err != nil {
+		return err
+	}
 	current, err := c.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Get(ctx, expected.Name, metav1.GetOptions{})
 	if err != nil {
 		return classifyWriteError(err)

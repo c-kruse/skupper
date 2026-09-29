@@ -143,18 +143,25 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	connectors := deriveConnectors(snapshot, &desired)
 	connections := make([]routercontrol.RouterConnection, 0, len(snapshot.Links))
 	for _, link := range sortedLinks(snapshot.Links) {
-		for _, endpoint := range link.Spec.Endpoints {
-			port, err := strconv.ParseUint(endpoint.Port, 10, 16)
-			if err != nil {
-				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: link.UID, Reason: "InvalidPort", Message: err.Error()})
-				continue
-			}
-			connection := routercontrol.RouterConnection{ID: resourceID(link.UID, "link/"+endpoint.Name), Host: endpoint.Host, Port: uint16(port), Role: endpoint.Name, Cost: uint32(max(link.Spec.Cost, 0)), TLS: clientTLSIntent(link.Spec.TlsCredentials, true, false)}
-			if proxy := link.Spec.GetProxyConfiguration(); proxy != "" {
-				connection.ProxyCredentialBinding = routercontrol.ResourceID("proxy/" + proxy)
-			}
-			connections = append(connections, connection)
+		role := "inter-router"
+		if active.Spec.Edge {
+			role = "edge"
 		}
+		endpoint, found := link.Spec.GetEndpointForRole(role)
+		if !found || endpoint.Host == "" {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: link.UID, Reason: "MissingEndpoint", Message: fmt.Sprintf("Link has no valid %s endpoint", role)})
+			continue
+		}
+		port, err := strconv.ParseUint(endpoint.Port, 10, 16)
+		if err != nil || port == 0 {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: link.UID, Reason: "InvalidPort", Message: fmt.Sprintf("invalid %s endpoint port %q", role, endpoint.Port)})
+			continue
+		}
+		connection := routercontrol.RouterConnection{ID: resourceID(link.UID, "link/"+endpoint.Name), Host: endpoint.Host, Port: uint16(port), Role: endpoint.Name, Cost: uint32(max(link.Spec.Cost, 0)), TLS: clientTLSIntent(link.Spec.TlsCredentials, true, false)}
+		if proxy := link.Spec.GetProxyConfiguration(); proxy != "" {
+			connection.ProxyCredentialBinding = routercontrol.ResourceID("proxy/" + proxy)
+		}
+		connections = append(connections, connection)
 	}
 	access := make([]routercontrol.RouterListener, 0)
 	for _, routerAccess := range sortedRouterAccess(routerAccesses) {

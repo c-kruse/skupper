@@ -9,6 +9,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -74,13 +76,19 @@ func deriveAccessComposition(snapshot Snapshot, desired *DesiredNamespace, site 
 			allSecured[access.Name] = access
 		}
 	}
+	enabledSecured := map[string]*skupperv2alpha1.SecuredAccess{}
 	for _, name := range sortedKeys(allSecured) {
 		access := allSecured[name]
-		desired.AccessServices = append(desired.AccessServices, securedAccessService(access, snapshot.DefaultAccessType))
 		accessType := access.Spec.AccessType
 		if accessType == "" {
 			accessType = snapshot.DefaultAccessType
 		}
+		if len(snapshot.AccessConfig.EnabledTypes) > 0 && !stringInSlice(snapshot.AccessConfig.EnabledTypes, accessType) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: access.UID, Reason: "AccessTypeDisabled", Message: fmt.Sprintf("access type %q is not enabled", accessType)})
+			continue
+		}
+		enabledSecured[name] = access
+		desired.AccessServices = append(desired.AccessServices, securedAccessService(access, snapshot.DefaultAccessType))
 		if accessType == "route" {
 			for _, port := range access.Spec.Ports {
 				desired.AccessRoutes = append(desired.AccessRoutes, securedAccessRoute(access, port))
@@ -89,9 +97,122 @@ func deriveAccessComposition(snapshot Snapshot, desired *DesiredNamespace, site 
 		if accessType == "ingress" || accessType == "ingress-nginx" {
 			desired.AccessIngresses = append(desired.AccessIngresses, securedAccessIngress(snapshot, access, accessType == "ingress-nginx"))
 		}
+		if accessType == "contour-http-proxy" {
+			desired.AccessHTTPProxies = append(desired.AccessHTTPProxies, securedAccessHTTPProxies(snapshot, access)...)
+		}
+		if accessType == "gateway" {
+			domain := gatewayDomain(snapshot)
+			if domain != "" {
+				desired.AccessTLSRoutes = append(desired.AccessTLSRoutes, securedAccessTLSRoutes(snapshot, access, domain)...)
+			}
+		}
 	}
-	deriveCertificates(snapshot, desired, site, allSecured)
+	if accessTypeEnabled(snapshot.AccessConfig.EnabledTypes, "gateway") {
+		desired.AccessGateway = desiredGateway(snapshot)
+	}
+	deriveCertificates(snapshot, desired, site, enabledSecured)
 	return effective
+}
+
+func stringInSlice(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+var HTTPProxyGVR = schema.GroupVersionResource{Group: "projectcontour.io", Version: "v1", Resource: "httpproxies"}
+var TLSRouteGVR = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1alpha2", Resource: "tlsroutes"}
+var GatewayGVR = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways"}
+
+func accessTypeEnabled(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicAccessObject(gvk schema.GroupVersionKind, name, namespace string, owner metav1.OwnerReference, spec map[string]interface{}) *unstructured.Unstructured {
+	o := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": gvk.GroupVersion().String(), "kind": gvk.Kind, "metadata": map[string]interface{}{}, "spec": spec}}
+	o.SetName(name)
+	o.SetNamespace(namespace)
+	o.SetLabels(map[string]string{"internal.skupper.io/secured-access": "true"})
+	o.SetAnnotations(map[string]string{controlledAnnotation: "true"})
+	o.SetOwnerReferences([]metav1.OwnerReference{owner})
+	return o
+}
+
+func securedAccessOwner(a *skupperv2alpha1.SecuredAccess) metav1.OwnerReference {
+	c, b := true, true
+	return metav1.OwnerReference{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: a.Name, UID: a.UID, Controller: &c, BlockOwnerDeletion: &b}
+}
+
+func securedAccessHTTPProxies(snapshot Snapshot, a *skupperv2alpha1.SecuredAccess) []*unstructured.Unstructured {
+	domain := strings.TrimSpace(snapshot.AccessConfig.HTTPProxyDomain)
+	result := []*unstructured.Unstructured{}
+	for _, p := range a.Spec.Ports {
+		name := a.Name + "-" + p.Name
+		host := name + "." + a.Namespace
+		if domain != "" {
+			host += "." + domain
+		}
+		spec := map[string]interface{}{"virtualhost": map[string]interface{}{"fqdn": host, "tls": map[string]interface{}{"passthrough": true}}, "tcpproxy": map[string]interface{}{"services": []interface{}{map[string]interface{}{"name": a.Name, "port": int64(p.Port)}}}}
+		result = append(result, dynamicAccessObject(schema.GroupVersionKind{Group: HTTPProxyGVR.Group, Version: HTTPProxyGVR.Version, Kind: "HTTPProxy"}, name, a.Namespace, securedAccessOwner(a), spec))
+	}
+	return result
+}
+
+func gatewayDomain(snapshot Snapshot) string {
+	if d := strings.TrimSpace(snapshot.AccessConfig.GatewayDomain); d != "" {
+		return d
+	}
+	if snapshot.Gateway == nil {
+		return ""
+	}
+	owner := snapshot.AccessConfig.GatewayOwner
+	if owner == nil || snapshot.Gateway.GetAnnotations()[controlledAnnotation] != "true" || !ownedBy(snapshot.Gateway.GetOwnerReferences(), owner.UID) {
+		return ""
+	}
+	addresses, _, _ := unstructured.NestedSlice(snapshot.Gateway.Object, "status", "addresses")
+	for _, typ := range []string{"Hostname", "IPAddress"} {
+		for _, raw := range addresses {
+			if a, ok := raw.(map[string]interface{}); ok {
+				t, _, _ := unstructured.NestedString(a, "type")
+				v, _, _ := unstructured.NestedString(a, "value")
+				if t == typ && v != "" {
+					if typ == "IPAddress" {
+						return v + ".nip.io"
+					}
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func securedAccessTLSRoutes(snapshot Snapshot, a *skupperv2alpha1.SecuredAccess, domain string) []*unstructured.Unstructured {
+	result := []*unstructured.Unstructured{}
+	for _, p := range a.Spec.Ports {
+		name := a.Name + "-" + p.Name
+		host := name + "." + a.Namespace + "." + domain
+		spec := map[string]interface{}{"parentRefs": []interface{}{map[string]interface{}{"name": "skupper", "namespace": snapshot.AccessConfig.ControllerNamespace, "sectionName": "tls", "kind": "Gateway"}}, "hostnames": []interface{}{host}, "rules": []interface{}{map[string]interface{}{"backendRefs": []interface{}{map[string]interface{}{"name": a.Name, "namespace": a.Namespace, "port": int64(p.Port)}}}}}
+		result = append(result, dynamicAccessObject(schema.GroupVersionKind{Group: TLSRouteGVR.Group, Version: TLSRouteGVR.Version, Kind: "TLSRoute"}, name, a.Namespace, securedAccessOwner(a), spec))
+	}
+	return result
+}
+
+func desiredGateway(snapshot Snapshot) *unstructured.Unstructured {
+	owner := snapshot.AccessConfig.GatewayOwner
+	if owner == nil {
+		return nil
+	}
+	spec := map[string]interface{}{"gatewayClassName": snapshot.AccessConfig.GatewayClass, "listeners": []interface{}{map[string]interface{}{"name": "tls", "protocol": "TLS", "port": int64(snapshot.AccessConfig.GatewayPort), "tls": map[string]interface{}{"mode": "Passthrough"}, "allowedRoutes": map[string]interface{}{"namespaces": map[string]interface{}{"from": "All"}}}}}
+	return dynamicAccessObject(schema.GroupVersionKind{Group: GatewayGVR.Group, Version: GatewayGVR.Version, Kind: "Gateway"}, "skupper", snapshot.AccessConfig.ControllerNamespace, *owner, spec)
 }
 
 func securedAccessIngress(snapshot Snapshot, access *skupperv2alpha1.SecuredAccess, nginx bool) *networkingv1.Ingress {
@@ -206,7 +327,15 @@ func securedAccessService(access *skupperv2alpha1.SecuredAccess, defaultAccessTy
 	policy := corev1.ServiceInternalTrafficPolicyCluster
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: access.Name, Namespace: access.Namespace, Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{controlledAnnotation: "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: access.Name, UID: access.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Type: serviceType, SessionAffinity: corev1.ServiceAffinityNone, InternalTrafficPolicy: &policy, Selector: copyStrings(access.Spec.Selector)}}
 	for _, port := range access.Spec.Ports {
-		service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: port.Name, Port: int32(port.Port), TargetPort: intstr.FromInt(port.TargetPort), Protocol: corev1.Protocol(port.Protocol)})
+		protocol := corev1.Protocol(port.Protocol)
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		targetPort := port.TargetPort
+		if targetPort == 0 {
+			targetPort = port.Port
+		}
+		service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: port.Name, Port: int32(port.Port), TargetPort: intstr.FromInt(targetPort), Protocol: protocol})
 	}
 	return service
 }

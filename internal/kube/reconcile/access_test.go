@@ -7,6 +7,7 @@ import (
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -222,5 +223,44 @@ func TestIngressNginxUsesConfiguredDomainClassAndProjectsEndpoint(t *testing.T) 
 	desired = (NamespaceDeriver{}).Derive(snapshot)
 	if len(desired.Statuses.SecuredAccesses) != 1 || !cmp.Equal(desired.Statuses.SecuredAccesses[0].Status.Endpoints, []skupperv2alpha1.Endpoint{{Name: "edge", Host: "edge.site.apps.example", Port: "443"}}) {
 		t.Fatalf("Ingress endpoint was not projected: %#v", desired.Statuses.SecuredAccesses)
+	}
+}
+
+func TestSecuredAccessDefaultsServicePortAndWaitsForIngressDomain(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.DefaultAccessType = "ingress"
+	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443}}}}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	port := desired.AccessServices[0].Spec.Ports[0]
+	if port.Protocol != corev1.ProtocolTCP || port.TargetPort.IntValue() != 443 {
+		t.Fatalf("Service defaults were not normalized: %#v", port)
+	}
+	controller := true
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller}}}}}
+	snapshot.Ingresses = desired.AccessIngresses
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.SecuredAccesses) != 1 || len(desired.Statuses.SecuredAccesses[0].Status.Endpoints) != 0 {
+		t.Fatalf("Ingress endpoint resolved before a domain was configured or inferred: %#v", desired.Statuses.SecuredAccesses)
+	}
+}
+
+func TestDynamicAccessBackendsAndEnabledTypes(t *testing.T) {
+	snapshot := baseSnapshot()
+	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "contour-http-proxy", Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443}}}}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	snapshot.AccessConfig = AccessConfig{EnabledTypes: []string{"local"}, HTTPProxyDomain: "apps.example"}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.AccessServices) != 0 || len(desired.AccessHTTPProxies) != 0 || len(desired.Diagnostics) == 0 {
+		t.Fatalf("disabled explicit access type was realized: %#v", desired)
+	}
+	snapshot.AccessConfig.EnabledTypes = []string{"contour-http-proxy"}
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.AccessHTTPProxies) != 1 {
+		t.Fatalf("HTTPProxy was not derived: %#v", desired.AccessHTTPProxies)
+	}
+	host, _, _ := unstructured.NestedString(desired.AccessHTTPProxies[0].Object, "spec", "virtualhost", "fqdn")
+	if host != "external-tls.site.apps.example" || !ownedBy(desired.AccessHTTPProxies[0].GetOwnerReferences(), secured.UID) {
+		t.Fatalf("unexpected HTTPProxy: %#v", desired.AccessHTTPProxies[0])
 	}
 }
