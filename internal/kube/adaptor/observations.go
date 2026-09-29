@@ -12,6 +12,11 @@ import (
 func (r *AMQPLocalRouter) ObserveResources(sessionID, fallbackIncarnation string, sample uint64, compiled CompiledIntent, refreshID string) routercontrol.ObservationSnapshot {
 	observation := routercontrol.ObservationSnapshot{SessionID: sessionID, Scope: routercontrol.ObservationScopeResources, SampleSequence: sample, RefreshRequestID: refreshID, Knowledge: routercontrol.KnowledgeComplete, RouterIncarnation: fallbackIncarnation}
 	actual, err := r.Read()
+	var connections []qdr.Connection
+	var connectionErr error
+	if err == nil {
+		connections, connectionErr = r.ReadConnections()
+	}
 	incarnation, verified := r.CurrentRouterIncarnation()
 	if incarnation != "" {
 		observation.RouterIncarnation = incarnation
@@ -21,15 +26,42 @@ func (r *AMQPLocalRouter) ObserveResources(sessionID, fallbackIncarnation string
 		observation.Reason = err.Error()
 		return observation
 	}
+	if connectionErr != nil {
+		return buildResourceObservation(observation, actual, compiled, nil, connectionErr)
+	}
 	if !verified {
 		observation.Knowledge = routercontrol.KnowledgeUnknown
 		observation.Reason = ErrRouterRealizationUnverified.Error()
 		return observation
 	}
-	return buildResourceObservation(observation, actual, compiled)
+	return buildResourceObservation(observation, actual, compiled, connections, nil)
 }
 
-func buildResourceObservation(observation routercontrol.ObservationSnapshot, actual *qdr.RouterConfig, compiled CompiledIntent) routercontrol.ObservationSnapshot {
+type connectorEndpoint struct {
+	host string
+	role string
+}
+
+func buildResourceObservation(observation routercontrol.ObservationSnapshot, actual *qdr.RouterConfig, compiled CompiledIntent, connections []qdr.Connection, connectionErr error) routercontrol.ObservationSnapshot {
+	if connectionErr != nil {
+		observation.Knowledge = routercontrol.KnowledgeUnknown
+		observation.Reason = connectionErr.Error()
+		observation.Resources = nil
+		return observation
+	}
+	// The local connection entity has no connector name or identity. For
+	// outgoing connections, QDR reports the connector's exact host:port and
+	// role, so duplicate connector claims make the evidence ambiguous.
+	connectorClaims := map[connectorEndpoint]int{}
+	for _, connector := range actual.Connectors {
+		connectorClaims[connectorEndpoint{host: connector.Host + ":" + connector.Port, role: string(connector.Role)}]++
+	}
+	openedConnections := map[connectorEndpoint]bool{}
+	for _, connection := range connections {
+		if connection.Opened && strings.EqualFold(connection.Dir, "out") {
+			openedConnections[connectorEndpoint{host: connection.Host, role: connection.Role}] = true
+		}
+	}
 	ids := make([]string, 0, len(compiled.ResourceNames))
 	for id := range compiled.ResourceNames {
 		ids = append(ids, string(id))
@@ -39,15 +71,18 @@ func buildResourceObservation(observation routercontrol.ObservationSnapshot, act
 		resource := routercontrol.LocalResourceObservation{ResourceID: routercontrol.ResourceID(id), RealizationID: compiled.RealizationID, Operational: routercontrol.OperationalUnknown}
 		for _, name := range compiled.ResourceNames[routercontrol.ResourceID(id)] {
 			if connector, found := actual.Connectors[name]; found {
-				switch strings.ToUpper(connector.ConnectionStatus) {
-				case "SUCCESS":
-					resource.Operational = routercontrol.OperationalUp
-				case "CONNECTING", "FAILED", "INITIALIZING", "CLOSING":
-					resource.Operational = routercontrol.OperationalDown
-				default:
+				endpoint := connectorEndpoint{host: connector.Host + ":" + connector.Port, role: string(connector.Role)}
+				switch {
+				case connectorClaims[endpoint] != 1:
 					resource.Operational = routercontrol.OperationalUnknown
+					resource.Message = "local outbound connection ownership is ambiguous"
+				case openedConnections[endpoint]:
+					resource.Operational = routercontrol.OperationalUp
+					resource.Message = "local outbound AMQP connection is open"
+				default:
+					resource.Operational = routercontrol.OperationalDown
+					resource.Message = "no open local outbound AMQP connection"
 				}
-				resource.Message = connector.ConnectionMsg
 			}
 			if listener, found := actual.Bridges.TcpListeners[name]; found {
 				switch strings.ToLower(listener.OperStatus) {

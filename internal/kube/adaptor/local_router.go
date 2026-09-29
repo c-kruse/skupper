@@ -98,6 +98,22 @@ func (r *AMQPLocalRouter) Read() (*qdr.RouterConfig, error) {
 	return &qdr.RouterConfig{Listeners: listeners, Connectors: connectors, Bridges: *bridges, SslProfiles: profiles, ProxyProfiles: proxyProfiles, Addresses: map[string]qdr.Address{}, LogConfig: map[string]qdr.LogConfig{}}, nil
 }
 
+func (r *AMQPLocalRouter) ReadConnections() ([]qdr.Connection, error) {
+	agent, err := r.Pool.Get()
+	if err != nil {
+		r.managementFailed()
+		return nil, err
+	}
+	defer r.Pool.Put(agent)
+	connections, err := agent.GetConnections()
+	if err != nil {
+		r.managementFailed()
+		return nil, err
+	}
+	r.managementSucceeded()
+	return connections, nil
+}
+
 func (r *AMQPLocalRouter) Apply(desired *qdr.RouterConfig) error {
 	if err := r.ApplyDependents(desired); err != nil {
 		return err

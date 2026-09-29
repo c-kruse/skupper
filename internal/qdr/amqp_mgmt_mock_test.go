@@ -45,6 +45,8 @@ func TestQDR(t *testing.T) {
 	badAsInt.AsInt("string")
 	asConnection(badAsInt)
 	badAsInt.AsUint64("string")
+	connection := asConnection(Record{"opened": true})
+	assert.Assert(t, connection.Opened, "asConnection did not decode AMQP OPEN state")
 
 	// AsString ----------------------------------------
 	goodAsString := Record{}

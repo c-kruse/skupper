@@ -68,6 +68,7 @@ type Connection struct {
 	OperStatus string `json:"operStatus"`
 	Host       string `json:"host"`
 	Role       string `json:"role"`
+	Opened     bool   `json:"opened"`
 	Active     bool   `json:"active"`
 	Dir        string `json:"dir"`
 }
@@ -222,6 +223,7 @@ func asConnection(record Record) Connection {
 		Host:       record.AsString("host"),
 		OperStatus: record.AsString("operStatus"),
 		Dir:        record.AsString("dir"),
+		Opened:     record.AsBool("opened"),
 		Active:     record.AsBool("active"),
 	}
 }
