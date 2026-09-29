@@ -15,6 +15,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/controller"
 	"github.com/skupperproject/skupper/internal/kube/controllerruntime"
 	"github.com/skupperproject/skupper/internal/kube/metrics"
+	"github.com/skupperproject/skupper/internal/kube/reconcile"
 	"github.com/skupperproject/skupper/internal/version"
 )
 
@@ -74,9 +75,11 @@ func main() {
 	}
 	config.Namespace = cli.Namespace
 
+	reconcileMetrics := reconcile.Metrics(reconcile.NoopMetrics{})
 	if !config.MetricsConfig.Disabled {
 		reg := prometheus.NewRegistry()
 		metrics.MustRegisterClientGoMetrics(reg)
+		reconcileMetrics = metrics.MustRegisterNamespaceReconcileMetrics(reg)
 		srv := metrics.NewServer(config.MetricsConfig, reg)
 		if err := srv.Start(stopCh); err != nil {
 			slog.Error("Error starting metrics server", slog.Any("error", err))
@@ -87,7 +90,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { <-stopCh; cancel() }()
-	if err = controllerruntime.Run(ctx, cli, config); err != nil && !errors.Is(err, context.Canceled) {
+	if err = controllerruntime.Run(ctx, cli, config, reconcileMetrics); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("Error running site controller", slog.Any("error", err))
 		os.Exit(1)
 	}

@@ -11,9 +11,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus"
 	iflag "github.com/skupperproject/skupper/internal/flag"
 	"github.com/skupperproject/skupper/internal/kube/adaptor"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
+	kubemetrics "github.com/skupperproject/skupper/internal/kube/metrics"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	"github.com/skupperproject/skupper/internal/version"
 )
@@ -33,6 +35,11 @@ func main() {
 	iflag.StringVar(flags, &serverName, "control-server-name", "SKUPPER_CONTROLLER_SERVER_NAME", "", "Expected controller TLS DNS name (defaults to namespace-qualified service DNS)")
 	iflag.StringVar(flags, &tokenPath, "enrollment-token", "SKUPPER_CONTROLLER_ENROLLMENT_TOKEN", "/var/run/secrets/skupper-controller/enrollment-token", "Projected bound-token path")
 	iflag.StringVar(flags, &caPath, "control-ca", "SKUPPER_CONTROLLER_CA", "/etc/skupper-controller/ca.crt", "Controller public server CA bundle")
+	metricsConfig, err := kubemetrics.BoundConfig(flags)
+	if err != nil {
+		slog.Error("configure metrics", slog.Any("error", err))
+		os.Exit(1)
+	}
 	isVersion := flags.Bool("version", false, "Report the version")
 	isInit := flags.Bool("init", false, "Fetch initial intent and write router startup configuration")
 	flags.Parse(os.Args[1:])
@@ -67,6 +74,15 @@ func main() {
 	if *isInit {
 		err = adaptor.RunConfigInit(ctx, config, secrets)
 	} else {
+		if !metricsConfig.Disabled {
+			registry := prometheus.NewRegistry()
+			kubemetrics.MustRegisterClientGoMetrics(registry)
+			config.Metrics = kubemetrics.MustRegisterAdaptorMetrics(registry)
+			if err := kubemetrics.NewServer(metricsConfig, registry).Start(ctx.Done()); err != nil {
+				slog.Error("start metrics server", slog.Any("error", err))
+				os.Exit(1)
+			}
+		}
 		go serveHealth(ctx)
 		err = adaptor.RunSidecar(ctx, config, secrets)
 	}

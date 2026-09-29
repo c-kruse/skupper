@@ -91,16 +91,38 @@
 		{
 		  "disableTextWrap": false,
 		  "editorMode": "builder",
-		  "expr": "count(sum without(kind) (skupper_workqueue_depth{container=\"$container\"}))",
+		  "expr": "skupper_controller_leader{container=\"controller\"}",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": true,
-		  "legendFormat": "__auto",
+		  "legendFormat": "{{pod}} controller leader (0=standby)",
 		  "range": true,
 		  "refId": "A",
 		  "useBackend": false
+		},
+		{
+		  "disableTextWrap": false,
+		  "editorMode": "builder",
+		  "expr": "skupper_adaptor_control_stream_up{container=\"kube-adaptor\"}",
+		  "fullMetaSearch": false,
+		  "includeNullMetadata": true,
+		  "legendFormat": "{{namespace}} adaptor control stream (0=disconnected)",
+		  "range": true,
+		  "refId": "B",
+		  "useBackend": false
+		},
+		{
+		  "disableTextWrap": false,
+		  "editorMode": "builder",
+		  "expr": "skupper_adaptor_application_state{container=\"kube-adaptor\"} == 1",
+		  "fullMetaSearch": false,
+		  "includeNullMetadata": true,
+		  "legendFormat": "{{namespace}} application {{state}}",
+		  "range": true,
+		  "refId": "C",
+		  "useBackend": false
 		}
 	  ],
-	  "title": "Container Count",
+	  "title": "Controller Role / Adaptor Session State",
 	  "type": "stat"
 	},
 	{
@@ -157,7 +179,7 @@
 		{
 		  "disableTextWrap": false,
 		  "editorMode": "builder",
-		  "expr": "sum(rate(skupper_kubernetes_client_http_request_duration_seconds_sum{container=\"$container\"}[$__rate_interval]))",
+		  "expr": "sum(rate(skupper_kubernetes_client_http_request_duration_seconds_sum{container=~\"$container\"}[$__rate_interval]))",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": false,
 		  "legendFormat": "__auto",
@@ -256,7 +278,7 @@
 		{
 		  "disableTextWrap": false,
 		  "editorMode": "builder",
-		  "expr": "sum by(status_code) (rate(skupper_kubernetes_client_http_requests_total{container=\"$container\", status_code!~\"2[0-9]{2}\"}[$__rate_interval]))",
+		  "expr": "sum by(status_code) (rate(skupper_kubernetes_client_http_requests_total{container=~\"$container\", status_code!~\"2[0-9]{2}\"}[$__rate_interval]))",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": false,
 		  "legendFormat": "__auto",
@@ -355,7 +377,7 @@
 		{
 		  "disableTextWrap": false,
 		  "editorMode": "builder",
-		  "expr": "topk(5, sum by(exported_endpoint, method) (rate(skupper_kubernetes_client_http_request_duration_seconds_count{container=\"$container\"}[$__rate_interval])))",
+		  "expr": "topk(5, sum by(exported_endpoint, method) (rate(skupper_kubernetes_client_http_request_duration_seconds_count{container=~\"$container\"}[$__rate_interval])))",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": false,
 		  "legendFormat": "{{method}} {{exported_endpoint}}",
@@ -454,7 +476,7 @@
 		{
 		  "disableTextWrap": false,
 		  "editorMode": "builder",
-		  "expr": "histogram_quantile(0.95, sum by(le) (rate(skupper_kubernetes_client_rate_limiter_duration_seconds_bucket{container=\"$container\"}[$__rate_interval])))",
+		  "expr": "histogram_quantile(0.95, sum by(le) (rate(skupper_kubernetes_client_rate_limiter_duration_seconds_bucket{container=~\"$container\"}[$__rate_interval])))",
 		  "fullMetaSearch": false,
 		  "includeNullMetadata": false,
 		  "legendFormat": "__auto",
@@ -567,16 +589,16 @@
 			  },
 			  "disableTextWrap": false,
 			  "editorMode": "builder",
-			  "expr": "histogram_quantile(0.95, sum by(le) (rate(skupper_workqueue_delay_seconds_bucket{container=\"$container\"}[$__rate_interval])))",
+			  "expr": "histogram_quantile(0.95, sum by(le) (rate(skupper_namespace_reconcile_queue_wait_duration_seconds_bucket{container=\"controller\"}[$__rate_interval]) * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1)))",
 			  "fullMetaSearch": false,
 			  "includeNullMetadata": false,
-			  "legendFormat": "__auto",
+			  "legendFormat": "leader queue wait p95",
 			  "range": true,
 			  "refId": "A",
 			  "useBackend": false
 			}
 		  ],
-		  "title": "Responsiveness: P95 Work Queue Delay",
+		  "title": "Leader Namespace Queue Wait: P95",
 		  "type": "timeseries"
 		},
 		{
@@ -665,16 +687,16 @@
 			{
 			  "disableTextWrap": false,
 			  "editorMode": "builder",
-			  "expr": "sum by(kind) (rate(skupper_workqueue_duration_seconds_sum{container=\"$container\"}[$__rate_interval])) / sum by(kind) (rate(skupper_workqueue_duration_seconds_count{container=\"controller\"}[$__rate_interval]))",
+			  "expr": "sum(rate(skupper_namespace_reconcile_work_duration_seconds_sum{container=\"controller\"}[$__rate_interval]) * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1)) / sum(rate(skupper_namespace_reconcile_work_duration_seconds_count{container=\"controller\"}[$__rate_interval]) * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1))",
 			  "fullMetaSearch": false,
 			  "includeNullMetadata": false,
-			  "legendFormat": "__auto",
+			  "legendFormat": "leader mean attempt duration",
 			  "range": true,
 			  "refId": "A",
 			  "useBackend": false
 			}
 		  ],
-		  "title": "Average Work Duration by Kind",
+		  "title": "Leader Namespace Reconcile: Mean Attempt Duration",
 		  "type": "timeseries"
 		},
 		{
@@ -682,6 +704,7 @@
 			"type": "prometheus",
 			"uid": "prometheus"
 		  },
+		  "description": "Requested invalidations count every external Add call before key deduplication. Accepted queue additions are deduplicated but can include internal retries, so their ratio is not an exact coalescing rate.",
 		  "fieldConfig": {
 			"defaults": {
 			  "color": {
@@ -763,16 +786,27 @@
 			{
 			  "disableTextWrap": false,
 			  "editorMode": "builder",
-			  "expr": "sum by(kind) (rate(skupper_workqueue_adds_total{container=\"$container\"}[$__rate_interval]))",
+			  "expr": "sum(rate(skupper_namespace_reconcile_queue_adds_total{container=\"controller\"}[$__rate_interval]) * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1))",
 			  "fullMetaSearch": false,
 			  "includeNullMetadata": false,
-			  "legendFormat": "__auto",
+			  "legendFormat": "accepted queue additions (includes retries)",
 			  "range": true,
 			  "refId": "A",
 			  "useBackend": false
+			},
+			{
+			  "disableTextWrap": false,
+			  "editorMode": "builder",
+			  "expr": "sum by(source) (rate(skupper_namespace_reconcile_invalidations_total{container=\"controller\"}[$__rate_interval]) * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1))",
+			  "fullMetaSearch": false,
+			  "includeNullMetadata": false,
+			  "legendFormat": "requested {{source}}",
+			  "range": true,
+			  "refId": "B",
+			  "useBackend": false
 			}
 		  ],
-		  "title": "Queue Add Rate by Kind",
+		  "title": "Leader Requested Invalidation vs Accepted Queue Rates",
 		  "type": "timeseries"
 		},
 		{
@@ -833,7 +867,7 @@
 				  }
 				]
 			  },
-			  "unit": "percentunit"
+			  "unit": "short"
 			},
 			"overrides": []
 		  },
@@ -862,16 +896,16 @@
 			{
 			  "disableTextWrap": false,
 			  "editorMode": "builder",
-			  "expr": "sum(rate(skupper_workqueue_duration_seconds_sum{container=\"$container\"}[$__rate_interval])) / sum(rate(skupper_workqueue_duration_seconds_count{container=\"$container\"}[$__rate_interval])) * sum(rate(skupper_workqueue_adds_total{container=\"$container\"}[$__rate_interval]))",
+			  "expr": "sum(skupper_namespace_reconcile_workers_active{container=\"controller\"} * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1))",
 			  "fullMetaSearch": false,
 			  "includeNullMetadata": false,
-			  "legendFormat": "__auto",
+			  "legendFormat": "leader active reconciles",
 			  "range": true,
-			  "refId": "Worker Load Factor",
+			  "refId": "Active Reconciles",
 			  "useBackend": false
 			}
 		  ],
-		  "title": "Worker Load Factor",
+		  "title": "Leader Workers Actually Reconciling",
 		  "type": "timeseries"
 		},
 		{
@@ -928,21 +962,20 @@
 			{
 			  "disableTextWrap": false,
 			  "editorMode": "builder",
-			  "expr": "sum(skupper_workqueue_depth{container=\"$container\"})",
+			  "expr": "sum(skupper_namespace_reconcile_queue_depth{container=\"controller\"} * on(namespace, pod) group_left() (skupper_controller_leader{container=\"controller\"} == 1))",
 			  "fullMetaSearch": false,
 			  "includeNullMetadata": true,
-			  "legendFormat": "__auto",
+			  "legendFormat": "leader queue depth",
 			  "range": true,
 			  "refId": "A",
 			  "useBackend": false
 			}
 		  ],
-		  "title": "Work Queue Depth",
+		  "title": "Leader Namespace Queue Depth",
 		  "type": "gauge"
 		}
 	  ],
-	  "repeat": "container",
-	  "title": "$container Responsiveness",
+	  "title": "Controller Namespace Responsiveness",
 	  "type": "row"
 	}
   ],
@@ -987,4 +1020,3 @@
   "version": 1,
   "weekStart": ""
 }
-

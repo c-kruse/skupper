@@ -38,6 +38,7 @@ type ControlConfig struct {
 	PublicCAPath   string
 	Target         routercontrol.TargetIdentity
 	ConfigDir      string
+	Metrics        RuntimeMetrics
 }
 
 type controlRuntime struct {
@@ -75,6 +76,9 @@ func newControlRuntime(config ControlConfig, secrets corev1client.SecretInterfac
 	enrollment, err := kuberoutercontrol.NewEnrollmentClient(config.EnrollmentURL, config.TokenPath, config.PublicCAPath, config.ServerName)
 	if err != nil {
 		return nil, err
+	}
+	if config.Metrics == nil {
+		config.Metrics = NoopRuntimeMetrics{}
 	}
 	return &controlRuntime{config: config, enrollment: enrollment, credentials: NewSecretCredentialProvider(secrets, config.ConfigDir), router: &AMQPLocalRouter{Pool: qdr.NewAgentPool("amqp://localhost:5672", nil)}, incarnation: "unverified-" + string(uuid.NewUUID()), instance: string(uuid.NewUUID())}, nil
 }
@@ -391,8 +395,10 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 	backoff := time.Second
 	for ctx.Err() == nil {
 		_, _ = runtime.router.Read()
+		started := time.Now()
 		control, err := runtime.connectBounded(ctx)
 		if err != nil {
+			runtime.config.Metrics.ConnectionAttempt("error", time.Since(started))
 			delay := reconnectBackoffDelay(backoff, renewalJitter())
 			slog.Warn("router-control reconnect", slog.String("phase", "connect"), slog.String("reason", boundedErrorReason(err)), slog.Duration("retryAfter", delay))
 			if !sleepContext(ctx, delay) {
@@ -403,8 +409,12 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 			}
 			continue
 		}
+		runtime.config.Metrics.ConnectionAttempt("success", time.Since(started))
+		runtime.config.Metrics.SetControlStreamUp(true)
 		backoff = time.Second
 		err = runtime.runSession(control.ctx, control.cancel, control.session, control.expiry, control.incarnation)
+		runtime.config.Metrics.SetControlStreamUp(false)
+		runtime.config.Metrics.SetApplicationState("unknown")
 		_ = control.connection.Close()
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -419,6 +429,8 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 }
 
 func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFunc, session *routercontrol.ClientSession, expiry time.Time, sessionIncarnation string) error {
+	defer r.config.Metrics.SetControlStreamUp(false)
+	defer r.config.Metrics.SetApplicationState("unknown")
 	events, receiverDone := startControlReceiver(ctx, session)
 	defer func() {
 		cancel()
@@ -434,12 +446,25 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 	defer reconcile.Stop()
 	receiveInactivity := time.NewTimer(controlReceiveInactivityTimeout)
 	defer receiveInactivity.Stop()
-	engine := Engine{Router: r.router, Credentials: r.credentials, RouterIncarnation: sessionIncarnation, StartupConfig: r.startup}
+	engine := Engine{Router: r.router, Credentials: r.credentials, RouterIncarnation: sessionIncarnation, StartupConfig: r.startup, Metrics: r.config.Metrics}
 	var accepted *routercontrol.IntentUpdate
+	var acceptedAt time.Time
+	var appliedRecorded bool
 	var compiled CompiledIntent
 	var compiledValid bool
 	var sample uint64
 	applicationLog := applicationReportLogger{logger: slog.Default()}
+	realize := func() (routercontrol.ApplicationReport, CompiledIntent) {
+		started := time.Now()
+		report, next := engine.RealizeDetailed(ctx, session.SessionID(), accepted.Sequence, accepted.Intent, accepted.Digest)
+		r.config.Metrics.RealizationFinished(report.State, time.Since(started))
+		r.config.Metrics.SetApplicationState(string(report.State))
+		if report.State == routercontrol.ApplicationApplied && !appliedRecorded && !acceptedAt.IsZero() {
+			r.config.Metrics.AcceptedToApplied(time.Since(acceptedAt))
+			appliedRecorded = true
+		}
+		return report, next
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -454,7 +479,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 			}
 		case <-reconcile.C:
 			if accepted != nil {
-				report, next := engine.RealizeDetailed(ctx, session.SessionID(), accepted.Sequence, accepted.Intent, accepted.Digest)
+				report, next := realize()
 				if next.RealizationID != "" {
 					compiled = next
 					compiledValid = true
@@ -482,13 +507,17 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 					if !compiledValid {
 						observation = routercontrol.ObservationSnapshot{Scope: routercontrol.ObservationScopeResources, SampleSequence: sample, RefreshRequestID: item.event.Refresh.RequestID, Knowledge: routercontrol.KnowledgeUnknown, RouterIncarnation: sessionIncarnation, Reason: "accepted intent has no compiled realization"}
 					} else {
+						started := time.Now()
 						observation = r.router.ObserveResources(session.SessionID(), sessionIncarnation, sample, compiled, item.event.Refresh.RequestID)
+						r.config.Metrics.LocalManagementFinished("observe", observationOutcome(observation), time.Since(started))
 					}
 				case routercontrol.ObservationScopeAddresses:
 					if accepted == nil {
 						observation = routercontrol.ObservationSnapshot{Scope: routercontrol.ObservationScopeAddresses, SampleSequence: sample, RefreshRequestID: item.event.Refresh.RequestID, Knowledge: routercontrol.KnowledgeUnknown, RouterIncarnation: sessionIncarnation, Reason: "intent unavailable"}
 					} else {
+						started := time.Now()
 						observation = r.router.ObserveAddresses(session.SessionID(), sessionIncarnation, sample, accepted.Intent, item.event.Refresh.RequestID)
+						r.config.Metrics.LocalManagementFinished("observe", observationOutcome(observation), time.Since(started))
 					}
 				default:
 					observation = routercontrol.ObservationSnapshot{Scope: item.event.Refresh.Scope, SampleSequence: sample, RefreshRequestID: item.event.Refresh.RequestID, Knowledge: routercontrol.KnowledgeUnknown, RouterIncarnation: sessionIncarnation, Reason: "unsupported observation scope"}
@@ -511,9 +540,13 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 					return err
 				}
 				accepted = item.event.Intent
+				acceptedAt = time.Now()
+				appliedRecorded = false
+				r.config.Metrics.IntentAccepted()
+				r.config.Metrics.SetApplicationState("pending")
 				r.router.InvalidateRouterVerification()
 				compiledValid = false
-				report, next := engine.RealizeDetailed(ctx, session.SessionID(), accepted.Sequence, accepted.Intent, accepted.Digest)
+				report, next := realize()
 				if next.RealizationID != "" {
 					compiled = next
 					compiledValid = true
@@ -529,6 +562,13 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 			events, receiverDone = startControlReceiver(ctx, session)
 		}
 	}
+}
+
+func observationOutcome(observation routercontrol.ObservationSnapshot) string {
+	if observation.Knowledge == routercontrol.KnowledgeUnknown {
+		return "error"
+	}
+	return "success"
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) bool {

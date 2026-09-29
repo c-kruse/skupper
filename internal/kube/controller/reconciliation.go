@@ -98,6 +98,7 @@ type NamespaceControllerOptions struct {
 	// exclusively owns the shared skupper Gateway. Its UID is revalidated before
 	// writes, preventing takeover of a foreign Gateway.
 	GatewayOwner *metav1.OwnerReference
+	Metrics      reconcile.Metrics
 }
 
 type namespaceInformers struct {
@@ -193,7 +194,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
 	accesses := reconcile.AccessPlanner{Next: planner, Ensurer: c}
 	workloads := reconcile.WorkloadPlanner{Next: accesses, Ensurer: c}
-	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}})
+	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}}, options.Metrics)
 	if err := c.registerInvalidations(); err != nil {
 		return nil, err
 	}
@@ -310,7 +311,7 @@ func (c *NamespaceController) namespaceUID(namespace string) types.UID {
 // queue; source namespaces affected by attached definitions should be included.
 func (c *NamespaceController) InvalidateNamespaces(namespaces ...string) {
 	for _, namespace := range namespaces {
-		c.queue.Add(namespace)
+		c.queue.Add(namespace, "observation")
 	}
 }
 
@@ -444,7 +445,7 @@ func configurationAffectsAll(config *corev1.ConfigMap, controllerNamespace strin
 
 func (c *NamespaceController) invalidateAllSiteNamespaces() {
 	for _, value := range c.informers.sites.GetStore().List() {
-		c.queue.Add(value.(*skupperv2alpha1.Site).Namespace)
+		c.queue.Add(value.(*skupperv2alpha1.Site).Namespace, "informer")
 	}
 }
 
@@ -459,7 +460,7 @@ func (c *NamespaceController) invalidateAllAccessNamespaces() {
 		namespaces[value.(*skupperv2alpha1.SecuredAccess).Namespace] = struct{}{}
 	}
 	for namespace := range namespaces {
-		c.queue.Add(namespace)
+		c.queue.Add(namespace, "informer")
 	}
 }
 
@@ -479,15 +480,15 @@ func (c *NamespaceController) invalidateObject(value interface{}) {
 				namespace = object.GetName()
 			}
 		}
-		c.queue.Add(namespace)
+		c.queue.Add(namespace, "informer")
 		if config, ok := eventObject(value).(*corev1.ConfigMap); ok && config.Name == namespaceConfigName {
 			for _, candidate := range c.informers.attached.GetStore().List() {
 				definition := candidate.(*skupperv2alpha1.AttachedConnector)
 				if definition.Namespace == namespace {
-					c.queue.Add(definition.Spec.SiteNamespace)
+					c.queue.Add(definition.Spec.SiteNamespace, "informer")
 				}
 				if definition.Spec.SiteNamespace == namespace {
-					c.queue.Add(definition.Namespace)
+					c.queue.Add(definition.Namespace, "informer")
 				}
 			}
 		}
@@ -496,18 +497,18 @@ func (c *NamespaceController) invalidateObject(value interface{}) {
 
 func (c *NamespaceController) invalidateAttached(value interface{}) {
 	if object := objectFromEvent(value); object != nil {
-		c.queue.Add(object.GetNamespace())
+		c.queue.Add(object.GetNamespace(), "informer")
 		if definition, ok := eventObject(value).(*skupperv2alpha1.AttachedConnector); ok {
-			c.queue.Add(definition.Spec.SiteNamespace)
+			c.queue.Add(definition.Spec.SiteNamespace, "informer")
 		}
 	}
 }
 
 func (c *NamespaceController) invalidateBinding(value interface{}) {
 	if object := objectFromEvent(value); object != nil {
-		c.queue.Add(object.GetNamespace())
+		c.queue.Add(object.GetNamespace(), "informer")
 		if binding, ok := eventObject(value).(*skupperv2alpha1.AttachedConnectorBinding); ok {
-			c.queue.Add(binding.Spec.ConnectorNamespace)
+			c.queue.Add(binding.Spec.ConnectorNamespace, "informer")
 		}
 	}
 }
@@ -517,11 +518,11 @@ func (c *NamespaceController) invalidatePod(value interface{}) {
 	if pod == nil {
 		return
 	}
-	c.queue.Add(pod.Namespace)
+	c.queue.Add(pod.Namespace, "informer")
 	for _, value := range c.informers.attached.GetStore().List() {
 		definition := value.(*skupperv2alpha1.AttachedConnector)
 		if definition.Namespace == pod.Namespace {
-			c.queue.Add(definition.Spec.SiteNamespace)
+			c.queue.Add(definition.Spec.SiteNamespace, "informer")
 		}
 	}
 }
@@ -534,6 +535,7 @@ func eventObject(value interface{}) interface{} {
 }
 
 func (c *NamespaceController) enqueueAll() {
+	namespaces := map[string]struct{}{}
 	informers := []cache.SharedIndexInformer{c.informers.configMaps, c.informers.serviceAccounts, c.informers.roles, c.informers.roleBindings, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses, c.informers.attached, c.informers.bindings}
 	if c.informers.routes != nil {
 		informers = append(informers, c.informers.routes)
@@ -545,11 +547,18 @@ func (c *NamespaceController) enqueueAll() {
 	}
 	for _, informer := range informers {
 		for _, value := range informer.GetStore().List() {
-			c.invalidateObject(value)
+			if object := objectFromEvent(value); object != nil && object.GetNamespace() != "" {
+				namespaces[object.GetNamespace()] = struct{}{}
+			}
 		}
 	}
 	for _, value := range c.informers.attached.GetStore().List() {
-		c.invalidateAttached(value)
+		definition := value.(*skupperv2alpha1.AttachedConnector)
+		namespaces[definition.Namespace] = struct{}{}
+		namespaces[definition.Spec.SiteNamespace] = struct{}{}
+	}
+	for namespace := range namespaces {
+		c.queue.Add(namespace, "startup")
 	}
 }
 

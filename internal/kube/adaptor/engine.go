@@ -15,6 +15,7 @@ type Engine struct {
 	Credentials       TrafficCredentialResolver
 	RouterIncarnation string // fallback used only before local management is available
 	StartupConfig     *qdr.RouterConfig
+	Metrics           RuntimeMetrics
 }
 
 type routerRealizationEvidence interface {
@@ -52,7 +53,7 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 		report.State = routercontrol.ApplicationFailed
 		return report, CompiledIntent{}
 	}
-	result := Reconcile(e.Router, compiled)
+	result := ReconcileWithMetrics(e.Router, compiled, e.Metrics)
 	restartReason := e.restartRequired(compiled.Config)
 	if result.Applied {
 		if retiree, ok := e.Credentials.(interface {

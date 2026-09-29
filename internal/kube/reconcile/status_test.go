@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,69 @@ func TestPartialMissingAddressIsUnknownAndHostConnectorCanConfigure(t *testing.T
 	if got := conditionStatus(desired.Statuses.Connectors[0].Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED); got != metav1.ConditionTrue {
 		t.Fatalf("host connector with no selected Pods remained pending: %s", got)
 	}
+}
+
+func TestSelectedPodStatusesAreQuietAfterJSONRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		attached bool
+		host     bool
+	}{
+		{name: "host Connector", host: true},
+		{name: "selector Connector"},
+		{name: "AttachedConnector", attached: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := baseSnapshot()
+			snapshot.EvaluationTime = time.Unix(100, 0).UTC()
+			if test.attached {
+				snapshot.SourceNamespaces = map[string]types.UID{"source": "source-uid"}
+				snapshot.Bindings = []*skupperv2alpha1.AttachedConnectorBinding{{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "site", UID: "binding-uid"}, Spec: skupperv2alpha1.AttachedConnectorBindingSpec{ConnectorNamespace: "source", RoutingKey: "database"}}}
+				snapshot.Attached = []*skupperv2alpha1.AttachedConnector{{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "source", UID: "attached-uid"}, Spec: skupperv2alpha1.AttachedConnectorSpec{SiteNamespace: "site", Selector: "app=database", Port: 5432}}}
+				snapshot.Pods = []*corev1.Pod{readyPod("source", "database-1", "database-pod-uid", map[string]string{"app": "database"})}
+			} else {
+				connector := &skupperv2alpha1.Connector{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "site", UID: "connector-uid"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "database", Port: 5432}}
+				if test.host {
+					connector.Spec.Host = "database.example"
+				} else {
+					connector.Spec.Selector = "app=database"
+					snapshot.Pods = []*corev1.Pod{readyPod("site", "database-1", "database-pod-uid", map[string]string{"app": "database"})}
+				}
+				snapshot.Connectors = []*skupperv2alpha1.Connector{connector}
+			}
+
+			first := (NamespaceDeriver{}).Derive(snapshot)
+			if test.attached {
+				if len(first.Statuses.Attached) != 1 {
+					t.Fatalf("expected initial AttachedConnector status: %#v", first.Statuses.Attached)
+				}
+				snapshot.Attached[0] = jsonRoundTrip(t, first.Statuses.Attached[0])
+			} else {
+				if len(first.Statuses.Connectors) != 1 {
+					t.Fatalf("expected initial Connector status: %#v", first.Statuses.Connectors)
+				}
+				snapshot.Connectors[0] = jsonRoundTrip(t, first.Statuses.Connectors[0])
+			}
+			second := (NamespaceDeriver{}).Derive(snapshot)
+			if len(second.Statuses.Connectors) != 0 || len(second.Statuses.Attached) != 0 {
+				t.Fatalf("JSON roundtrip re-projected unchanged status: connectors=%d attached=%d", len(second.Statuses.Connectors), len(second.Statuses.Attached))
+			}
+		})
+	}
+}
+
+func jsonRoundTrip[T any](t *testing.T, value *T) *T {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result T
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	return &result
 }
 
 func TestMultiKeyReachableKeysArePopulatedAndCleared(t *testing.T) {

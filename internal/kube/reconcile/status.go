@@ -734,7 +734,7 @@ func selectedPodsForConnector(snapshot Snapshot, connector *skupperv2alpha1.Conn
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].UID < result[j].UID })
-	return result
+	return serializablePodDetails(result)
 }
 
 func selectedPodsForAttached(snapshot Snapshot, attached *skupperv2alpha1.AttachedConnector) []skupperv2alpha1.PodDetails {
@@ -753,7 +753,20 @@ func selectedPodsForAttached(snapshot Snapshot, attached *skupperv2alpha1.Attach
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].UID < result[j].UID })
-	return result
+	return serializablePodDetails(result)
+}
+
+// PodDetails.UID is an internal sorting key and is deliberately omitted from
+// the API. Return the same representation an API round trip produces so status
+// comparisons do not continuously re-project byte-identical wire values.
+func serializablePodDetails(pods []skupperv2alpha1.PodDetails) []skupperv2alpha1.PodDetails {
+	if len(pods) == 0 {
+		return nil
+	}
+	for i := range pods {
+		pods[i].UID = ""
+	}
+	return pods
 }
 
 func sortedEvidenceTargets(evidence map[RouterTarget]targetEvidence) []RouterTarget {

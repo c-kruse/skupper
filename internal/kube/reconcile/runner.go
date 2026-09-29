@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	"k8s.io/client-go/util/workqueue"
 )
@@ -33,26 +32,62 @@ func (r NamespaceReconciler) Reconcile(ctx context.Context, namespace string) (E
 type Queue struct {
 	queue      workqueue.RateLimitingInterface
 	reconciler NamespaceReconciler
+	metrics    Metrics
 	workers    int
 	wg         sync.WaitGroup
 }
 
-func NewQueue(name string, workers int, reconciler NamespaceReconciler) *Queue {
+type Metrics interface {
+	workqueue.MetricsProvider
+	Invalidated(source string)
+	ReconcileStarted()
+	ReconcileFinished(outcome string)
+	SetLeader(active bool)
+}
+
+type NoopMetrics struct{}
+
+func (NoopMetrics) NewDepthMetric(string) workqueue.GaugeMetric            { return noopMetric{} }
+func (NoopMetrics) NewAddsMetric(string) workqueue.CounterMetric           { return noopMetric{} }
+func (NoopMetrics) NewLatencyMetric(string) workqueue.HistogramMetric      { return noopMetric{} }
+func (NoopMetrics) NewWorkDurationMetric(string) workqueue.HistogramMetric { return noopMetric{} }
+func (NoopMetrics) NewUnfinishedWorkSecondsMetric(string) workqueue.SettableGaugeMetric {
+	return noopMetric{}
+}
+func (NoopMetrics) NewLongestRunningProcessorSecondsMetric(string) workqueue.SettableGaugeMetric {
+	return noopMetric{}
+}
+func (NoopMetrics) NewRetriesMetric(string) workqueue.CounterMetric { return noopMetric{} }
+func (NoopMetrics) Invalidated(string)                              {}
+func (NoopMetrics) ReconcileStarted()                               {}
+func (NoopMetrics) ReconcileFinished(string)                        {}
+func (NoopMetrics) SetLeader(bool)                                  {}
+
+type noopMetric struct{}
+
+func (noopMetric) Inc()            {}
+func (noopMetric) Dec()            {}
+func (noopMetric) Set(float64)     {}
+func (noopMetric) Observe(float64) {}
+
+func NewQueue(name string, workers int, reconciler NamespaceReconciler, metrics Metrics) *Queue {
 	if workers < 1 {
 		workers = 1
 	}
-	return &Queue{queue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), name), workers: workers, reconciler: reconciler}
-}
-
-func (q *Queue) Add(namespace string) {
-	if namespace != "" {
-		q.queue.Add(namespace)
+	if metrics == nil {
+		metrics = NoopMetrics{}
 	}
+	queue := workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: name, MetricsProvider: metrics})
+	return &Queue{queue: queue, workers: workers, reconciler: reconciler, metrics: metrics}
 }
 
-func (q *Queue) AddAfter(namespace string, delay time.Duration) {
+// Add records an external invalidation request. The workqueue's additions
+// metric records only additions accepted after key deduplication and can also
+// include internal retries, so the two counters are intentionally distinct.
+func (q *Queue) Add(namespace, source string) {
 	if namespace != "" {
-		q.queue.AddAfter(namespace, delay)
+		q.metrics.Invalidated(source)
+		q.queue.Add(namespace)
 	}
 }
 
@@ -85,12 +120,19 @@ func (q *Queue) process(ctx context.Context) bool {
 		q.queue.Forget(item)
 		return true
 	}
+	q.metrics.ReconcileStarted()
 	report, err := q.reconciler.Reconcile(ctx, namespace)
 	if ctx.Err() != nil {
+		q.metrics.ReconcileFinished("cancelled")
 		q.queue.Forget(item)
 		return true
 	}
 	if err != nil || report.NeedsRetry() {
+		if err != nil {
+			q.metrics.ReconcileFinished("error")
+		} else {
+			q.metrics.ReconcileFinished("retry")
+		}
 		if err != nil {
 			slog.Error("Namespace reconciliation failed", "namespace", namespace, "error", err)
 		} else {
@@ -111,6 +153,7 @@ func (q *Queue) process(ctx context.Context) bool {
 		}
 		return true
 	}
+	q.metrics.ReconcileFinished("success")
 	q.queue.Forget(item)
 	return true
 }

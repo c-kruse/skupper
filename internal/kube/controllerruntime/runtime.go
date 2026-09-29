@@ -38,7 +38,7 @@ type leaderResources struct {
 // Run warms all caches before participating in one election. Only the elected
 // process opens the RPC listeners and executes namespace effects. Losing the
 // lease returns to main; this process never goes back to standby.
-func Run(ctx context.Context, clients internalclient.Clients, config *controller.Config) error {
+func Run(ctx context.Context, clients internalclient.Clients, config *controller.Config, reconcileMetrics reconcile.Metrics) error {
 	if config.Namespace == "" || config.Name == "" || config.PodName == "" || config.PodUID == "" {
 		return fmt.Errorf("controller namespace, logical name, Pod name and Pod UID are required")
 	}
@@ -64,6 +64,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 		RequireExplicitControl: config.WatchNamespace != "" || config.RequireExplicitControl,
 		Workers:                config.Workers, DisableSecurityContext: config.DisableSecurityContext, Bootstrap: bootstrap,
 		SecuredAccess: config.SecuredAccessConfig, GatewayOwner: gatewayOwner,
+		Metrics: reconcileMetrics,
 	}, publisher, observations)
 	if err != nil {
 		return err
@@ -157,6 +158,8 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 				return ctx.Err()
 			},
 			Serve: func(ctx context.Context, fence *leadership.Fence) error {
+				reconcileMetrics.SetLeader(true)
+				defer reconcileMetrics.SetLeader(false)
 				grantFence.Store(fence)
 				group, ctx := errgroup.WithContext(ctx)
 				group.Go(func() error { return grantService.RunLeader(ctx, fence) })

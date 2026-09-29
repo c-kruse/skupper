@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/skupperproject/skupper/internal/qdr"
 )
@@ -29,29 +30,36 @@ type ApplyResult struct {
 // Reconcile preserves unrelated and protected bootstrap entities, applies only
 // the adaptor-owned projection, then verifies the router by a fresh read.
 func Reconcile(router LocalRouter, compiled CompiledIntent) ApplyResult {
-	actual, err := router.Read()
+	return ReconcileWithMetrics(router, compiled, NoopRuntimeMetrics{})
+}
+
+func ReconcileWithMetrics(router LocalRouter, compiled CompiledIntent, metrics RuntimeMetrics) ApplyResult {
+	if metrics == nil {
+		metrics = NoopRuntimeMetrics{}
+	}
+	actual, err := measuredManagement(metrics, "read", router.Read)
 	if err != nil {
 		return ApplyResult{Err: fmt.Errorf("read local router: %w", err)}
 	}
 	desired := mergeOwned(actual, &compiled.Config)
 	if staged, ok := router.(dependencySafeLocalRouter); ok {
-		if err := staged.ApplyDependents(desired); err != nil {
+		if err := measuredManagementError(metrics, "apply", func() error { return staged.ApplyDependents(desired) }); err != nil {
 			return ApplyResult{Actual: actual, Err: fmt.Errorf("apply local router dependents: %w", err)}
 		}
-		dependents, err := router.Read()
+		dependents, err := measuredManagement(metrics, "verify", router.Read)
 		if err != nil {
 			return ApplyResult{Err: fmt.Errorf("verify local router dependents: %w", err)}
 		}
 		if err := verifyOwnedDependents(dependents, desired); err != nil {
 			return ApplyResult{Actual: dependents, Err: err}
 		}
-		if err := staged.PruneDependencies(desired); err != nil {
+		if err := measuredManagementError(metrics, "apply", func() error { return staged.PruneDependencies(desired) }); err != nil {
 			return ApplyResult{Actual: dependents, Err: fmt.Errorf("prune local router dependencies: %w", err)}
 		}
-	} else if err := router.Apply(desired); err != nil {
+	} else if err := measuredManagementError(metrics, "apply", func() error { return router.Apply(desired) }); err != nil {
 		return ApplyResult{Actual: actual, Err: fmt.Errorf("apply local router: %w", err)}
 	}
-	verified, err := router.Read()
+	verified, err := measuredManagement(metrics, "verify", router.Read)
 	if err != nil {
 		return ApplyResult{Err: fmt.Errorf("verify local router: %w", err)}
 	}
@@ -59,6 +67,22 @@ func Reconcile(router LocalRouter, compiled CompiledIntent) ApplyResult {
 		return ApplyResult{Actual: verified, Err: err}
 	}
 	return ApplyResult{Applied: true, Actual: verified}
+}
+
+func measuredManagement[T any](metrics RuntimeMetrics, operation string, call func() (T, error)) (T, error) {
+	started := time.Now()
+	result, err := call()
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	metrics.LocalManagementFinished(operation, outcome, time.Since(started))
+	return result, err
+}
+
+func measuredManagementError(metrics RuntimeMetrics, operation string, call func() error) error {
+	_, err := measuredManagement(metrics, operation, func() (struct{}, error) { return struct{}{}, call() })
+	return err
 }
 
 func mergeOwned(actual, compiled *qdr.RouterConfig) *qdr.RouterConfig {
