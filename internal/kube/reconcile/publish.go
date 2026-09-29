@@ -2,8 +2,11 @@ package reconcile
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"sort"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -16,11 +19,12 @@ type AllocationCommitter interface {
 type PublicationPlanner struct {
 	Allocations AllocationCommitter
 	Publisher   routercontrol.IntentPublisher
-	Validator   func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site) error
+	Validator   func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, map[string]types.UID) error
 }
 
 func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	plan := Plan{Namespace: snapshot.Namespace}
+	sources := maps.Clone(desired.AttachedSources)
 	allocationID := OperationID("commit-allocations")
 	allocationChanged := snapshot.Allocations.SiteUID != desired.Allocations.SiteUID || !reflect.DeepEqual(snapshot.Allocations.Ports, desired.Allocations.Ports)
 	if allocationChanged && desired.SiteUID != "" {
@@ -45,7 +49,7 @@ func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Pl
 				return err
 			}
 			if p.Validator != nil {
-				if err := p.Validator(ctx, snapshot.Namespace, desired.Site); err != nil {
+				if err := p.Validator(ctx, snapshot.Namespace, desired.Site, sources); err != nil {
 					return err
 				}
 			}

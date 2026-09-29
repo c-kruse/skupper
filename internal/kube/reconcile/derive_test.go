@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -201,6 +202,8 @@ func TestCustomServiceAccountIgnoresUnneededDefaultPrerequisites(t *testing.T) {
 
 func TestConnectorSelectorsAreRestrictedToTheirSourceNamespace(t *testing.T) {
 	snapshot := baseSnapshot()
+	snapshot.SourceNamespaces = map[string]types.UID{"source-a": "source-uid"}
+	snapshot.SourceAssignments = map[string]Assignment{"source-a": snapshot.Assignment}
 	snapshot.Connectors = []*skupperv2alpha1.Connector{{ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: "site", UID: "local-uid"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "local", Selector: "app=same", Port: 8080}}}
 	snapshot.Bindings = []*skupperv2alpha1.AttachedConnectorBinding{{ObjectMeta: metav1.ObjectMeta{Name: "remote", Namespace: "site", UID: "binding-uid"}, Spec: skupperv2alpha1.AttachedConnectorBindingSpec{ConnectorNamespace: "source-a", RoutingKey: "remote"}}}
 	snapshot.Attached = []*skupperv2alpha1.AttachedConnector{{ObjectMeta: metav1.ObjectMeta{Name: "remote", Namespace: "source-a", UID: "attached-uid"}, Spec: skupperv2alpha1.AttachedConnectorSpec{SiteNamespace: "site", Selector: "app=same", Port: 9090}}}
@@ -223,6 +226,60 @@ func TestConnectorSelectorsAreRestrictedToTheirSourceNamespace(t *testing.T) {
 	}
 	if diff := cmp.Diff([]routercontrol.Endpoint{{ID: "allowed-pod", Host: "10.0.0.1", Port: 9090}}, byKey["remote"].Endpoints); diff != "" {
 		t.Fatalf("attached endpoint mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAttachedSourceMustHaveCurrentSameControllerAssignment(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		uid        types.UID
+		assignment Assignment
+		allowed    bool
+	}{
+		{name: "same controller", uid: "source-uid", assignment: Assignment{Controller: "controllers/skupper-controller", Controlled: true}, allowed: true},
+		{name: "other controller", uid: "source-uid", assignment: Assignment{Controller: "other/skupper-controller"}},
+		{name: "unassigned", uid: "source-uid"},
+		{name: "missing namespace", assignment: Assignment{Controller: "controllers/skupper-controller", Controlled: true}},
+		{name: "different logical identity", uid: "source-uid", assignment: Assignment{Controller: "other/skupper-controller", Controlled: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := baseSnapshot()
+			snapshot.SourceNamespaces = map[string]types.UID{"source": test.uid}
+			snapshot.SourceAssignments = map[string]Assignment{"source": test.assignment}
+			snapshot.Connectors = []*skupperv2alpha1.Connector{{ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: "site", UID: "local-uid"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "local", Host: "local.example", Port: 8080}}}
+			snapshot.Bindings = []*skupperv2alpha1.AttachedConnectorBinding{{ObjectMeta: metav1.ObjectMeta{Name: "backend", Namespace: "site", UID: "binding-uid"}, Spec: skupperv2alpha1.AttachedConnectorBindingSpec{ConnectorNamespace: "source", RoutingKey: "remote"}}}
+			snapshot.Attached = []*skupperv2alpha1.AttachedConnector{{ObjectMeta: metav1.ObjectMeta{Name: "backend", Namespace: "source", UID: "attached-uid"}, Spec: skupperv2alpha1.AttachedConnectorSpec{SiteNamespace: "site", Selector: "app=backend", Port: 9090, TlsCredentials: "remote-tls"}}}
+			snapshot.Pods = []*corev1.Pod{readyPod("source", "backend", "backend-pod", map[string]string{"app": "backend"})}
+			desired := (NamespaceDeriver{}).Derive(snapshot)
+			if len(desired.Intents) == 0 || len(desired.Statuses.Sites) != 1 {
+				t.Fatal("attachment blocked unrelated Site progress")
+			}
+			for _, intent := range desired.Intents {
+				local, remote := false, false
+				for _, connector := range intent.ServiceConnectors {
+					local = local || connector.RoutingKey == "local"
+					remote = remote || connector.RoutingKey == "remote"
+				}
+				if !local || remote != test.allowed {
+					t.Fatalf("wrong contributions: local=%t remote=%t allowed=%t", local, remote, test.allowed)
+				}
+				if !test.allowed && len(intent.CredentialBindings) != 0 {
+					t.Fatal("unauthorized attachment leaked a credential requirement")
+				}
+			}
+			if test.allowed {
+				if desired.AttachedSources["source"] != "source-uid" || len(desired.Statuses.Attached) != 1 {
+					t.Fatal("authorized source lost its publication fence or status")
+				}
+			} else {
+				if len(desired.AttachedSources) != 0 || len(desired.Statuses.Attached) != 0 {
+					t.Fatal("unauthorized source scheduled publication authority or status writes")
+				}
+				if len(desired.Statuses.Bindings) != 1 || desired.Statuses.Bindings[0].Status.StatusType != skupperv2alpha1.StatusError || !strings.Contains(desired.Statuses.Bindings[0].Status.Message, "same controller") {
+					t.Fatalf("missing actionable Binding error: %#v", desired.Statuses.Bindings)
+				}
+			}
+		})
 	}
 }
 

@@ -268,9 +268,15 @@ effectful `Ensure` during derivation.
 An AttachedConnector in A names site namespace B. Its corresponding
 AttachedConnectorBinding in B authorizes A and supplies the routing key. B joins
 both declarations and selected pods in A. Both must exist and authorize the join.
-B writes its router intent and Binding status. A writes AttachedConnector status
-using that binding's local application observations and source identities.
-Reject projections for an old UID/spec or a moved binding.
+Both namespaces must be managed by the same logical controller installation;
+leader and standby replicas of that installation share the same identity. An
+unassigned or differently assigned source contributes no endpoints or credentials
+and produces an Error on the Binding, without blocking unrelated Site resources.
+B's executor writes its router intent, Binding status, and authorized
+AttachedConnector status using local application observations and source
+identities. Revalidate source namespace UID and controller assignment before
+publication and source status writes. Reject projections for an old UID/spec or
+a moved binding; source namespace and assignment changes invalidate the join.
 
 **The attachment mechanism remains supported.** Pairing an AttachedConnector with
 its authorizing AttachedConnectorBinding is distinct from the Binding's current
@@ -287,8 +293,8 @@ readiness dependency, just as for Connector. Neither connector form needs a
 remote Listener to be configured and ready. Listener-side destination matching
 remains supported and uses local router observations.
 
-Do not create cross-namespace ownerReferences or let B write A's objects. Preserve
-the existing authorized-controller scope. B's traffic credentials resolve in B;
+Do not create cross-namespace ownerReferences or mutate A's resource specifications.
+Preserve the authorized-controller scope. B's traffic credentials resolve in B;
 permission to select pods in A does not authorize reading A's arbitrary Secrets.
 
 ### Stable allocations and credential lifecycles have distinct owners

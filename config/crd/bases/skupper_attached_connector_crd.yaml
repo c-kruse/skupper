@@ -13,6 +13,7 @@ spec:
           description: |-
             An attached connector is a connector in a peer namespace that allows you to bring a workload into your existing VAN without creating a separate site or establishing inter-site links.
             The name of this resource must be the same as that of the associated AttachedConnectorBinding resource in the site namespace.
+            Both namespaces must be managed by the same Skupper controller installation.
           type: object
           properties:
             spec:

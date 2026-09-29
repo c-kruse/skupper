@@ -98,6 +98,7 @@ type Snapshot struct {
 	ClusterHost       string
 	AccessConfig      AccessConfig
 	SourceNamespaces  map[string]types.UID
+	SourceAssignments map[string]Assignment
 }
 
 type AccessConfig struct {
@@ -153,6 +154,7 @@ type DesiredNamespace struct {
 	Intents           map[RouterTarget]routercontrol.RouterIntent
 	Allocations       AllocationState
 	Diagnostics       []Diagnostic
+	AttachedSources   map[string]types.UID
 	Bootstrap         RouterControlBootstrap
 	Site              *skupperv2alpha1.Site
 	ListenerServices  []*corev1.Service

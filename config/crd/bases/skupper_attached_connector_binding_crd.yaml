@@ -15,6 +15,7 @@ spec:
             bring a workload into your existing VAN without creating a separate site or establishing inter-site links.
             The name of this resource must be the same as that of the associated AttachedConnector resource in the peer 
             namespace.
+            Both namespaces must be managed by the same Skupper controller installation.
           type: object
           properties:
             spec:

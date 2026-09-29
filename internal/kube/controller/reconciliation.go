@@ -191,7 +191,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		c.informers.tlsRoutes = dynamicinformer.NewFilteredDynamicSharedInformerFactory(clients.GetDynamicClient(), 5*time.Minute, options.WatchNamespace, nil).ForResource(reconcile.TLSRouteGVR).Informer()
 		c.informers.gateway = dynamicinformer.NewFilteredDynamicSharedInformerFactory(clients.GetDynamicClient(), 5*time.Minute, controllerNamespace, nil).ForResource(reconcile.GatewayGVR).Informer()
 	}
-	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
+	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifyPublication}
 	accesses := reconcile.AccessPlanner{Next: planner, Ensurer: c}
 	workloads := reconcile.WorkloadPlanner{Next: accesses, Ensurer: c}
 	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}}, options.Metrics)
@@ -481,7 +481,9 @@ func (c *NamespaceController) invalidateObject(value interface{}) {
 			}
 		}
 		c.queue.Add(namespace, "informer")
-		if config, ok := eventObject(value).(*corev1.ConfigMap); ok && config.Name == namespaceConfigName {
+		_, namespaceEvent := eventObject(value).(*corev1.Namespace)
+		config, configEvent := eventObject(value).(*corev1.ConfigMap)
+		if namespaceEvent || (configEvent && config.Name == namespaceConfigName) {
 			for _, candidate := range c.informers.attached.GetStore().List() {
 				definition := candidate.(*skupperv2alpha1.AttachedConnector)
 				if definition.Namespace == namespace {
@@ -489,6 +491,12 @@ func (c *NamespaceController) invalidateObject(value interface{}) {
 				}
 				if definition.Spec.SiteNamespace == namespace {
 					c.queue.Add(definition.Namespace, "informer")
+				}
+			}
+			for _, candidate := range c.informers.bindings.GetStore().List() {
+				binding := candidate.(*skupperv2alpha1.AttachedConnectorBinding)
+				if binding.Spec.ConnectorNamespace == namespace {
+					c.queue.Add(binding.Namespace, "informer")
 				}
 			}
 		}
@@ -625,6 +633,7 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	}
 	sources := map[string]bool{namespace: true}
 	snapshot.SourceNamespaces = map[string]types.UID{namespace: ns.UID}
+	snapshot.SourceAssignments = map[string]reconcile.Assignment{}
 	for _, value := range c.informers.attached.GetStore().List() {
 		definition := value.(*skupperv2alpha1.AttachedConnector)
 		if definition.Namespace == namespace || definition.Spec.SiteNamespace == namespace {
@@ -637,7 +646,11 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	for source := range sources {
 		snapshot.Pods = append(snapshot.Pods, listNamespace[*corev1.Pod](c.informers.pods, source)...)
 		if value, exists, _ := c.informers.namespaces.GetStore().GetByKey(source); exists {
-			snapshot.SourceNamespaces[source] = value.(*corev1.Namespace).UID
+			sourceNamespace := value.(*corev1.Namespace)
+			if sourceNamespace.DeletionTimestamp == nil {
+				snapshot.SourceNamespaces[source] = sourceNamespace.UID
+				snapshot.SourceAssignments[source] = c.assignment(source)
+			}
 		}
 	}
 	if c.observations != nil {
@@ -2001,7 +2014,7 @@ func (c *NamespaceController) verifyControlledNamespace(ctx context.Context, nam
 	if err != nil {
 		return classifyWriteError(err)
 	}
-	if current.UID != expectedUID {
+	if current.UID != expectedUID || current.DeletionTimestamp != nil {
 		return reconcile.SupersededError{Reason: "source namespace UID changed"}
 	}
 	config, err := c.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, namespaceConfigName, metav1.GetOptions{})
@@ -2064,6 +2077,18 @@ func ownedByUID(owners []metav1.OwnerReference, uid types.UID) bool {
 		}
 	}
 	return false
+}
+
+func (c *NamespaceController) verifyPublication(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, sources map[string]types.UID) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	for source, uid := range sources {
+		if err := c.verifyControlledNamespace(ctx, source, uid); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *NamespaceController) verifySite(ctx context.Context, namespace reconcile.NamespaceIdentity, expected *skupperv2alpha1.Site) error {

@@ -346,6 +346,10 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 		if definition == nil {
 			continue
 		}
+		if !attachedSourceControlled(snapshot, definition.Namespace) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: binding.UID, Reason: "SourceNotControlled", Message: "AttachedConnector and AttachedConnectorBinding namespaces must be managed by the same controller"})
+			continue
+		}
 		connectorProtocol, protocolErr := protocol(definition.Spec.Type)
 		if protocolErr != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: definition.UID, Reason: "UnsupportedProtocol", Message: protocolErr.Error()})
@@ -359,9 +363,18 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 		if len(endpoints) == 0 {
 			continue
 		}
+		if desired.AttachedSources == nil {
+			desired.AttachedSources = map[string]types.UID{}
+		}
+		desired.AttachedSources[definition.Namespace] = snapshot.SourceNamespaces[definition.Namespace]
 		result = append(result, routercontrol.ServiceConnector{ID: resourceID(binding.UID, "attached-connector"), RoutingKey: binding.Spec.RoutingKey, Protocol: connectorProtocol, Endpoints: endpoints, TLS: clientTLSIntent(definition.Spec.TlsCredentials, definition.Spec.UseClientCert, false)})
 	}
 	return result
+}
+
+func attachedSourceControlled(snapshot Snapshot, namespace string) bool {
+	assignment := snapshot.SourceAssignments[namespace]
+	return snapshot.SourceNamespaces[namespace] != "" && assignment.Controlled && assignment.Controller == snapshot.Assignment.Controller
 }
 
 func connectorEndpoints(namespace, host, selector string, port int, includeNotReady bool, pods []*corev1.Pod) ([]routercontrol.Endpoint, error) {

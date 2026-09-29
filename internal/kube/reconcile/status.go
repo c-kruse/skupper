@@ -112,7 +112,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		}
 	}
 	for _, current := range snapshot.Attached {
-		if current.Spec.SiteNamespace != snapshot.Namespace.Name {
+		if current.Spec.SiteNamespace != snapshot.Namespace.Name || !attachedSourceControlled(snapshot, current.Namespace) {
 			continue
 		}
 		updated := current.DeepCopy()

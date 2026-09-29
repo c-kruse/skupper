@@ -200,6 +200,7 @@ func TestSelectedPodStatusesAreQuietAfterJSONRoundTrip(t *testing.T) {
 			snapshot.EvaluationTime = time.Unix(100, 0).UTC()
 			if test.attached {
 				snapshot.SourceNamespaces = map[string]types.UID{"source": "source-uid"}
+				snapshot.SourceAssignments = map[string]Assignment{"source": snapshot.Assignment}
 				snapshot.Bindings = []*skupperv2alpha1.AttachedConnectorBinding{{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "site", UID: "binding-uid"}, Spec: skupperv2alpha1.AttachedConnectorBindingSpec{ConnectorNamespace: "source", RoutingKey: "database"}}}
 				snapshot.Attached = []*skupperv2alpha1.AttachedConnector{{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "source", UID: "attached-uid"}, Spec: skupperv2alpha1.AttachedConnectorSpec{SiteNamespace: "site", Selector: "app=database", Port: 5432}}}
 				snapshot.Pods = []*corev1.Pod{readyPod("source", "database-1", "database-pod-uid", map[string]string{"app": "database"})}
