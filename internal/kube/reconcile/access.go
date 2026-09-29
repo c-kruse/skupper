@@ -174,7 +174,7 @@ func gatewayDomain(snapshot Snapshot) string {
 		return ""
 	}
 	owner := snapshot.AccessConfig.GatewayOwner
-	if owner == nil || snapshot.Gateway.GetAnnotations()[controlledAnnotation] != "true" || !ownedBy(snapshot.Gateway.GetOwnerReferences(), owner.UID) {
+	if owner == nil || snapshot.Gateway.GetAnnotations()[controlledAnnotation] != "true" || !controllerOwnedBy(snapshot.Gateway.GetOwnerReferences(), owner.UID) {
 		return ""
 	}
 	addresses, _, _ := unstructured.NestedSlice(snapshot.Gateway.Object, "status", "addresses")

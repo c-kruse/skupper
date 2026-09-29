@@ -13,6 +13,7 @@ import (
 	"time"
 
 	routev1 "github.com/openshift/api/route/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -92,9 +93,9 @@ type NamespaceControllerOptions struct {
 	DefaultAccessType      string
 	ClusterHost            string
 	SecuredAccess          *securedaccess.Config
-	// GatewayOwner is the controller Deployment (or another stable controller
-	// object) that exclusively owns the shared skupper Gateway. Its UID is
-	// revalidated before writes, preventing takeover of a foreign Gateway.
+	// GatewayOwner is the controller StatefulSet (or legacy Deployment) that
+	// exclusively owns the shared skupper Gateway. Its UID is revalidated before
+	// writes, preventing takeover of a foreign Gateway.
 	GatewayOwner *metav1.OwnerReference
 }
 
@@ -136,8 +137,8 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 			return nil, fmt.Errorf("secured access config: %w", err)
 		}
 	}
-	if options.SecuredAccess != nil && accessTypeEnabled(options.SecuredAccess.EnabledAccessTypes, "gateway") && (options.GatewayOwner == nil || options.GatewayOwner.APIVersion == "" || options.GatewayOwner.UID == "" || options.GatewayOwner.Name == "" || options.GatewayOwner.Kind == "" || options.GatewayOwner.Controller == nil || !*options.GatewayOwner.Controller) {
-		return nil, fmt.Errorf("gateway access requires GatewayOwner with apiVersion, kind, name, and UID")
+	if options.SecuredAccess != nil && accessTypeEnabled(options.SecuredAccess.EnabledAccessTypes, "gateway") && !supportedGatewayOwner(options.GatewayOwner) {
+		return nil, fmt.Errorf("gateway access requires an apps/v1 StatefulSet or Deployment GatewayOwner with name, UID, and controller=true")
 	}
 	coreFactory := informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(options.WatchNamespace))
 	skupperFactory := skupperinformers.NewSharedInformerFactoryWithOptions(clients.GetSkupperClient(), 5*time.Minute, skupperinformers.WithNamespace(options.WatchNamespace))
@@ -345,7 +346,7 @@ func (c *NamespaceController) registerInvalidations() error {
 		}
 	}
 	if c.informers.gateway != nil {
-		if _, err := c.informers.gateway.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: func(interface{}) { c.invalidateAllSiteNamespaces() }, UpdateFunc: func(interface{}, interface{}) { c.invalidateAllSiteNamespaces() }, DeleteFunc: func(interface{}) { c.invalidateAllSiteNamespaces() }}); err != nil {
+		if _, err := c.informers.gateway.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: func(interface{}) { c.invalidateAllAccessNamespaces() }, UpdateFunc: func(interface{}, interface{}) { c.invalidateAllAccessNamespaces() }, DeleteFunc: func(interface{}) { c.invalidateAllAccessNamespaces() }}); err != nil {
 			return err
 		}
 	}
@@ -440,6 +441,21 @@ func configurationAffectsAll(config *corev1.ConfigMap, controllerNamespace strin
 func (c *NamespaceController) invalidateAllSiteNamespaces() {
 	for _, value := range c.informers.sites.GetStore().List() {
 		c.queue.Add(value.(*skupperv2alpha1.Site).Namespace)
+	}
+}
+
+// invalidateAllAccessNamespaces is bounded by the informer caches and includes
+// namespaces that intentionally run standalone SecuredAccess without a Site.
+func (c *NamespaceController) invalidateAllAccessNamespaces() {
+	namespaces := map[string]struct{}{}
+	for _, value := range c.informers.sites.GetStore().List() {
+		namespaces[value.(*skupperv2alpha1.Site).Namespace] = struct{}{}
+	}
+	for _, value := range c.informers.securedAccesses.GetStore().List() {
+		namespaces[value.(*skupperv2alpha1.SecuredAccess).Namespace] = struct{}{}
+	}
+	for namespace := range namespaces {
+		c.queue.Add(namespace)
 	}
 }
 
@@ -626,6 +642,10 @@ func accessTypeEnabled(values []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func supportedGatewayOwner(owner *metav1.OwnerReference) bool {
+	return owner != nil && owner.APIVersion == appsv1.SchemeGroupVersion.String() && (owner.Kind == "StatefulSet" || owner.Kind == "Deployment") && owner.Name != "" && owner.UID != "" && owner.Controller != nil && *owner.Controller
 }
 
 func listNamespace[T runtime.Object](informer cache.SharedIndexInformer, namespace string) []T {
@@ -1087,15 +1107,17 @@ func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace
 			_, err = api.Create(ctx, value, metav1.CreateOptions{})
 		} else if err == nil {
 			owner := value.GetOwnerReferences()[0].UID
-			if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != value.GroupVersionKind() || !hasOwnerUID(current.GetOwnerReferences(), owner) {
+			currentOwner := metav1.GetControllerOf(current)
+			if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != value.GroupVersionKind() || currentOwner == nil || currentOwner.UID != owner {
 				failures = append(failures, fmt.Errorf("%s is foreign", value.GetName()))
 				continue
 			}
-			if reflect.DeepEqual(current.Object["spec"], value.Object["spec"]) {
+			mergedSpec := mergeDesiredJSON(current.Object["spec"], value.Object["spec"])
+			if reflect.DeepEqual(current.Object["spec"], mergedSpec) {
 				continue
 			}
 			updated := current.DeepCopy()
-			updated.Object["spec"] = runtime.DeepCopyJSONValue(value.Object["spec"])
+			updated.Object["spec"] = mergedSpec
 			updated.SetLabels(value.GetLabels())
 			updated.SetAnnotations(value.GetAnnotations())
 			updated.SetOwnerReferences(value.GetOwnerReferences())
@@ -1144,14 +1166,25 @@ func (c *NamespaceController) ensureGateway(ctx context.Context, namespace recon
 		return fmt.Errorf("owner is required")
 	}
 	verifyOwner := func() error {
-		if owner.Kind != "Deployment" {
-			return fmt.Errorf("Gateway owner kind %q is not supported", owner.Kind)
+		if !supportedGatewayOwner(owner) {
+			return fmt.Errorf("Gateway owner %s %q is not supported", owner.APIVersion, owner.Kind)
 		}
-		live, err := c.clients.GetKubeClient().AppsV1().Deployments(desired.GetNamespace()).Get(ctx, owner.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
+		var liveUID types.UID
+		var deleting bool
+		if owner.Kind == "StatefulSet" {
+			live, err := c.clients.GetKubeClient().AppsV1().StatefulSets(desired.GetNamespace()).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			liveUID, deleting = live.UID, live.DeletionTimestamp != nil
+		} else {
+			live, err := c.clients.GetKubeClient().AppsV1().Deployments(desired.GetNamespace()).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			liveUID, deleting = live.UID, live.DeletionTimestamp != nil
 		}
-		if live.UID != owner.UID || live.DeletionTimestamp != nil {
+		if liveUID != owner.UID || deleting {
 			return reconcile.SupersededError{Reason: "Gateway owner changed or is deleting"}
 		}
 		return nil
@@ -1174,14 +1207,16 @@ func (c *NamespaceController) ensureGateway(ctx context.Context, namespace recon
 	if err != nil {
 		return err
 	}
-	if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != desired.GroupVersionKind() || !hasOwnerUID(current.GetOwnerReferences(), owner.UID) {
+	currentOwner := metav1.GetControllerOf(current)
+	if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != desired.GroupVersionKind() || currentOwner == nil || currentOwner.UID != owner.UID {
 		return fmt.Errorf("Gateway is foreign and will not be claimed")
 	}
-	if reflect.DeepEqual(current.Object["spec"], desired.Object["spec"]) {
+	mergedSpec := mergeDesiredJSON(current.Object["spec"], desired.Object["spec"])
+	if reflect.DeepEqual(current.Object["spec"], mergedSpec) {
 		return nil
 	}
 	updated := current.DeepCopy()
-	updated.Object["spec"] = runtime.DeepCopyJSONValue(desired.Object["spec"])
+	updated.Object["spec"] = mergedSpec
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
 	}
@@ -1190,6 +1225,21 @@ func (c *NamespaceController) ensureGateway(ctx context.Context, namespace recon
 	}
 	_, err = api.Update(ctx, updated, metav1.UpdateOptions{})
 	return err
+}
+
+// mergeDesiredJSON applies controller-owned desired fields while retaining
+// unknown/defaulted fields returned by extension APIs.
+func mergeDesiredJSON(current, desired interface{}) interface{} {
+	currentMap, currentOK := current.(map[string]interface{})
+	desiredMap, desiredOK := desired.(map[string]interface{})
+	if !currentOK || !desiredOK {
+		return runtime.DeepCopyJSONValue(desired)
+	}
+	result := runtime.DeepCopyJSONValue(currentMap).(map[string]interface{})
+	for key, desiredValue := range desiredMap {
+		result[key] = mergeDesiredJSON(currentMap[key], desiredValue)
+	}
+	return result
 }
 
 func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*networkingv1.Ingress, expected []*skupperv2alpha1.SecuredAccess) error {

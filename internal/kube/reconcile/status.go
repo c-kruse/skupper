@@ -12,6 +12,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/skupperproject/skupper/internal/certs"
@@ -156,19 +157,6 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 			desired.Statuses.Links = append(desired.Statuses.Links, updated)
 		}
 	}
-	serviceByName := map[string]*corev1.Service{}
-	for _, service := range snapshot.Services {
-		serviceByName[service.Name] = service
-	}
-	routeByName := map[string]string{}
-	for _, route := range snapshot.Routes {
-		for _, ingress := range route.Status.Ingress {
-			if ingress.Host != "" {
-				routeByName[route.Name] = ingress.Host
-				break
-			}
-		}
-	}
 	secretByName := map[string]*corev1.Secret{}
 	for _, secret := range snapshot.Secrets {
 		secretByName[secret.Name] = secret
@@ -179,68 +167,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range secured {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		service := serviceByName[updated.Name]
-		configured := pendingState("Exposure Service has not been realized")
-		resolved := pendingState("No external endpoint has been resolved")
-		var endpoints []skupperv2alpha1.Endpoint
-		if service != nil && ownedBy(service.OwnerReferences, updated.UID) {
-			configured = skupperv2alpha1.ReadyCondition()
-			accessType := updated.Spec.AccessType
-			if accessType == "" {
-				accessType = snapshot.DefaultAccessType
-			}
-			switch accessType {
-			case "local":
-				for _, port := range updated.Spec.Ports {
-					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: updated.Name + "." + updated.Namespace, Port: strconv.Itoa(port.Port)})
-				}
-			case "loadbalancer":
-				for _, ingress := range service.Status.LoadBalancer.Ingress {
-					host := ingress.IP
-					if host == "" {
-						host = ingress.Hostname
-					}
-					if host == "" {
-						continue
-					}
-					for _, port := range service.Spec.Ports {
-						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: strconv.Itoa(int(port.Port))})
-					}
-				}
-			case "route":
-				for _, port := range updated.Spec.Ports {
-					if host := routeByName[updated.Name+"-"+port.Name]; host != "" {
-						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
-					}
-				}
-			case "ingress", "ingress-nginx":
-				endpoints = ingressEndpoints(snapshot.Ingresses, updated, snapshot.AccessConfig.IngressDomain)
-			case "nodeport":
-				if snapshot.ClusterHost == "" {
-					resolved = unknownState("Cluster host is not configured for nodeport access")
-					break
-				}
-				for _, port := range service.Spec.Ports {
-					if port.NodePort != 0 {
-						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: snapshot.ClusterHost, Port: strconv.Itoa(int(port.NodePort))})
-					}
-				}
-			default:
-				resolved = unknownState("Endpoint observation for this access type is unavailable")
-			}
-			if len(endpoints) > 0 {
-				resolved = skupperv2alpha1.ReadyCondition()
-			}
-		}
-		sort.Slice(endpoints, func(i, j int) bool {
-			if endpoints[i].Name != endpoints[j].Name {
-				return endpoints[i].Name < endpoints[j].Name
-			}
-			if endpoints[i].Host != endpoints[j].Host {
-				return endpoints[i].Host < endpoints[j].Host
-			}
-			return endpoints[i].Port < endpoints[j].Port
-		})
+		configured, resolved, endpoints := securedAccessStatus(snapshot, updated)
 		updated.Status.Endpoints = endpoints
 		securedEndpoints[updated.Name] = endpoints
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, updated.Generation, now)
@@ -347,7 +274,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 
 func ingressEndpoints(ingresses []*networkingv1.Ingress, access *skupperv2alpha1.SecuredAccess, configuredDomain string) []skupperv2alpha1.Endpoint {
 	for _, ingress := range ingresses {
-		if ingress.Name != access.Name || !ownedBy(ingress.OwnerReferences, access.UID) {
+		if ingress.Name != access.Name || !controllerOwnedBy(ingress.OwnerReferences, access.UID) {
 			continue
 		}
 		domain := strings.TrimSpace(configuredDomain)
@@ -372,6 +299,123 @@ func ingressEndpoints(ingresses []*networkingv1.Ingress, access *skupperv2alpha1
 		return result
 	}
 	return nil
+}
+
+// securedAccessStatus is the single, side-effect-free projection of observed
+// exposure resources into SecuredAccess conditions and endpoints.
+func securedAccessStatus(snapshot Snapshot, access *skupperv2alpha1.SecuredAccess) (skupperv2alpha1.ConditionState, skupperv2alpha1.ConditionState, []skupperv2alpha1.Endpoint) {
+	configured := pendingState("Exposure Service has not been realized")
+	resolved := pendingState("No external endpoint has been resolved")
+	var service *corev1.Service
+	for _, candidate := range snapshot.Services {
+		if candidate.Name == access.Name && candidate.Namespace == access.Namespace && controllerOwnedBy(candidate.OwnerReferences, access.UID) {
+			service = candidate
+			break
+		}
+	}
+	if service == nil {
+		return configured, resolved, nil
+	}
+	configured = skupperv2alpha1.ReadyCondition()
+	accessType := access.Spec.AccessType
+	if accessType == "" {
+		accessType = snapshot.DefaultAccessType
+	}
+	var endpoints []skupperv2alpha1.Endpoint
+	switch accessType {
+	case "local":
+		for _, port := range access.Spec.Ports {
+			endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: access.Name + "." + access.Namespace, Port: strconv.Itoa(port.Port)})
+		}
+	case "loadbalancer":
+		for _, ingress := range service.Status.LoadBalancer.Ingress {
+			host := ingress.IP
+			if host == "" {
+				host = ingress.Hostname
+			}
+			if host != "" {
+				for _, port := range service.Spec.Ports {
+					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: strconv.Itoa(int(port.Port))})
+				}
+			}
+		}
+	case "route":
+		for _, port := range access.Spec.Ports {
+			for _, route := range snapshot.Routes {
+				if route.Name != access.Name+"-"+port.Name || route.Namespace != access.Namespace || !controllerOwnedBy(route.OwnerReferences, access.UID) {
+					continue
+				}
+				for _, ingress := range route.Status.Ingress {
+					if ingress.Host != "" {
+						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: ingress.Host, Port: "443"})
+						break
+					}
+				}
+			}
+		}
+	case "ingress", "ingress-nginx":
+		endpoints = ingressEndpoints(snapshot.Ingresses, access, snapshot.AccessConfig.IngressDomain)
+	case "contour-http-proxy":
+		configured = pendingState("HTTPProxy has not been realized")
+		for _, port := range access.Spec.Ports {
+			for _, proxy := range snapshot.HTTPProxies {
+				if controlledDynamicAccess(proxy, access, access.Name+"-"+port.Name) {
+					host, _, _ := unstructured.NestedString(proxy.Object, "spec", "virtualhost", "fqdn")
+					if host != "" {
+						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
+					}
+				}
+			}
+		}
+	case "gateway":
+		configured = pendingState("TLSRoute has not been realized")
+		domain := gatewayDomain(snapshot)
+		if domain == "" {
+			resolved = unknownState("Gateway domain has not been resolved")
+			break
+		}
+		for _, port := range access.Spec.Ports {
+			for _, route := range snapshot.TLSRoutes {
+				if controlledDynamicAccess(route, access, access.Name+"-"+port.Name) {
+					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: route.GetName() + "." + access.Namespace + "." + domain, Port: strconv.Itoa(snapshot.AccessConfig.GatewayPort)})
+				}
+			}
+		}
+	case "nodeport":
+		if snapshot.ClusterHost == "" {
+			resolved = unknownState("Cluster host is not configured for nodeport access")
+		} else {
+			for _, port := range service.Spec.Ports {
+				if port.NodePort != 0 {
+					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: snapshot.ClusterHost, Port: strconv.Itoa(int(port.NodePort))})
+				}
+			}
+		}
+	default:
+		resolved = unknownState("Endpoint observation for this access type is unavailable")
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		if endpoints[i].Name != endpoints[j].Name {
+			return endpoints[i].Name < endpoints[j].Name
+		}
+		if endpoints[i].Host != endpoints[j].Host {
+			return endpoints[i].Host < endpoints[j].Host
+		}
+		return endpoints[i].Port < endpoints[j].Port
+	})
+	if len(endpoints) > 0 {
+		configured, resolved = skupperv2alpha1.ReadyCondition(), skupperv2alpha1.ReadyCondition()
+	}
+	return configured, resolved, endpoints
+}
+
+func controllerOwnedBy(owners []metav1.OwnerReference, uid types.UID) bool {
+	owner := metav1.GetControllerOfNoCopy(&metav1.ObjectMeta{OwnerReferences: owners})
+	return owner != nil && owner.UID == uid
+}
+
+func controlledDynamicAccess(value *unstructured.Unstructured, access *skupperv2alpha1.SecuredAccess, name string) bool {
+	return value.GetName() == name && value.GetNamespace() == access.Namespace && value.GetAnnotations()[controlledAnnotation] == "true" && controllerOwnedBy(value.GetOwnerReferences(), access.UID)
 }
 
 func certificateState(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret, evaluationTime time.Time) (skupperv2alpha1.ConditionState, string) {

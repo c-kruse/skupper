@@ -189,7 +189,7 @@ func TestRouteEndpointProjectsToStandaloneSecuredAccessStatus(t *testing.T) {
 	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
 	controller, block := true, true
 	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller, BlockOwnerDeletion: &block}}}}}
-	snapshot.Routes = []*routev1.Route{{ObjectMeta: metav1.ObjectMeta{Name: "external-inter-router", Namespace: "site"}, Status: routev1.RouteStatus{Ingress: []routev1.RouteIngress{{Host: "external.apps.example"}}}}}
+	snapshot.Routes = []*routev1.Route{{ObjectMeta: metav1.ObjectMeta{Name: "external-inter-router", Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller}}}, Status: routev1.RouteStatus{Ingress: []routev1.RouteIngress{{Host: "external.apps.example"}}}}}
 	desired := (NamespaceDeriver{}).Derive(snapshot)
 	if len(desired.Statuses.SecuredAccesses) != 1 {
 		t.Fatalf("SecuredAccess status was not projected: %#v", desired.Statuses.SecuredAccesses)
@@ -262,5 +262,30 @@ func TestDynamicAccessBackendsAndEnabledTypes(t *testing.T) {
 	host, _, _ := unstructured.NestedString(desired.AccessHTTPProxies[0].Object, "spec", "virtualhost", "fqdn")
 	if host != "external-tls.site.apps.example" || !ownedBy(desired.AccessHTTPProxies[0].GetOwnerReferences(), secured.UID) {
 		t.Fatalf("unexpected HTTPProxy: %#v", desired.AccessHTTPProxies[0])
+	}
+}
+
+func TestSiteGeneratedAccessProjectsHTTPProxyEndpoints(t *testing.T) {
+	snapshot := baseSnapshot()
+	site := snapshot.Sites[0]
+	site.Spec.LinkAccess = "contour-http-proxy"
+	routerAccess := defaultRouterAccess(site, nil)
+	routerAccess.UID = "router-access-uid"
+	snapshot.RouterAccesses = []*skupperv2alpha1.RouterAccess{routerAccess}
+	secured := desiredSecuredAccess("site", "skupper-router", "skupper-router", routerAccess, site.DefaultIssuer())
+	secured.UID = "secured-uid"
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	controller := true
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller}}}}}
+	snapshot.AccessConfig = AccessConfig{EnabledTypes: []string{"contour-http-proxy"}, HTTPProxyDomain: "apps.example"}
+	snapshot.HTTPProxies = securedAccessHTTPProxies(snapshot, secured)
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.Sites) != 1 || len(desired.Statuses.Sites[0].Status.Endpoints) != 2 {
+		t.Fatalf("HTTPProxy endpoints did not propagate to Site: %#v", desired.Statuses)
+	}
+	for _, endpoint := range desired.Statuses.Sites[0].Status.Endpoints {
+		if endpoint.Group != "skupper-router" || endpoint.Host == "" || endpoint.Port != "443" {
+			t.Fatalf("unexpected Site HTTPProxy endpoint: %#v", endpoint)
+		}
 	}
 }

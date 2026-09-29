@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -360,6 +361,109 @@ func TestAssignmentRevokedBetweenOwnerCheckAndMutationPreventsWrite(t *testing.T
 	}
 	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), desired.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("Service was written after assignment revocation: %v", err)
+	}
+}
+
+func TestGatewayStatefulSetOwnerIsSupportedAndLiveUIDIsFenced(t *testing.T) {
+	controllerFlag := true
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "controller-ns", UID: "namespace-uid"}}
+	statefulSet := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "skupper-controller", Namespace: namespace.Name, UID: "current-owner"}}
+	clients, err := fakeclient.NewFakeClient(namespace.Name, []runtime.Object{namespace, statefulSet}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: namespace.Name + "/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap(namespace.Name)}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := metav1.OwnerReference{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "StatefulSet", Name: statefulSet.Name, UID: "stale-owner", Controller: &controllerFlag}
+	if !supportedGatewayOwner(&owner) {
+		t.Fatal("apps/v1 StatefulSet owner was rejected by the option contract")
+	}
+	gateway := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": map[string]interface{}{"name": "skupper", "namespace": namespace.Name}}}
+	gateway.SetOwnerReferences([]metav1.OwnerReference{owner})
+	err = controller.ensureGateway(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, gateway)
+	var superseded reconcile.SupersededError
+	if !errors.As(err, &superseded) {
+		t.Fatalf("stale StatefulSet UID was not fenced: %v", err)
+	}
+}
+
+func TestDynamicAccessForeignObjectDoesNotBlockIndependentCreate(t *testing.T) {
+	controller, clients, namespace, _ := listenerServiceTestController(t)
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid"}}
+	if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), parent, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	makeProxy := func(name string) *unstructured.Unstructured {
+		value := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "projectcontour.io/v1", "kind": "HTTPProxy", "metadata": map[string]interface{}{}, "spec": map[string]interface{}{"virtualhost": map[string]interface{}{"fqdn": name + ".example"}}}}
+		value.SetName(name)
+		value.SetNamespace(namespace.Name)
+		value.SetLabels(map[string]string{"internal.skupper.io/secured-access": "true"})
+		value.SetAnnotations(map[string]string{"internal.skupper.io/controlled": "true"})
+		value.SetOwnerReferences([]metav1.OwnerReference{accessOwner(parent)})
+		return value
+	}
+	foreign := makeProxy("a-foreign")
+	foreign.SetOwnerReferences(nil)
+	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err := controller.ensureDynamicAccess(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{makeProxy("a-foreign"), makeProxy("z-valid")}, []*skupperv2alpha1.SecuredAccess{parent})
+	if err == nil {
+		t.Fatal("foreign HTTPProxy was not reported")
+	}
+	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), "z-valid", metav1.GetOptions{}); err != nil {
+		t.Fatalf("independent HTTPProxy was not created: %v", err)
+	}
+	actual, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), foreign.GetName(), metav1.GetOptions{})
+	if err != nil || len(actual.GetOwnerReferences()) != 0 {
+		t.Fatalf("foreign HTTPProxy was claimed: object=%#v err=%v", actual, err)
+	}
+}
+
+func TestDynamicAccessUpdatePreservesDefaultsIsQuietAndRetires(t *testing.T) {
+	controller, clients, namespace, _ := listenerServiceTestController(t)
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid"}}
+	if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), parent, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	desired := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "projectcontour.io/v1", "kind": "HTTPProxy", "metadata": map[string]interface{}{}, "spec": map[string]interface{}{"virtualhost": map[string]interface{}{"fqdn": "new.example"}}}}
+	desired.SetName("proxy")
+	desired.SetNamespace(namespace.Name)
+	desired.SetLabels(map[string]string{"internal.skupper.io/secured-access": "true"})
+	desired.SetAnnotations(map[string]string{"internal.skupper.io/controlled": "true"})
+	desired.SetOwnerReferences([]metav1.OwnerReference{accessOwner(parent)})
+	current := desired.DeepCopy()
+	current.Object["spec"] = map[string]interface{}{"virtualhost": map[string]interface{}{"fqdn": "old.example", "defaulted": true}}
+	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Create(context.Background(), current, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	updates := 0
+	clients.GetDynamicClient().(*dynamicfake.FakeDynamicClient).PrependReactor("update", "httpproxies", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updates++
+		return false, nil, nil
+	})
+	identity := reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaulted, _, _ := unstructured.NestedBool(updated.Object, "spec", "virtualhost", "defaulted")
+	if !defaulted || updates != 1 {
+		t.Fatalf("defaulted field was lost or update missing: object=%#v updates=%d", updated, updates)
+	}
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err != nil || updates != 1 {
+		t.Fatalf("stable dynamic object was not quiet: updates=%d err=%v", updates, err)
+	}
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, nil, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), desired.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale dynamic object was not retired: %v", err)
 	}
 }
 

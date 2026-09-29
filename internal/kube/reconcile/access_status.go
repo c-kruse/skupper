@@ -3,12 +3,10 @@ package reconcile
 import (
 	"reflect"
 	"sort"
-	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -21,103 +19,12 @@ func deriveStandaloneAccessStatuses(snapshot Snapshot, desired *DesiredNamespace
 		evaluationTime = time.Unix(1, 0).UTC()
 	}
 	now := metav1.NewTime(evaluationTime)
-	services := map[string]*corev1.Service{}
-	for _, service := range snapshot.Services {
-		services[service.Name] = service
-	}
-	routes := map[string]string{}
-	for _, route := range snapshot.Routes {
-		for _, ingress := range route.Status.Ingress {
-			if ingress.Host != "" {
-				routes[route.Name] = ingress.Host
-				break
-			}
-		}
-	}
 	accesses := append([]*skupperv2alpha1.SecuredAccess(nil), snapshot.SecuredAccesses...)
 	sort.Slice(accesses, func(i, j int) bool { return accesses[i].Name < accesses[j].Name })
 	for _, current := range accesses {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		configured := pendingState("Exposure Service has not been realized")
-		resolved := pendingState("No external endpoint has been resolved")
-		var endpoints []skupperv2alpha1.Endpoint
-		if service := services[updated.Name]; service != nil && ownedBy(service.OwnerReferences, updated.UID) {
-			configured = skupperv2alpha1.ReadyCondition()
-			accessType := updated.Spec.AccessType
-			if accessType == "" {
-				accessType = snapshot.DefaultAccessType
-			}
-			switch accessType {
-			case "local":
-				for _, port := range updated.Spec.Ports {
-					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: updated.Name + "." + updated.Namespace, Port: strconv.Itoa(port.Port)})
-				}
-			case "loadbalancer":
-				for _, ingress := range service.Status.LoadBalancer.Ingress {
-					host := ingress.IP
-					if host == "" {
-						host = ingress.Hostname
-					}
-					for _, port := range service.Spec.Ports {
-						if host != "" {
-							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: strconv.Itoa(int(port.Port))})
-						}
-					}
-				}
-			case "route":
-				for _, port := range updated.Spec.Ports {
-					if host := routes[updated.Name+"-"+port.Name]; host != "" {
-						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
-					}
-				}
-			case "ingress", "ingress-nginx":
-				endpoints = ingressEndpoints(snapshot.Ingresses, updated, snapshot.AccessConfig.IngressDomain)
-			case "contour-http-proxy":
-				configured = pendingState("HTTPProxy has not been realized")
-				for _, port := range updated.Spec.Ports {
-					for _, proxy := range snapshot.HTTPProxies {
-						if proxy.GetName() != updated.Name+"-"+port.Name || proxy.GetAnnotations()[controlledAnnotation] != "true" || !ownedBy(proxy.GetOwnerReferences(), updated.UID) {
-							continue
-						}
-						host, _, _ := unstructured.NestedString(proxy.Object, "spec", "virtualhost", "fqdn")
-						if host != "" {
-							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
-						}
-					}
-				}
-			case "gateway":
-				configured = pendingState("TLSRoute has not been realized")
-				domain := gatewayDomain(snapshot)
-				if domain == "" {
-					resolved = unknownState("Gateway domain has not been resolved")
-					break
-				}
-				for _, port := range updated.Spec.Ports {
-					for _, route := range snapshot.TLSRoutes {
-						if route.GetName() == updated.Name+"-"+port.Name && route.GetAnnotations()[controlledAnnotation] == "true" && ownedBy(route.GetOwnerReferences(), updated.UID) {
-							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: route.GetName() + "." + updated.Namespace + "." + domain, Port: strconv.Itoa(snapshot.AccessConfig.GatewayPort)})
-						}
-					}
-				}
-			case "nodeport":
-				if snapshot.ClusterHost == "" {
-					resolved = unknownState("Cluster host is not configured for nodeport access")
-				} else {
-					for _, port := range service.Spec.Ports {
-						if port.NodePort != 0 {
-							endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: snapshot.ClusterHost, Port: strconv.Itoa(int(port.NodePort))})
-						}
-					}
-				}
-			default:
-				resolved = unknownState("Endpoint observation for this access type is unavailable")
-			}
-			if len(endpoints) > 0 {
-				configured = skupperv2alpha1.ReadyCondition()
-				resolved = skupperv2alpha1.ReadyCondition()
-			}
-		}
+		configured, resolved, endpoints := securedAccessStatus(snapshot, updated)
 		updated.Status.Endpoints = endpoints
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, updated.Generation, now)
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RESOLVED, resolved, updated.Generation, now)
