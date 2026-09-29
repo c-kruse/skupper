@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/skupperproject/skupper/internal/routercontrol"
@@ -125,6 +126,9 @@ type DesiredNamespace struct {
 	Bootstrap        RouterControlBootstrap
 	Site             *skupperv2alpha1.Site
 	ListenerServices []*corev1.Service
+	ServiceAccount   *corev1.ServiceAccount
+	Role             *rbacv1.Role
+	RoleBinding      *rbacv1.RoleBinding
 	Statuses         StatusProjection
 }
 

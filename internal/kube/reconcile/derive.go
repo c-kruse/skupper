@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,6 +42,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	}
 	desired.SiteUID = active.UID
 	desired.Site = active.DeepCopy()
+	deriveRouterPrerequisites(active, &desired)
 	if snapshot.Allocations.SiteUID == active.UID {
 		desired.Allocations = copyAllocations(snapshot.Allocations)
 	} else {
@@ -53,6 +55,9 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	}
 	reserved := reservedPorts(snapshot.RouterAccesses)
 	listenerServices := map[string]*corev1.Service{}
+	servicePortOwners := map[string]types.UID{}
+	servicePortConflicts := map[string]bool{}
+	internalTrafficPolicy := corev1.ServiceInternalTrafficPolicyCluster
 	listeners := make([]routercontrol.ServiceListener, 0, len(snapshot.Listeners)+len(snapshot.MultiKeyListeners))
 	for _, listener := range sortedListeners(snapshot.Listeners) {
 		if listener.Spec.ExposePodsByName {
@@ -86,10 +91,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			service := listenerServices[listener.Spec.Host]
 			if service == nil {
 				controller, block := true, true
-				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Selector: map[string]string{"skupper.io/component": "router"}}}
+				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, SessionAffinity: corev1.ServiceAffinityNone, InternalTrafficPolicy: &internalTrafficPolicy, Selector: map[string]string{"skupper.io/component": "router"}}}
 				listenerServices[listener.Spec.Host] = service
 			}
-			service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: listener.Name, Port: int32(listener.Spec.Port), TargetPort: intstr.FromInt(port), Protocol: corev1.Protocol(strings.ToUpper(string(listenerProtocol)))})
+			addListenerServicePort(&desired, service, listener.UID, corev1.Protocol(strings.ToUpper(string(listenerProtocol))), listener.Spec.Port, port, servicePortOwners, servicePortConflicts)
 		}
 	}
 	for _, listener := range sortedMultiKeyListeners(snapshot.MultiKeyListeners) {
@@ -111,10 +116,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			service := listenerServices[listener.Spec.Host]
 			if service == nil {
 				controller, block := true, true
-				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Selector: map[string]string{"skupper.io/component": "router"}}}
+				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, SessionAffinity: corev1.ServiceAffinityNone, InternalTrafficPolicy: &internalTrafficPolicy, Selector: map[string]string{"skupper.io/component": "router"}}}
 				listenerServices[listener.Spec.Host] = service
 			}
-			service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: listener.Name, Port: int32(listener.Spec.Port), TargetPort: intstr.FromInt(port), Protocol: corev1.ProtocolTCP})
+			addListenerServicePort(&desired, service, listener.UID, corev1.ProtocolTCP, listener.Spec.Port, port, servicePortOwners, servicePortConflicts)
 		}
 	}
 	connectors := deriveConnectors(snapshot, &desired)
@@ -153,12 +158,50 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: settings, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: append([]routercontrol.RouterConnection(nil), connections...), RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, connections, access)}
 	}
 	for _, service := range listenerServices {
+		if len(service.Spec.Ports) == 0 {
+			continue
+		}
 		sort.Slice(service.Spec.Ports, func(i, j int) bool { return service.Spec.Ports[i].Name < service.Spec.Ports[j].Name })
 		desired.ListenerServices = append(desired.ListenerServices, service)
 	}
 	sort.Slice(desired.ListenerServices, func(i, j int) bool { return desired.ListenerServices[i].Name < desired.ListenerServices[j].Name })
 	deriveStatuses(snapshot, &desired)
 	return desired
+}
+
+func addListenerServicePort(desired *DesiredNamespace, service *corev1.Service, resource types.UID, protocol corev1.Protocol, servicePort, targetPort int, owners map[string]types.UID, conflicts map[string]bool) {
+	key := service.Name + "/" + string(protocol) + "/" + strconv.Itoa(servicePort)
+	if conflicts[key] {
+		desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: resource, Reason: "ServicePortConflict", Message: fmt.Sprintf("Service %s port %d/%s is used by multiple listeners", service.Name, servicePort, protocol)})
+		return
+	}
+	if owner, found := owners[key]; found {
+		desired.Diagnostics = append(desired.Diagnostics,
+			Diagnostic{Resource: owner, Reason: "ServicePortConflict", Message: fmt.Sprintf("Service %s port %d/%s is used by multiple listeners", service.Name, servicePort, protocol)},
+			Diagnostic{Resource: resource, Reason: "ServicePortConflict", Message: fmt.Sprintf("Service %s port %d/%s is used by multiple listeners", service.Name, servicePort, protocol)},
+		)
+		conflicts[key] = true
+		for index := range service.Spec.Ports {
+			if service.Spec.Ports[index].Port == int32(servicePort) && service.Spec.Ports[index].Protocol == protocol {
+				service.Spec.Ports = append(service.Spec.Ports[:index], service.Spec.Ports[index+1:]...)
+				break
+			}
+		}
+		return
+	}
+	owners[key] = resource
+	service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: strings.ToLower(string(protocol)) + "-" + strconv.Itoa(targetPort), Port: int32(servicePort), TargetPort: intstr.FromInt(targetPort), Protocol: protocol})
+}
+
+func deriveRouterPrerequisites(site *skupperv2alpha1.Site, desired *DesiredNamespace) {
+	if site.Spec.ServiceAccount != "" {
+		return
+	}
+	controller, block := true, true
+	owner := []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: site.Name, UID: site.UID, Controller: &controller, BlockOwnerDeletion: &block}}
+	desired.ServiceAccount = &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}}
+	desired.Role = &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}, Rules: []rbacv1.PolicyRule{{Verbs: []string{"get", "list", "watch"}, APIGroups: []string{""}, Resources: []string{"secrets"}}}}
+	desired.RoleBinding = &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "skupper-router", Namespace: site.Namespace}}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "skupper-router"}}
 }
 
 func activeSite(snapshot Snapshot, desired *DesiredNamespace) *skupperv2alpha1.Site {

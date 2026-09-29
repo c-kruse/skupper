@@ -283,11 +283,11 @@ spec:
           - serviceAccountToken:
               audience: {{ .RouterControl.TokenAudience }}
               expirationSeconds: 600
-              path: enrollment-token
+              path: {{ .RouterControl.TokenFile }}
       - configMap:
           items:
           - key: {{ .RouterControl.CABundleKey }}
-            path: {{ .RouterControl.CABundleKey }}
+            path: {{ .RouterControl.CABundleFile }}
           name: {{ .RouterControl.CABundleConfigMap }}
         name: router-control-ca
 {{- end }}

@@ -16,7 +16,7 @@ import (
 
 func TestRouterControlWorkloadHasAuthenticatedBootstrapAndControllerOwner(t *testing.T) {
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site-ns", UID: "site-uid"}}
-	control := RouterControlConfig{NamespaceUID: "namespace-uid", SiteUID: "site-uid", EnrollmentURL: "https://skupper-controller.controller.svc:8443", ControlAddress: "skupper-controller.controller.svc:8444", TLSServerName: "skupper-controller.controller.svc", TokenAudience: "skupper-controller-enrollment", TokenPath: "/var/run/secrets/skupper-controller/enrollment-token", CABundleConfigMap: "skupper-controller-ca", CABundleKey: "ca.crt", CABundlePath: "/etc/skupper-controller/ca.crt"}
+	control := RouterControlConfig{NamespaceUID: "namespace-uid", SiteUID: "site-uid", EnrollmentURL: "https://skupper-controller.controller.svc:8443", ControlAddress: "skupper-controller.controller.svc:8444", TLSServerName: "skupper-controller.controller.svc", TokenAudience: "skupper-controller-enrollment", TokenPath: "/var/run/secrets/skupper-controller/custom-token.jwt", CABundleConfigMap: "skupper-controller-ca", CABundleKey: "public-ca.pem", CABundlePath: "/etc/skupper-controller/custom-ca.pem"}
 	params := getCoreParams(site, "skupper-router", sizing.Sizing{}, false, &control)
 	tmpl, err := template.New("deployment").Parse(routerDeploymentTemplate)
 	if err != nil {
@@ -68,6 +68,12 @@ func TestRouterControlWorkloadHasAuthenticatedBootstrapAndControllerOwner(t *tes
 				t.Fatalf("%s mount %s uses subPath and will not refresh: %#v", container.Name, mount.Name, mount)
 			}
 		}
+	}
+	if got := deployment.Spec.Template.Spec.Volumes[2].Projected.Sources[0].ServiceAccountToken.Path; got != "custom-token.jwt" {
+		t.Fatalf("projected token basename %q does not match configured path", got)
+	}
+	if got := deployment.Spec.Template.Spec.Volumes[3].ConfigMap.Items[0].Path; got != "custom-ca.pem" {
+		t.Fatalf("projected CA basename %q does not match configured path", got)
 	}
 }
 

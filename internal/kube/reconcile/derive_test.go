@@ -89,6 +89,33 @@ func TestDerivationDoesNotAliasBootstrapTrust(t *testing.T) {
 	}
 }
 
+func TestDefaultRouterServiceAccountHasOnlySecretReadPermissions(t *testing.T) {
+	snapshot := baseSnapshot()
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.ServiceAccount == nil || desired.Role == nil || desired.RoleBinding == nil {
+		t.Fatal("default router ServiceAccount prerequisites were not derived")
+	}
+	if desired.ServiceAccount.Name != "skupper-router" || len(desired.Role.Rules) != 1 {
+		t.Fatalf("unexpected router prerequisites: %#v %#v", desired.ServiceAccount, desired.Role)
+	}
+	rule := desired.Role.Rules[0]
+	if diff := cmp.Diff([]string{"secrets"}, rule.Resources); diff != "" {
+		t.Fatalf("router Role has non-Secret resources (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"get", "list", "watch"}, rule.Verbs); diff != "" {
+		t.Fatalf("router Role has unexpected verbs (-want +got):\n%s", diff)
+	}
+	if !metav1.IsControlledBy(desired.ServiceAccount, snapshot.Sites[0]) || !metav1.IsControlledBy(desired.Role, snapshot.Sites[0]) || !metav1.IsControlledBy(desired.RoleBinding, snapshot.Sites[0]) {
+		t.Fatal("router prerequisites are not controller-owned by Site")
+	}
+
+	snapshot.Sites[0].Spec.ServiceAccount = "custom-router"
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if desired.ServiceAccount != nil || desired.Role != nil || desired.RoleBinding != nil {
+		t.Fatal("custom service account unexpectedly derived generated RBAC")
+	}
+}
+
 func TestConnectorSelectorsAreRestrictedToTheirSourceNamespace(t *testing.T) {
 	snapshot := baseSnapshot()
 	snapshot.Connectors = []*skupperv2alpha1.Connector{{ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: "site", UID: "local-uid"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "local", Selector: "app=same", Port: 8080}}}
@@ -131,6 +158,41 @@ func TestListenerUsesRouterBindHostAndServerTLS(t *testing.T) {
 		return
 	}
 	t.Fatal("no intent derived")
+}
+
+func TestListenerServicePortsHaveValidDistinctNamesAndConflictsStayOutOfService(t *testing.T) {
+	snapshot := baseSnapshot()
+	first := listener("a.listener.name.longer.than.fifteen", "listener-uid", "orders")
+	first.Spec.Host = "orders"
+	second := listener("same", "second-uid", "payments")
+	second.Spec.Host = "orders"
+	second.Spec.Port = 9090
+	snapshot.Listeners = []*skupperv2alpha1.Listener{first, second}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.ListenerServices) != 1 || len(desired.ListenerServices[0].Spec.Ports) != 2 {
+		t.Fatalf("expected one two-port Service, got %#v", desired.ListenerServices)
+	}
+	portNames := map[string]bool{}
+	for _, port := range desired.ListenerServices[0].Spec.Ports {
+		if len(port.Name) > 15 || port.Name == "" || portNames[port.Name] {
+			t.Fatalf("ServicePort names are not valid and distinct: %#v", desired.ListenerServices[0].Spec.Ports)
+		}
+		portNames[port.Name] = true
+	}
+
+	second.Spec.Port = first.Spec.Port
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.ListenerServices) != 0 {
+		t.Fatalf("conflicting port was rendered into an invalid Service: %#v", desired.ListenerServices)
+	}
+	if len(desired.Diagnostics) != 2 || desired.Diagnostics[0].Reason != "ServicePortConflict" || desired.Diagnostics[1].Reason != "ServicePortConflict" {
+		t.Fatalf("shared host/port conflict was not diagnosed for both resources: %#v", desired.Diagnostics)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.ServiceListeners) != 2 {
+			t.Fatalf("Service exposure conflict prevented valid intent publication: %#v", intent.ServiceListeners)
+		}
+	}
 }
 
 func TestWeightedMultiKeyListenerIsNotFlattened(t *testing.T) {

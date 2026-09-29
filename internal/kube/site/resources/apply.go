@@ -86,9 +86,11 @@ type RouterControlConfig struct {
 	TLSServerName     string
 	TokenAudience     string
 	TokenPath         string
+	TokenFile         string
 	CABundleConfigMap string
 	CABundleKey       string
 	CABundlePath      string
+	CABundleFile      string
 	TokenDirectory    string
 	CABundleDirectory string
 }
@@ -190,7 +192,9 @@ func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing,
 	if routerControl != nil {
 		copy := *routerControl
 		copy.TokenDirectory = filepath.Dir(copy.TokenPath)
+		copy.TokenFile = filepath.Base(copy.TokenPath)
 		copy.CABundleDirectory = filepath.Dir(copy.CABundlePath)
+		copy.CABundleFile = filepath.Base(copy.CABundlePath)
 		routerControl = &copy
 	}
 	return &CoreParams{

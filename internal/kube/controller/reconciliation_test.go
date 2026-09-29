@@ -8,12 +8,15 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
+	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
 	"github.com/skupperproject/skupper/internal/routercontrol"
@@ -155,4 +158,87 @@ func TestControlsNamespacePreservesAutomaticAndExplicitEmptyAssignment(t *testin
 	if !ControlsNamespace(shortName, namespace, namespace+"/skupper-controller", true) || !ControlsNamespace(qualified, namespace, controllerID, true) {
 		t.Fatal("valid short or qualified assignment was rejected")
 	}
+}
+
+func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t *testing.T) {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site-ns", UID: "site-uid"}}
+	clients, err := fakeclient.NewFakeClient("controller-ns", []runtime.Object{namespace}, []runtime.Object{site}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := (reconcile.NamespaceDeriver{}).Derive(reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controlled: true}, Sites: []*skupperv2alpha1.Site{site}, Allocations: reconcile.AllocationState{Ports: map[string]int{}}})
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err != nil {
+		t.Fatal(err)
+	}
+	role, err := clients.GetKubeClient().RbacV1().Roles(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metav1.IsControlledBy(role, site) || len(role.Rules) != 1 || len(role.Rules[0].Resources) != 1 || role.Rules[0].Resources[0] != "secrets" {
+		t.Fatalf("unexpected router Role: %#v", role)
+	}
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("generated ServiceAccount was not retired for custom SA: %v", err)
+	}
+
+	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: namespace.Name}}
+	if _, err := clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name).Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err == nil {
+		t.Fatal("controller claimed a foreign router ServiceAccount")
+	}
+	if _, err := clients.GetKubeClient().RbacV1().Roles(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Role was created after foreign ServiceAccount rejection: %v", err)
+	}
+}
+
+func TestDefaultedListenerServiceIsQuiet(t *testing.T) {
+	controller, clients, namespace, site := listenerServiceTestController(t)
+	policy := corev1.ServiceInternalTrafficPolicyCluster
+	familyPolicy := corev1.IPFamilyPolicySingleStack
+	controllerOwner, block := true, true
+	desired := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: site.Name, UID: site.UID, Controller: &controllerOwner, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, SessionAffinity: corev1.ServiceAffinityNone, InternalTrafficPolicy: &policy, Selector: map[string]string{"skupper.io/component": "router"}, Ports: []corev1.ServicePort{{Name: "orders", Port: 8080}}}}
+	current := desired.DeepCopy()
+	current.Spec.ClusterIP = "10.96.0.12"
+	current.Spec.ClusterIPs = []string{"10.96.0.12"}
+	current.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol}
+	current.Spec.IPFamilyPolicy = &familyPolicy
+	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Create(context.Background(), current, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	updates := 0
+	clients.GetKubeClient().(*kubefake.Clientset).PrependReactor("update", "services", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updates++
+		return false, nil, nil
+	})
+	if err := controller.EnsureListenerServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, site, []*corev1.Service{desired}); err != nil {
+		t.Fatal(err)
+	}
+	if updates != 0 {
+		t.Fatalf("API-defaulted Service caused %d unnecessary updates", updates)
+	}
+}
+
+func listenerServiceTestController(t *testing.T) (*NamespaceController, internalclient.Clients, *corev1.Namespace, *skupperv2alpha1.Site) {
+	t.Helper()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: namespace.Name, UID: "site-uid"}}
+	clients, err := fakeclient.NewFakeClient("controller-ns", []runtime.Object{namespace}, []runtime.Object{site}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller, clients, namespace, site
 }

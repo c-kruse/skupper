@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,9 +50,15 @@ type NamespaceController struct {
 	requireExplicitControl bool
 	bootstrap              reconcile.RouterControlBootstrap
 	disableSecurityContext bool
+	sizing                 SiteSizing
+	labelling              siteresources.Labelling
 	bootstrapMu            sync.RWMutex
 	leaderRunning          bool
 	synced                 atomic.Bool
+}
+
+type SiteSizing interface {
+	GetSizing(*skupperv2alpha1.Site) (sizing.Sizing, error)
 }
 
 type NamespaceControllerOptions struct {
@@ -61,6 +68,8 @@ type NamespaceControllerOptions struct {
 	Workers                int
 	Bootstrap              reconcile.RouterControlBootstrap
 	DisableSecurityContext bool
+	Sizing                 SiteSizing
+	Labelling              siteresources.Labelling
 }
 
 type namespaceInformers struct {
@@ -94,7 +103,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	coreFactory := informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(options.WatchNamespace))
 	skupperFactory := skupperinformers.NewSharedInformerFactoryWithOptions(clients.GetSkupperClient(), 5*time.Minute, skupperinformers.WithNamespace(options.WatchNamespace))
 	crs := skupperFactory.Skupper().V2alpha1()
-	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext}
+	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling}
 	c.informers = namespaceInformers{
 		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
@@ -529,6 +538,121 @@ func (c *NamespaceController) EnsureRouterControlCA(ctx context.Context, namespa
 	return classifyWriteError(err)
 }
 
+func (c *NamespaceController) EnsureRouterPrerequisites(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, serviceAccount *corev1.ServiceAccount, role *rbacv1.Role, roleBinding *rbacv1.RoleBinding) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	if serviceAccount == nil || role == nil || roleBinding == nil {
+		return c.retireRouterPrerequisites(ctx, namespace, site)
+	}
+	serviceAccounts := c.clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name)
+	currentServiceAccount, err := serviceAccounts.Get(ctx, serviceAccount.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		_, err = serviceAccounts.Create(ctx, serviceAccount, metav1.CreateOptions{})
+	} else if err == nil {
+		if !metav1.IsControlledBy(currentServiceAccount, site) {
+			return fmt.Errorf("router ServiceAccount %s/%s is not controlled by Site UID %s", namespace.Name, serviceAccount.Name, site.UID)
+		}
+		if !reflect.DeepEqual(currentServiceAccount.OwnerReferences, serviceAccount.OwnerReferences) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			currentServiceAccount.OwnerReferences = serviceAccount.OwnerReferences
+			_, err = serviceAccounts.Update(ctx, currentServiceAccount, metav1.UpdateOptions{})
+		}
+	}
+	if err != nil {
+		return classifyWriteError(err)
+	}
+
+	roles := c.clients.GetKubeClient().RbacV1().Roles(namespace.Name)
+	currentRole, err := roles.Get(ctx, role.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		_, err = roles.Create(ctx, role, metav1.CreateOptions{})
+	} else if err == nil {
+		if !metav1.IsControlledBy(currentRole, site) {
+			return fmt.Errorf("router Role %s/%s is not controlled by Site UID %s", namespace.Name, role.Name, site.UID)
+		}
+		if !reflect.DeepEqual(currentRole.OwnerReferences, role.OwnerReferences) || !reflect.DeepEqual(currentRole.Rules, role.Rules) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			role.ResourceVersion = currentRole.ResourceVersion
+			_, err = roles.Update(ctx, role, metav1.UpdateOptions{})
+		}
+	}
+	if err != nil {
+		return classifyWriteError(err)
+	}
+
+	bindings := c.clients.GetKubeClient().RbacV1().RoleBindings(namespace.Name)
+	currentBinding, err := bindings.Get(ctx, roleBinding.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		_, err = bindings.Create(ctx, roleBinding, metav1.CreateOptions{})
+	} else if err == nil {
+		if !metav1.IsControlledBy(currentBinding, site) {
+			return fmt.Errorf("router RoleBinding %s/%s is not controlled by Site UID %s", namespace.Name, roleBinding.Name, site.UID)
+		}
+		if !reflect.DeepEqual(currentBinding.OwnerReferences, roleBinding.OwnerReferences) || !reflect.DeepEqual(currentBinding.Subjects, roleBinding.Subjects) || !reflect.DeepEqual(currentBinding.RoleRef, roleBinding.RoleRef) {
+			if currentBinding.RoleRef != roleBinding.RoleRef {
+				return fmt.Errorf("router RoleBinding %s/%s has an incompatible roleRef", namespace.Name, roleBinding.Name)
+			}
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			roleBinding.ResourceVersion = currentBinding.ResourceVersion
+			_, err = bindings.Update(ctx, roleBinding, metav1.UpdateOptions{})
+		}
+	}
+	return classifyWriteError(err)
+}
+
+func (c *NamespaceController) retireRouterPrerequisites(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site) error {
+	bindings := c.clients.GetKubeClient().RbacV1().RoleBindings(namespace.Name)
+	if current, err := bindings.Get(ctx, "skupper-router", metav1.GetOptions{}); err == nil && metav1.IsControlledBy(current, site) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := bindings.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return classifyWriteError(err)
+	}
+	roles := c.clients.GetKubeClient().RbacV1().Roles(namespace.Name)
+	if current, err := roles.Get(ctx, "skupper-router", metav1.GetOptions{}); err == nil && metav1.IsControlledBy(current, site) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := roles.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return classifyWriteError(err)
+	}
+	serviceAccounts := c.clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name)
+	if current, err := serviceAccounts.Get(ctx, "skupper-router", metav1.GetOptions{}); err == nil && metav1.IsControlledBy(current, site) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := serviceAccounts.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return classifyWriteError(err)
+	}
+	return nil
+}
+
 func (c *NamespaceController) EnsureSite(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, groups []string, bootstrap reconcile.RouterControlBootstrap) error {
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
@@ -537,8 +661,16 @@ func (c *NamespaceController) EnsureSite(ctx context.Context, namespace reconcil
 		return err
 	}
 	config := siteresources.RouterControlConfig{NamespaceUID: string(namespace.UID), SiteUID: string(site.UID), EnrollmentURL: bootstrap.EnrollmentURL, ControlAddress: bootstrap.ControlAddress, TLSServerName: bootstrap.TLSServerName, TokenAudience: bootstrap.TokenAudience, TokenPath: bootstrap.TokenPath, CABundleConfigMap: bootstrap.CABundleConfigMap, CABundleKey: bootstrap.CABundleKey, CABundlePath: bootstrap.CABundlePath}
+	siteSizing := sizing.Sizing{}
+	if c.sizing != nil {
+		var err error
+		siteSizing, err = c.sizing.GetSizing(site)
+		if err != nil {
+			return err
+		}
+	}
 	for _, group := range groups {
-		if err := siteresources.ApplyWithRouterControl(c.clients, ctx, site, group, sizing.Sizing{}, nil, c.disableSecurityContext, config); err != nil {
+		if err := siteresources.ApplyWithRouterControl(c.clients, ctx, site, group, siteSizing, c.labelling, c.disableSecurityContext, config); err != nil {
 			return err
 		}
 	}
