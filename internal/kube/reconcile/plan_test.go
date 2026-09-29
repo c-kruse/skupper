@@ -22,6 +22,12 @@ func (publishPlanner) Plan(Snapshot, DesiredNamespace) Plan {
 	return Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return nil }}}}
 }
 
+type failingPublishPlanner struct{}
+
+func (failingPublishPlanner) Plan(Snapshot, DesiredNamespace) Plan {
+	return Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return errors.New("prerequisite failed") }}}}
+}
+
 type recordingStatusWriter struct{ calls int }
 
 func (w *recordingStatusWriter) ApplyStatuses(context.Context, NamespaceIdentity, StatusProjection) error {
@@ -36,6 +42,23 @@ func TestSiteLessStatusProjectionExecutes(t *testing.T) {
 	report := (Executor{}).Execute(context.Background(), plan)
 	if writer.calls != 1 || len(report.Results) != 1 || report.Results[0].State != Succeeded {
 		t.Fatalf("Site-less status write did not execute: calls=%d report=%#v", writer.calls, report)
+	}
+}
+
+func TestStatusProjectionExecutesDespitePublicationFailure(t *testing.T) {
+	writer := &recordingStatusWriter{}
+	desired := DesiredNamespace{Statuses: StatusProjection{Sites: []*skupperv2alpha1.Site{{ObjectMeta: metav1.ObjectMeta{Name: "site"}}}}}
+	plan := (StatusPlanner{Next: failingPublishPlanner{}, Writer: writer}).Plan(Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}}, desired)
+	report := (Executor{}).Execute(context.Background(), plan)
+	if writer.calls != 1 {
+		t.Fatalf("effect failure suppressed public status: report=%#v", report)
+	}
+	states := map[OperationID]ResultState{}
+	for _, result := range report.Results {
+		states[result.ID] = result.State
+	}
+	if states["apply-public-status"] != Succeeded || states["publish/skupper-router"] != Failed {
+		t.Fatalf("unexpected independent effect states: %#v", states)
 	}
 }
 

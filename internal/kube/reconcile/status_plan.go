@@ -18,14 +18,8 @@ func (p StatusPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	if statusProjectionEmpty(desired.Statuses) {
 		return plan
 	}
-	dependencies := []OperationID{}
-	for _, operation := range plan.Operations {
-		if operation.Kind == "PublishRouterIntent" {
-			dependencies = append(dependencies, operation.ID)
-		}
-	}
 	projection := copyStatusProjection(desired.Statuses)
-	plan.Operations = append(plan.Operations, Operation{ID: "apply-public-status", Kind: "ApplyPublicStatus", Dependencies: dependencies, Run: func(ctx context.Context) error {
+	plan.Operations = append(plan.Operations, Operation{ID: "apply-public-status", Kind: "ApplyPublicStatus", Run: func(ctx context.Context) error {
 		return p.Writer.ApplyStatuses(ctx, snapshot.Namespace, projection)
 	}})
 	return plan

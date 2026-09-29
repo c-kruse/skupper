@@ -182,6 +182,77 @@ func TestAllocationCollectionRejectsCorruptOrUnsafeRecords(t *testing.T) {
 	}
 }
 
+func TestAllocationOwnershipTransitionsOnlyAfterOldSiteUIDIsGone(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		oldSiteLive bool
+		wantError   bool
+	}{{name: "deleted old Site", oldSiteLive: false}, {name: "live old Site", oldSiteLive: true, wantError: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+			newSite := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: namespace.Name, UID: "new-site-uid", ResourceVersion: "2", Generation: 1}}
+			skupperObjects := []runtime.Object{newSite}
+			if test.oldSiteLive {
+				skupperObjects = append(skupperObjects, &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: namespace.Name, UID: "old-site-uid"}})
+			}
+			allocation := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: allocationConfigMapName, Namespace: namespace.Name, ResourceVersion: "17"}, Data: map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": "old-site-uid", "ports": `{"old/listener":12345}`}}
+			clients, err := fakeclient.NewFakeClient("controller-ns", []runtime.Object{namespace, allocation}, skupperObjects, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = controller.CommitAllocations(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, newSite, reconcile.AllocationState{SiteUID: newSite.UID, ResourceVersion: allocation.ResourceVersion, Ports: map[string]int{}})
+			if test.wantError {
+				if err == nil {
+					t.Fatal("allocation authority moved while the old Site UID was still live")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("replacement Site could not take stale allocation authority: %v", err)
+			}
+			updated, err := clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name).Get(context.Background(), allocationConfigMapName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Data["siteUID"] != string(newSite.UID) || updated.Data["ports"] != `{}` {
+				t.Fatalf("stale authority or ports were inherited: %#v", updated.Data)
+			}
+		})
+	}
+}
+
+func TestCompetingSiteStatusesApplyWithoutActiveOwner(t *testing.T) {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+	first := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "first", Namespace: namespace.Name, UID: "first-uid", ResourceVersion: "1", Generation: 1}}
+	second := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: namespace.Name, UID: "second-uid", ResourceVersion: "2", Generation: 1}}
+	clients, err := fakeclient.NewFakeClient("controller-ns", []runtime.Object{namespace}, []runtime.Object{first, second}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controller: "controller-ns/skupper-controller", Controlled: true}, Sites: []*skupperv2alpha1.Site{first, second}, Allocations: reconcile.AllocationState{Ports: map[string]int{}}}
+	desired := (reconcile.NamespaceDeriver{}).Derive(snapshot)
+	if desired.Statuses.Owner != nil || len(desired.Statuses.Sites) != 2 {
+		t.Fatalf("unexpected competing Site projection: %#v", desired.Statuses)
+	}
+	if err := controller.ApplyStatuses(context.Background(), snapshot.Namespace, desired.Statuses); err != nil {
+		t.Fatalf("competing Site status write required an active owner: %v", err)
+	}
+	for _, name := range []string{first.Name, second.Name} {
+		updated, err := clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace.Name).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil || updated.Status.StatusType != skupperv2alpha1.StatusError {
+			t.Fatalf("competing Site %s status was not applied: site=%#v err=%v", name, updated, err)
+		}
+	}
+}
+
 func TestControlsNamespacePreservesAutomaticAndExplicitEmptyAssignment(t *testing.T) {
 	const namespace = "site-ns"
 	const controllerID = "controller-ns/skupper-controller"

@@ -252,6 +252,47 @@ func TestWeightedMultiKeyListenerIsNotFlattened(t *testing.T) {
 	}
 }
 
+func TestEdgeHASiteIsRejectedAndGetsIdentityStatus(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Assignment.ControllerVersion = "test-version"
+	snapshot.Sites[0].Spec.Edge = true
+	snapshot.Sites[0].Spec.HA = true
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.Site != nil || desired.SiteUID != "" || desired.ServiceAccount != nil || len(desired.Intents) != 0 || len(desired.Statuses.Sites) != 1 {
+		t.Fatalf("invalid edge HA Site was realized or left statusless: %#v", desired)
+	}
+	status := desired.Statuses.Sites[0].Status
+	if status.StatusType != skupperv2alpha1.StatusError || status.DefaultIssuer != "skupper-site-ca" {
+		t.Fatalf("invalid Site did not receive an Error/default issuer status: %#v", status)
+	}
+	if status.Controller == nil || status.Controller.Name != "skupper-controller" || status.Controller.Namespace != "controllers" || status.Controller.Version != "test-version" {
+		t.Fatalf("controller identity was not projected: %#v", status.Controller)
+	}
+}
+
+func TestCompetingSitesEachGetConflictStatus(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Sites = append(snapshot.Sites, &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "site", UID: "other-site-uid"}})
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.Site != nil || len(desired.Intents) != 0 || len(desired.Statuses.Sites) != 2 {
+		t.Fatalf("competing Sites were selected or left statusless: %#v", desired)
+	}
+	for _, site := range desired.Statuses.Sites {
+		if site.Status.StatusType != skupperv2alpha1.StatusError || site.Status.Message != "multiple Sites exist and no established Site UID identifies the active owner" {
+			t.Fatalf("Site %s did not receive conflict status: %#v", site.Name, site.Status)
+		}
+	}
+}
+
+func TestReplacementSiteResetsPortsButRetainsAllocationCAS(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Allocations = AllocationState{SiteUID: "deleted-site-uid", ResourceVersion: "17", Ports: map[string]int{"old/listener": 12345}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.Allocations.SiteUID != snapshot.Sites[0].UID || desired.Allocations.ResourceVersion != "17" || len(desired.Allocations.Ports) != 0 {
+		t.Fatalf("replacement allocation did not reset authority under the observed CAS: %#v", desired.Allocations)
+	}
+}
+
 func baseSnapshot() Snapshot {
 	return Snapshot{
 		Namespace:   NamespaceIdentity{Name: "site", UID: "namespace-uid"},

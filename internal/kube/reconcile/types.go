@@ -26,8 +26,9 @@ type NamespaceIdentity struct {
 }
 
 type Assignment struct {
-	Controller string
-	Controlled bool
+	Controller        string
+	ControllerVersion string
+	Controlled        bool
 }
 
 // Completeness distinguishes absence proved by a complete query from absence of

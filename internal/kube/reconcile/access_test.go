@@ -245,6 +245,21 @@ func TestSecuredAccessDefaultsServicePortAndWaitsForIngressDomain(t *testing.T) 
 	}
 }
 
+func TestForeignSecuredAccessServiceIsAnErrorNotPending(t *testing.T) {
+	snapshot := baseSnapshot()
+	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443}}}}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: secured.Namespace, UID: "foreign-service"}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.SecuredAccesses) != 1 {
+		t.Fatalf("foreign Service left SecuredAccess statusless: %#v", desired.Statuses.SecuredAccesses)
+	}
+	status := desired.Statuses.SecuredAccesses[0].Status
+	if status.StatusType != skupperv2alpha1.StatusError || status.Message != "exposure Service site/external is not controlled by SecuredAccess UID secured-uid" {
+		t.Fatalf("foreign Service was not reported as an ownership error: %#v", status)
+	}
+}
+
 func TestDynamicAccessBackendsAndEnabledTypes(t *testing.T) {
 	snapshot := baseSnapshot()
 	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "contour-http-proxy", Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443}}}}

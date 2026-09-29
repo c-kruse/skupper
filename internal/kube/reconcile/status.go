@@ -237,6 +237,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 
 	site := desired.Site.DeepCopy()
 	beforeSite := site.Status.DeepCopy()
+	setSiteIdentityStatus(site, snapshot.Assignment)
 	site.ClearLegacyNetworkStatus()
 	site.Status.Endpoints = nil
 	for _, access := range snapshot.RouterAccesses {
@@ -269,6 +270,36 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	aggregateStatus(&site.Status.Status, site.Generation, now, required...)
 	if !reflect.DeepEqual(*beforeSite, site.Status) {
 		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
+	}
+}
+
+func deriveInactiveSiteStatuses(snapshot Snapshot, desired *DesiredNamespace) {
+	if len(snapshot.Sites) < 2 {
+		return
+	}
+	evaluationTime := snapshot.EvaluationTime
+	if evaluationTime.IsZero() {
+		evaluationTime = time.Unix(1, 0).UTC()
+	}
+	now := metav1.NewTime(evaluationTime)
+	for _, current := range snapshot.Sites {
+		updated := current.DeepCopy()
+		before := updated.Status.DeepCopy()
+		setSiteIdentityStatus(updated, snapshot.Assignment)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configuredState(desired.Diagnostics, updated.UID), updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, unknownState("No active Site was selected"), updated.Generation, now)
+		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING)
+		if !reflect.DeepEqual(*before, updated.Status) {
+			desired.Statuses.Sites = append(desired.Statuses.Sites, updated)
+		}
+	}
+}
+
+func setSiteIdentityStatus(site *skupperv2alpha1.Site, assignment Assignment) {
+	site.Status.DefaultIssuer = site.DefaultIssuer()
+	parts := strings.SplitN(assignment.Controller, "/", 2)
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		site.Status.Controller = &skupperv2alpha1.Controller{Name: parts[1], Namespace: parts[0], Version: assignment.ControllerVersion}
 	}
 }
 
@@ -308,10 +339,15 @@ func securedAccessStatus(snapshot Snapshot, access *skupperv2alpha1.SecuredAcces
 	resolved := pendingState("No external endpoint has been resolved")
 	var service *corev1.Service
 	for _, candidate := range snapshot.Services {
-		if candidate.Name == access.Name && candidate.Namespace == access.Namespace && controllerOwnedBy(candidate.OwnerReferences, access.UID) {
-			service = candidate
-			break
+		if candidate.Name != access.Name || candidate.Namespace != access.Namespace {
+			continue
 		}
+		if !controllerOwnedBy(candidate.OwnerReferences, access.UID) {
+			configured = skupperv2alpha1.ErrorCondition(fmt.Errorf("exposure Service %s/%s is not controlled by SecuredAccess UID %s", access.Namespace, access.Name, access.UID))
+			return configured, resolved, nil
+		}
+		service = candidate
+		break
 	}
 	if service == nil {
 		return configured, resolved, nil

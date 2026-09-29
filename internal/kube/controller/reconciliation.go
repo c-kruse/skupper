@@ -36,6 +36,7 @@ import (
 	siteresources "github.com/skupperproject/skupper/internal/kube/site/resources"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
+	"github.com/skupperproject/skupper/internal/version"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	skupperinformers "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions"
 )
@@ -666,11 +667,11 @@ func objectKey(value runtime.Object) string {
 func (c *NamespaceController) assignment(namespace string) reconcile.Assignment {
 	value, exists, _ := c.informers.configMaps.GetStore().GetByKey(namespace + "/" + namespaceConfigName)
 	if !exists {
-		return reconcile.Assignment{Controller: c.controllerID, Controlled: !c.requireExplicitControl}
+		return reconcile.Assignment{Controller: c.controllerID, ControllerVersion: version.Version, Controlled: !c.requireExplicitControl}
 	}
 	config := value.(*corev1.ConfigMap)
 	controller := assignedController(config, namespace, c.controllerID, c.requireExplicitControl)
-	return reconcile.Assignment{Controller: controller, Controlled: ControlsNamespace(config, namespace, c.controllerID, c.requireExplicitControl)}
+	return reconcile.Assignment{Controller: controller, ControllerVersion: version.Version, Controlled: ControlsNamespace(config, namespace, c.controllerID, c.requireExplicitControl)}
 }
 
 // ControlsNamespace is the shared cached/live authorization rule. A missing
@@ -767,14 +768,25 @@ func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace r
 	if err != nil {
 		return err
 	}
-	if current.Data["siteUID"] != "" && current.Data["siteUID"] != string(allocations.SiteUID) {
-		return reconcile.SupersededError{Reason: "allocation record belongs to another Site UID"}
-	}
 	if allocations.ResourceVersion == "" || current.ResourceVersion != allocations.ResourceVersion {
 		return reconcile.SupersededError{Reason: "allocation record changed after snapshot"}
 	}
 	if current.Data["namespaceUID"] != string(namespace.UID) {
 		return reconcile.SupersededError{Reason: "allocation record belongs to another namespace UID"}
+	}
+	if current.Data["version"] != "1" {
+		return reconcile.SupersededError{Reason: "allocation record has an unsupported version"}
+	}
+	if oldUID := types.UID(current.Data["siteUID"]); oldUID != "" && oldUID != allocations.SiteUID {
+		sites, err := c.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace.Name).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		for i := range sites.Items {
+			if sites.Items[i].UID == oldUID {
+				return reconcile.SupersededError{Reason: "allocation record belongs to another live Site UID"}
+			}
+		}
 	}
 	desiredData := map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": string(allocations.SiteUID), "ports": string(encoded)}
 	if reflect.DeepEqual(current.Data, desiredData) {

@@ -39,19 +39,31 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	if active == nil {
 		deriveAccessComposition(snapshot, &desired, nil, nil)
 		deriveStandaloneAccessStatuses(snapshot, &desired)
-		return desired
-	}
-	settings, validSettings := routerSettings(active, &desired)
-	if !validSettings {
+		deriveInactiveSiteStatuses(snapshot, &desired)
 		return desired
 	}
 	desired.SiteUID = active.UID
 	desired.Site = active.DeepCopy()
+	if active.Spec.Edge && active.Spec.HA {
+		desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: active.UID, Reason: "InvalidSite", Message: "Edge sites cannot have HA enabled"})
+		deriveStatuses(snapshot, &desired)
+		desired.SiteUID = ""
+		desired.Site = nil
+		return desired
+	}
+	settings, validSettings := routerSettings(active, &desired)
+	if !validSettings {
+		deriveStatuses(snapshot, &desired)
+		desired.SiteUID = ""
+		desired.Site = nil
+		return desired
+	}
 	deriveRouterPrerequisites(active, &desired)
 	if snapshot.Allocations.SiteUID == active.UID {
 		desired.Allocations = copyAllocations(snapshot.Allocations)
 	} else {
 		desired.Allocations.SiteUID = active.UID
+		desired.Allocations.ResourceVersion = snapshot.Allocations.ResourceVersion
 	}
 
 	groups := []string{"skupper-router"}
@@ -258,7 +270,9 @@ func activeSite(snapshot Snapshot, desired *DesiredNamespace) *skupperv2alpha1.S
 		}
 	}
 	if len(snapshot.Sites) != 1 {
-		desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Reason: "SiteConflict", Message: "multiple Sites exist and no established Site UID identifies the active owner"})
+		for _, site := range snapshot.Sites {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "SiteConflict", Message: "multiple Sites exist and no established Site UID identifies the active owner"})
+		}
 		return nil
 	}
 	return snapshot.Sites[0]
