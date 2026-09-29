@@ -10,6 +10,7 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -79,13 +80,27 @@ type Snapshot struct {
 	Pods              []*corev1.Pod
 	Services          []*corev1.Service
 	Routes            []*routev1.Route
+	Ingresses         []*networkingv1.Ingress
 	Secrets           []*corev1.Secret
 	Observations      map[RouterTarget][]Observation
 	Allocations       AllocationState
 	Bootstrap         RouterControlBootstrap
 	DefaultAccessType string
 	ClusterHost       string
+	AccessConfig      AccessConfig
 	SourceNamespaces  map[string]types.UID
+}
+
+type AccessConfig struct {
+	EnabledTypes     []string
+	DefaultType      string
+	ClusterHost      string
+	IngressDomain    string
+	IngressClassName string
+	HTTPProxyDomain  string
+	GatewayPort      int
+	GatewayClass     string
+	GatewayDomain    string
 }
 
 // RouterControlBootstrap contains only public endpoint/trust and projected-token
@@ -138,6 +153,7 @@ type DesiredNamespace struct {
 	Certificates     []*skupperv2alpha1.Certificate
 	AccessServices   []*corev1.Service
 	AccessRoutes     []*routev1.Route
+	AccessIngresses  []*networkingv1.Ingress
 	Statuses         StatusProjection
 }
 

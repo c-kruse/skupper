@@ -30,6 +30,45 @@ type testIntentPublisher struct {
 	real      *routercontrol.Publisher
 }
 
+type noOperationsPlanner struct{}
+
+func (noOperationsPlanner) Plan(reconcile.Snapshot, reconcile.DesiredNamespace) reconcile.Plan {
+	return reconcile.Plan{}
+}
+
+func TestStandaloneAccessPlanExecutesServiceSecretAndStatusWrites(t *testing.T) {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "controller-ns", UID: "namespace-uid"}}
+	issuer := &skupperv2alpha1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "issuer", Namespace: namespace.Name, UID: "issuer-uid", ResourceVersion: "1", Generation: 1}, Spec: skupperv2alpha1.CertificateSpec{Subject: "issuer", Signing: true}}
+	access := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "enrollment", Namespace: namespace.Name, UID: "access-uid", ResourceVersion: "1", Generation: 1}, Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "controller"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443, TargetPort: 8443, Protocol: "TCP"}}, Certificate: "enrollment", Issuer: "issuer"}}
+	clients, err := fakeclient.NewFakeClient(namespace.Name, []runtime.Object{namespace}, []runtime.Object{issuer, access}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: namespace.Name + "/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap(namespace.Name)}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controller: namespace.Name + "/skupper-controller", Controlled: true}, EvaluationTime: time.Now(), Certificates: []*skupperv2alpha1.Certificate{issuer}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{access}, DefaultAccessType: "local"}
+	desired := (reconcile.NamespaceDeriver{}).Derive(snapshot)
+	planner := reconcile.StatusPlanner{Next: reconcile.AccessPlanner{Next: noOperationsPlanner{}, Ensurer: controller}, Writer: controller}
+	report := (reconcile.Executor{}).Execute(context.Background(), planner.Plan(snapshot, desired))
+	if report.NeedsRetry() {
+		t.Fatalf("standalone plan failed: %#v", report)
+	}
+	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), access.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("standalone Service was not written: %v", err)
+	}
+	for _, name := range []string{"issuer", "enrollment"} {
+		if _, err := clients.GetKubeClient().CoreV1().Secrets(namespace.Name).Get(context.Background(), name, metav1.GetOptions{}); err != nil {
+			t.Fatalf("standalone Secret %s was not written: %v", name, err)
+		}
+	}
+	updated, err := clients.GetSkupperClient().SkupperV2alpha1().Certificates(namespace.Name).Get(context.Background(), issuer.Name, metav1.GetOptions{})
+	if err != nil || updated.Status.StatusType == "" {
+		t.Fatalf("standalone status was not written: certificate=%#v err=%v", updated, err)
+	}
+}
+
 func (p *testIntentPublisher) Publish(intent routercontrol.RouterIntent) (routercontrol.Digest, error) {
 	digest, err := p.real.Publish(intent)
 	if err != nil {
@@ -228,6 +267,78 @@ func TestDefaultedListenerServiceIsQuiet(t *testing.T) {
 	if updates != 0 {
 		t.Fatalf("API-defaulted Service caused %d unnecessary updates", updates)
 	}
+}
+
+func TestAccessServiceFailureDoesNotBlockLaterDesiredMutation(t *testing.T) {
+	controller, clients, namespace, _ := listenerServiceTestController(t)
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid", ResourceVersion: "7", Generation: 2}}
+	if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), parent, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	owner := accessOwner(parent)
+	foreign := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "a-foreign", Namespace: namespace.Name}}
+	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	desired := []*corev1.Service{
+		{ObjectMeta: metav1.ObjectMeta{Name: foreign.Name, Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "z-valid", Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}},
+	}
+	err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, []*skupperv2alpha1.SecuredAccess{parent})
+	if err == nil {
+		t.Fatal("foreign Service was not reported")
+	}
+	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), "z-valid", metav1.GetOptions{}); err != nil {
+		t.Fatalf("later valid Service was not created: %v", err)
+	}
+	actual, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), foreign.Name, metav1.GetOptions{})
+	if err != nil || len(actual.OwnerReferences) != 0 {
+		t.Fatalf("foreign Service was claimed: service=%#v err=%v", actual, err)
+	}
+}
+
+func TestStaleSecuredAccessSnapshotPreventsServiceMutations(t *testing.T) {
+	for _, operation := range []string{"create", "update", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			controller, clients, namespace, _ := listenerServiceTestController(t)
+			live := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid", ResourceVersion: "8", Generation: 3}}
+			if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), live, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := live.DeepCopy()
+			snapshot.ResourceVersion = "7"
+			owner := accessOwner(snapshot)
+			name := "service"
+			var desired []*corev1.Service
+			if operation != "create" {
+				current := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, UID: "service-uid", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}
+				if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Create(context.Background(), current, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if operation == "update" {
+					desired = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, Labels: map[string]string{"changed": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}}
+				}
+			} else {
+				desired = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}}
+			}
+			if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, []*skupperv2alpha1.SecuredAccess{snapshot}); err == nil {
+				t.Fatal("stale parent snapshot was not reported")
+			}
+			actual, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), name, metav1.GetOptions{})
+			if operation == "create" {
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("create occurred with stale parent: %v", err)
+				}
+			} else if err != nil || actual.Labels["changed"] != "" {
+				t.Fatalf("%s occurred with stale parent: service=%#v err=%v", operation, actual, err)
+			}
+		})
+	}
+}
+
+func accessOwner(parent *skupperv2alpha1.SecuredAccess) metav1.OwnerReference {
+	controlled := true
+	return metav1.OwnerReference{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: parent.Name, UID: parent.UID, Controller: &controlled}
 }
 
 func listenerServiceTestController(t *testing.T) (*NamespaceController, internalclient.Clients, *corev1.Namespace, *skupperv2alpha1.Site) {

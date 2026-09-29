@@ -7,6 +7,7 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -85,9 +86,54 @@ func deriveAccessComposition(snapshot Snapshot, desired *DesiredNamespace, site 
 				desired.AccessRoutes = append(desired.AccessRoutes, securedAccessRoute(access, port))
 			}
 		}
+		if accessType == "ingress" || accessType == "ingress-nginx" {
+			desired.AccessIngresses = append(desired.AccessIngresses, securedAccessIngress(snapshot, access, accessType == "ingress-nginx"))
+		}
 	}
 	deriveCertificates(snapshot, desired, site, allSecured)
 	return effective
+}
+
+func securedAccessIngress(snapshot Snapshot, access *skupperv2alpha1.SecuredAccess, nginx bool) *networkingv1.Ingress {
+	domain := strings.TrimSpace(snapshot.AccessConfig.IngressDomain)
+	if domain == "" {
+		for _, current := range snapshot.Ingresses {
+			if current.Name != access.Name || !ownedBy(current.OwnerReferences, access.UID) || len(current.Status.LoadBalancer.Ingress) == 0 {
+				continue
+			}
+			address := current.Status.LoadBalancer.Ingress[0]
+			if address.Hostname != "" {
+				domain = address.Hostname
+			} else if address.IP != "" {
+				domain = address.IP + ".nip.io"
+			}
+		}
+	}
+	controller, block := true, true
+	pathType := networkingv1.PathTypePrefix
+	value := &networkingv1.Ingress{TypeMeta: metav1.TypeMeta{APIVersion: networkingv1.SchemeGroupVersion.String(), Kind: "Ingress"}, ObjectMeta: metav1.ObjectMeta{Name: access.Name, Namespace: access.Namespace, Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{controlledAnnotation: "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: access.Name, UID: access.UID, Controller: &controller, BlockOwnerDeletion: &block}}}}
+	className := strings.TrimSpace(access.Spec.Settings["ingressClassName"])
+	if className == "" {
+		className = strings.TrimSpace(snapshot.AccessConfig.IngressClassName)
+	}
+	if className == "" && nginx {
+		className = "nginx"
+	}
+	if className != "" {
+		value.Spec.IngressClassName = &className
+	}
+	if nginx {
+		value.Annotations["nginx.ingress.kubernetes.io/ssl-passthrough"] = "true"
+		value.Annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "true"
+	}
+	for _, port := range access.Spec.Ports {
+		host := port.Name + "." + access.Namespace
+		if domain != "" {
+			host += "." + domain
+		}
+		value.Spec.Rules = append(value.Spec.Rules, networkingv1.IngressRule{Host: host, IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{Paths: []networkingv1.HTTPIngressPath{{Path: "/", PathType: &pathType, Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: access.Name, Port: networkingv1.ServiceBackendPort{Number: int32(port.Port)}}}}}}}})
+	}
+	return value
 }
 
 func securedAccessRoute(access *skupperv2alpha1.SecuredAccess, port skupperv2alpha1.SecuredAccessPort) *routev1.Route {

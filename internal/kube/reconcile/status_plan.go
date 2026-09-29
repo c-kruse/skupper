@@ -15,7 +15,7 @@ type StatusPlanner struct {
 
 func (p StatusPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	plan := p.Next.Plan(snapshot, desired)
-	if desired.Site == nil || statusProjectionEmpty(desired.Statuses) {
+	if statusProjectionEmpty(desired.Statuses) {
 		return plan
 	}
 	dependencies := []OperationID{}

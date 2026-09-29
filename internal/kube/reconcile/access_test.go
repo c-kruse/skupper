@@ -145,6 +145,42 @@ func TestHASecondaryConnectsToPrimaryThroughGeneratedInterRouterAccess(t *testin
 	}
 }
 
+func TestSiteProjectsOnlyOwnedGeneratedRouterAccessEndpointsAndClearsRemoved(t *testing.T) {
+	snapshot := baseSnapshot()
+	site := snapshot.Sites[0]
+	site.Spec.LinkAccess = "local"
+	site.Status.Endpoints = []skupperv2alpha1.Endpoint{{Name: "stale", Host: "removed"}}
+	controller := true
+	routerAccess := defaultRouterAccess(site, nil)
+	routerAccess.UID = "router-access-uid"
+	snapshot.RouterAccesses = []*skupperv2alpha1.RouterAccess{routerAccess}
+	secured := desiredSecuredAccess("site", "skupper-router", "skupper-router", routerAccess, site.DefaultIssuer())
+	secured.UID = "secured-uid"
+	foreign := secured.DeepCopy()
+	foreign.Name, foreign.UID = "foreign", "foreign-uid"
+	foreign.OwnerReferences[0].UID = "replaced-router-access"
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{foreign, secured}
+	snapshot.Services = []*corev1.Service{
+		{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller}}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: foreign.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: foreign.UID, Controller: &controller}}}},
+	}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.Sites) != 1 {
+		t.Fatalf("Site endpoint status was not projected: %#v", desired.Statuses.Sites)
+	}
+	want := []skupperv2alpha1.Endpoint{{Name: "edge", Host: "skupper-router.site", Port: "45671", Group: "skupper-router"}, {Name: "inter-router", Host: "skupper-router.site", Port: "55671", Group: "skupper-router"}}
+	if diff := cmp.Diff(want, desired.Statuses.Sites[0].Status.Endpoints); diff != "" {
+		t.Fatalf("Site endpoint mismatch (-want +got):\n%s", diff)
+	}
+
+	snapshot.SecuredAccesses = nil
+	snapshot.Services = nil
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.Sites) != 1 || len(desired.Statuses.Sites[0].Status.Endpoints) != 0 {
+		t.Fatalf("removed endpoints were retained: %#v", desired.Statuses.Sites)
+	}
+}
+
 func TestRouteEndpointProjectsToStandaloneSecuredAccessStatus(t *testing.T) {
 	snapshot := baseSnapshot()
 	snapshot.DefaultAccessType = "route"
@@ -163,5 +199,28 @@ func TestRouteEndpointProjectsToStandaloneSecuredAccessStatus(t *testing.T) {
 	}
 	if !desired.Statuses.SecuredAccesses[0].IsReady() {
 		t.Fatalf("resolved standalone SecuredAccess is not Ready: %#v", status.Conditions)
+	}
+}
+
+func TestIngressNginxUsesConfiguredDomainClassAndProjectsEndpoint(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.DefaultAccessType = "ingress-nginx"
+	snapshot.AccessConfig = AccessConfig{IngressDomain: "apps.example", IngressClassName: "public-nginx"}
+	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{Selector: map[string]string{"app": "router"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "edge", Port: 45671, TargetPort: 45671, Protocol: "TCP"}}}}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.AccessIngresses) != 1 {
+		t.Fatalf("Ingress was not derived: %#v", desired.AccessIngresses)
+	}
+	ingress := desired.AccessIngresses[0]
+	if ingress.Spec.IngressClassName == nil || *ingress.Spec.IngressClassName != "public-nginx" || ingress.Spec.Rules[0].Host != "edge.site.apps.example" || ingress.Annotations["nginx.ingress.kubernetes.io/ssl-passthrough"] != "true" {
+		t.Fatalf("unexpected nginx Ingress: %#v", ingress)
+	}
+	controller := true
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller}}}}}
+	snapshot.Ingresses = desired.AccessIngresses
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.SecuredAccesses) != 1 || !cmp.Equal(desired.Statuses.SecuredAccesses[0].Status.Endpoints, []skupperv2alpha1.Endpoint{{Name: "edge", Host: "edge.site.apps.example", Port: "443"}}) {
+		t.Fatalf("Ingress endpoint was not projected: %#v", desired.Statuses.SecuredAccesses)
 	}
 }

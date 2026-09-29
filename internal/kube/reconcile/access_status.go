@@ -70,6 +70,8 @@ func deriveStandaloneAccessStatuses(snapshot Snapshot, desired *DesiredNamespace
 						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
 					}
 				}
+			case "ingress", "ingress-nginx":
+				endpoints = ingressEndpoints(snapshot.Ingresses, updated)
 			case "nodeport":
 				if snapshot.ClusterHost == "" {
 					resolved = unknownState("Cluster host is not configured for nodeport access")

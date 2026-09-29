@@ -22,6 +22,23 @@ func (publishPlanner) Plan(Snapshot, DesiredNamespace) Plan {
 	return Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return nil }}}}
 }
 
+type recordingStatusWriter struct{ calls int }
+
+func (w *recordingStatusWriter) ApplyStatuses(context.Context, NamespaceIdentity, StatusProjection) error {
+	w.calls++
+	return nil
+}
+
+func TestSiteLessStatusProjectionExecutes(t *testing.T) {
+	writer := &recordingStatusWriter{}
+	desired := DesiredNamespace{Statuses: StatusProjection{Certificates: []*skupperv2alpha1.Certificate{{ObjectMeta: metav1.ObjectMeta{Name: "standalone"}}}}}
+	plan := (StatusPlanner{Next: emptyPlanner{}, Writer: writer}).Plan(Snapshot{Namespace: NamespaceIdentity{Name: "controller-ns", UID: "namespace-uid"}}, desired)
+	report := (Executor{}).Execute(context.Background(), plan)
+	if writer.calls != 1 || len(report.Results) != 1 || report.Results[0].State != Succeeded {
+		t.Fatalf("Site-less status write did not execute: calls=%d report=%#v", writer.calls, report)
+	}
+}
+
 func TestExecutorRetainsIndependentSuccessAndBlocksDependents(t *testing.T) {
 	var ran []string
 	plan := Plan{Operations: []Operation{

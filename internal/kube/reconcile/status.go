@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -207,6 +209,8 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
 					}
 				}
+			case "ingress", "ingress-nginx":
+				endpoints = ingressEndpoints(snapshot.Ingresses, updated)
 			case "nodeport":
 				if snapshot.ClusterHost == "" {
 					resolved = unknownState("Cluster host is not configured for nodeport access")
@@ -255,6 +259,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 			desired.Statuses.Certificates = append(desired.Statuses.Certificates, updated)
 		}
 	}
+	routerEndpoints := map[types.UID][]skupperv2alpha1.Endpoint{}
 	for _, current := range sortedRouterAccess(snapshot.RouterAccesses) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
@@ -265,7 +270,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, combineStates(configuredState(desired.Diagnostics, updated.UID), resourcesApplied(evidence, ids)), updated.Generation, now)
 		var endpoints []skupperv2alpha1.Endpoint
 		for _, access := range secured {
-			if access.Annotations["internal.skupper.io/routeraccess"] != updated.Name {
+			if access.Annotations["internal.skupper.io/routeraccess"] != updated.Name || !ownedBy(access.OwnerReferences, updated.UID) {
 				continue
 			}
 			group := access.Spec.Selector["skupper.io/group"]
@@ -274,7 +279,20 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 				endpoints = append(endpoints, endpoint)
 			}
 		}
+		sort.Slice(endpoints, func(i, j int) bool {
+			if endpoints[i].Group != endpoints[j].Group {
+				return endpoints[i].Group < endpoints[j].Group
+			}
+			if endpoints[i].Name != endpoints[j].Name {
+				return endpoints[i].Name < endpoints[j].Name
+			}
+			if endpoints[i].Host != endpoints[j].Host {
+				return endpoints[i].Host < endpoints[j].Host
+			}
+			return endpoints[i].Port < endpoints[j].Port
+		})
 		updated.Status.Endpoints = endpoints
+		routerEndpoints[updated.UID] = append([]skupperv2alpha1.Endpoint(nil), endpoints...)
 		resolved := pendingState("No external endpoint has been resolved")
 		if len(endpoints) > 0 {
 			resolved = skupperv2alpha1.ReadyCondition()
@@ -289,6 +307,13 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	site := desired.Site.DeepCopy()
 	beforeSite := site.Status.DeepCopy()
 	site.ClearLegacyNetworkStatus()
+	site.Status.Endpoints = nil
+	for _, access := range snapshot.RouterAccesses {
+		if access.Name == "skupper-router" && access.Annotations[controlledAnnotation] == "true" && ownedBy(access.OwnerReferences, site.UID) {
+			site.Status.Endpoints = append([]skupperv2alpha1.Endpoint(nil), routerEndpoints[access.UID]...)
+			break
+		}
+	}
 	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configuredState(desired.Diagnostics, site.UID), site.Generation, now)
 	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, allTargetsApplied(evidence), site.Generation, now)
 	required := []string{skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING}
@@ -314,6 +339,24 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	if !reflect.DeepEqual(*beforeSite, site.Status) {
 		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
 	}
+}
+
+func ingressEndpoints(ingresses []*networkingv1.Ingress, access *skupperv2alpha1.SecuredAccess) []skupperv2alpha1.Endpoint {
+	for _, ingress := range ingresses {
+		if ingress.Name != access.Name || !ownedBy(ingress.OwnerReferences, access.UID) {
+			continue
+		}
+		result := make([]skupperv2alpha1.Endpoint, 0, len(ingress.Spec.Rules))
+		for _, rule := range ingress.Spec.Rules {
+			if rule.Host == "" {
+				continue
+			}
+			name := strings.SplitN(rule.Host, ".", 2)[0]
+			result = append(result, skupperv2alpha1.Endpoint{Name: name, Host: rule.Host, Port: "443"})
+		}
+		return result
+	}
+	return nil
 }
 
 func certificateState(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret, evaluationTime time.Time) (skupperv2alpha1.ConditionState, string) {
