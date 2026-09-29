@@ -2,6 +2,7 @@ package adaptor
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -18,6 +19,12 @@ type rotatingResolver struct{ revision string }
 
 func (r *rotatingResolver) Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error) {
 	return CredentialRealization{RealizationID: r.revision, Profile: qdr.SslProfile{CaCertFile: "/ca"}}, nil
+}
+
+type failingResolver struct{ err error }
+
+func (r failingResolver) Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error) {
+	return CredentialRealization{}, r.err
 }
 
 func credentialIntent() routercontrol.RouterIntent {
@@ -47,6 +54,22 @@ func TestEngineReportsCredentialRotationWithoutIntentChange(t *testing.T) {
 	}
 	if len(second.Credentials) != 1 || second.Credentials[0].BindingID != "traffic" || second.Credentials[0].Revision != "revision-2" {
 		t.Fatalf("credential revision missing from report: %#v", second.Credentials)
+	}
+}
+
+func TestEngineReportsMissingCredentialOnAffectedResourceWithoutSecretDetails(t *testing.T) {
+	intent := credentialIntent()
+	digest, err := DigestIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := Engine{Router: &fakeLocalRouter{current: basicConfig()}, Credentials: failingResolver{err: errors.New(`secret "sensitive-name" not found`)}, RouterIncarnation: "router-1"}
+	report := engine.Realize(context.Background(), "session", 1, intent, digest)
+	if report.State != routercontrol.ApplicationFailed || len(report.Resources) != 1 || report.Resources[0].ResourceID != "connector" || report.Resources[0].Reason != "required traffic credential is unavailable" {
+		t.Fatalf("missing credential was not reported on the affected resource: %#v", report)
+	}
+	if strings.Contains(report.Resources[0].Reason, "sensitive-name") {
+		t.Fatalf("credential diagnostic disclosed the Secret reference: %q", report.Resources[0].Reason)
 	}
 }
 

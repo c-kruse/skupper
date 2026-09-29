@@ -146,13 +146,21 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		name := ownedName("tcp-listener", resource.ID)
 		endpoint := qdr.TcpEndpoint{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), SiteId: intent.Target.SiteUID, SslProfile: profile, Observer: resource.Observer, AuthenticatePeer: resource.TLS.Mode == routercontrol.TLSModeMutual}
 		result.ResourceNames[resource.ID] = []string{name}
-		if len(resource.RoutingKeys) == 1 {
+		if len(resource.RoutingKeys) == 1 && resource.RoutingStrategy == "" {
 			endpoint.Address = resource.RoutingKeys[0]
 		} else {
-			endpoint.MultiAddressStrategy = "priority"
+			strategy := resource.RoutingStrategy
+			if strategy == "" {
+				strategy = routercontrol.RoutingStrategyPriority
+			}
+			endpoint.MultiAddressStrategy = string(strategy)
 			for index, key := range resource.RoutingKeys {
 				addressName := ownedName("listener-address", routercontrol.ResourceID(string(resource.ID)+"\x00"+key))
-				result.Config.Bridges.ListenerAddresses[addressName] = qdr.ListenerAddress{Name: addressName, Address: key, Value: len(resource.RoutingKeys) - 1 - index, Listener: name}
+				value := len(resource.RoutingKeys) - 1 - index
+				if strategy == routercontrol.RoutingStrategyWeighted {
+					value = int(resource.RoutingKeyWeights[key])
+				}
+				result.Config.Bridges.ListenerAddresses[addressName] = qdr.ListenerAddress{Name: addressName, Address: key, Value: value, Listener: name}
 				result.ResourceNames[resource.ID] = append(result.ResourceNames[resource.ID], addressName)
 			}
 		}

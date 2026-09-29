@@ -794,3 +794,14 @@ func TestTcpEndpointEquivalentHttpModes(t *testing.T) {
 		t.Errorf("expected priority vs weighted strategy to be not equivalent")
 	}
 }
+
+func TestListenerAddressWeightChangeIsDeleteBeforeAdd(t *testing.T) {
+	before := NewBridgeConfig()
+	after := NewBridgeConfig()
+	before.ListenerAddresses["weighted/foo"] = ListenerAddress{Name: "weighted/foo", Address: "foo", Value: 1, Listener: "weighted"}
+	after.ListenerAddresses["weighted/foo"] = ListenerAddress{Name: "weighted/foo", Address: "foo", Value: 4, Listener: "weighted"}
+	difference := before.Difference(&after)
+	if len(difference.ListenerAddresses.Deleted) != 1 || difference.ListenerAddresses.Deleted[0] != "weighted/foo" || len(difference.ListenerAddresses.Added) != 1 || difference.ListenerAddresses.Added[0].Value != 4 {
+		t.Fatalf("weight update was not represented as a safe replacement: %#v", difference.ListenerAddresses)
+	}
+}

@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,38 @@ func TestMultiKeyReachableKeysArePopulatedAndCleared(t *testing.T) {
 	desired = (NamespaceDeriver{}).Derive(snapshot)
 	if len(desired.Statuses.MultiKey) != 1 || len(desired.Statuses.MultiKey[0].Status.Strategy.Priority.RoutingKeysReachable) != 0 {
 		t.Fatalf("stale MultiKey reachable keys were not cleared: %#v", desired.Statuses.MultiKey)
+	}
+}
+
+func TestWeightedMultiKeyReachableKeysRetainConfiguredWeights(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.EvaluationTime = time.Unix(100, 0).UTC()
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "weighted", Namespace: "site", UID: "weighted-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Host: "weighted", Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"foo": 1, "xfoo": 3}}}}}}
+	snapshot.Pods = []*corev1.Pod{routerPod("pod", "skupper-router")}
+	initial := (NamespaceDeriver{}).Derive(snapshot)
+	for target, intent := range initial.Intents {
+		_, digest, _ := routercontrol.CanonicalIntent(intent)
+		snapshot.Observations = map[RouterTarget][]Observation{target: {appliedObservation(target, digest, "pod", "weighted-uid/listener", routercontrol.OperationalUp, routercontrol.KnowledgeComplete, []routercontrol.LocalAddressObservation{{RoutingKey: "xfoo", Reachable: true}})}}
+	}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.MultiKey) != 1 || desired.Statuses.MultiKey[0].Status.Strategy == nil || desired.Statuses.MultiKey[0].Status.Strategy.Weighted == nil {
+		t.Fatalf("weighted status was not projected: %#v", desired.Statuses.MultiKey)
+	}
+	if got := desired.Statuses.MultiKey[0].Status.Strategy.Weighted.RoutingKeysReachable; len(got) != 1 || got["xfoo"] != 3 {
+		t.Fatalf("reachable weighted key lost its configured weight: %#v", got)
+	}
+}
+
+func TestResourceCredentialFailureUsesSafeSpecificDiagnostic(t *testing.T) {
+	target := RouterTarget{NamespaceUID: "namespace-uid", SiteUID: "site-uid", RouterGroup: "skupper-router"}
+	digest := routercontrol.Digest(strings.Repeat("a", 64))
+	observation := appliedObservation(target, digest, "pod", "connector-uid/connector", routercontrol.OperationalUnknown, routercontrol.KnowledgeUnknown, nil)
+	observation.Application.State = routercontrol.ApplicationFailed
+	observation.Application.Resources[0].State = routercontrol.ApplicationFailed
+	observation.Application.Resources[0].Reason = "required traffic credential is unavailable"
+	state := resourceApplied(map[RouterTarget]targetEvidence{target: {digest: digest, currentPods: 1, observations: []Observation{observation}}}, "connector-uid/connector")
+	if state.Reason != skupperv2alpha1.StatusError || state.Message != "required traffic credential is unavailable" {
+		t.Fatalf("safe resource diagnostic was hidden by generic application failure: %#v", state)
 	}
 }
 

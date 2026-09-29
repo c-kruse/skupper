@@ -39,6 +39,9 @@ func TestCanonicalIntentDeterministicAndPreservesPriority(t *testing.T) {
 	if !strings.Contains(string(canonical), `"routingKeys":["priority-b","priority-a"]`) {
 		t.Fatalf("routing key priority not preserved: %s", canonical)
 	}
+	if strings.Contains(string(canonical), `"routingStrategy"`) || strings.Contains(string(canonical), `"routingKeyWeights"`) {
+		t.Fatalf("existing priority intent gained weighted optional fields: %s", canonical)
+	}
 
 	permuted := intent
 	permuted.Settings.OwnedAddressKeys = []string{"a", "z"}
@@ -60,6 +63,70 @@ func TestCanonicalIntentDeterministicAndPreservesPriority(t *testing.T) {
 	}
 	if digestA == digestC {
 		t.Fatal("meaningful routing-key order did not change digest")
+	}
+}
+
+func TestCanonicalWeightedListenerPreservesWeightsAndNormalizesKeyOrder(t *testing.T) {
+	intent := testIntent()
+	intent.ServiceListeners[0].RoutingStrategy = RoutingStrategyWeighted
+	intent.ServiceListeners[0].RoutingKeys = []string{"xfoo", "foo"}
+	intent.ServiceListeners[0].RoutingKeyWeights = map[string]uint{"foo": 1, "xfoo": 3}
+	canonical, digestA, err := CanonicalIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(canonical), `"routingKeyWeights":{"foo":1,"xfoo":3}`) ||
+		!strings.Contains(string(canonical), `"routingKeys":["foo","xfoo"]`) ||
+		!strings.Contains(string(canonical), `"routingStrategy":"weighted"`) {
+		t.Fatalf("weighted strategy was not serialized exactly: %s", canonical)
+	}
+
+	permuted := testIntent()
+	permuted.ServiceListeners[0].RoutingStrategy = RoutingStrategyWeighted
+	permuted.ServiceListeners[0].RoutingKeys = []string{"foo", "xfoo"}
+	permuted.ServiceListeners[0].RoutingKeyWeights = map[string]uint{"xfoo": 3, "foo": 1}
+	_, digestB, err := CanonicalIntent(permuted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digestA != digestB {
+		t.Fatalf("weighted map/key permutations changed digest: %s != %s", digestA, digestB)
+	}
+
+	changed := permuted
+	changed.ServiceListeners = append([]ServiceListener(nil), permuted.ServiceListeners...)
+	changed.ServiceListeners[0].RoutingKeyWeights = map[string]uint{"foo": 2, "xfoo": 3}
+	_, digestC, err := CanonicalIntent(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digestA == digestC {
+		t.Fatal("weight-only change did not change intent digest")
+	}
+	delta, err := NewIntentDelta(permuted, changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delta.ServiceListeners) != 1 || delta.ServiceListeners[0].RoutingKeyWeights["foo"] != 2 {
+		t.Fatalf("weight-only change was not carried by delta: %#v", delta.ServiceListeners)
+	}
+	result, err := ApplyIntentDelta(permuted, delta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ServiceListeners[0].RoutingKeyWeights["foo"] != 2 {
+		t.Fatalf("weight-only delta was not applied: %#v", result.ServiceListeners[0])
+	}
+}
+
+func TestWeightedListenerRequiresExactPositiveWeights(t *testing.T) {
+	for _, weights := range []map[string]uint{{"priority-a": 1}, {"priority-a": 1, "priority-b": 0}, {"priority-a": 1, "priority-b": 2, "extra": 3}} {
+		intent := testIntent()
+		intent.ServiceListeners[0].RoutingStrategy = RoutingStrategyWeighted
+		intent.ServiceListeners[0].RoutingKeyWeights = weights
+		if _, _, err := CanonicalIntent(intent); err == nil {
+			t.Fatalf("accepted invalid weights %#v", weights)
+		}
 	}
 }
 

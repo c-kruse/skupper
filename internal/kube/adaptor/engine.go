@@ -37,7 +37,12 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 		realization, err := e.Credentials.Resolve(ctx, binding)
 		if err != nil {
 			report.State = routercontrol.ApplicationFailed
-			report.Resources = []routercontrol.ResourceApplication{{ResourceID: binding.ID, State: routercontrol.ApplicationFailed, Reason: err.Error()}}
+			for _, id := range resourcesUsingCredential(intent, binding.ID) {
+				report.Resources = append(report.Resources, routercontrol.ResourceApplication{ResourceID: id, State: routercontrol.ApplicationFailed, Reason: "required traffic credential is unavailable"})
+			}
+			if len(report.Resources) == 0 {
+				report.Resources = []routercontrol.ResourceApplication{{ResourceID: binding.ID, State: routercontrol.ApplicationFailed, Reason: "required traffic credential is unavailable"}}
+			}
 			return report, CompiledIntent{}
 		}
 		credentials[binding.ID] = realization
@@ -103,6 +108,36 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 		report.Resources = append(report.Resources, routercontrol.ResourceApplication{ResourceID: routercontrol.ResourceID(id), RealizationID: compiled.RealizationID, State: state, Reason: reason})
 	}
 	return report, compiled
+}
+
+func resourcesUsingCredential(intent routercontrol.RouterIntent, binding routercontrol.ResourceID) []routercontrol.ResourceID {
+	ids := map[routercontrol.ResourceID]struct{}{}
+	for _, resource := range intent.RouterConnections {
+		if resource.TLS.CredentialBinding == binding || resource.ProxyCredentialBinding == binding {
+			ids[resource.ID] = struct{}{}
+		}
+	}
+	for _, resource := range intent.RouterListeners {
+		if resource.TLS.CredentialBinding == binding {
+			ids[resource.ID] = struct{}{}
+		}
+	}
+	for _, resource := range intent.ServiceListeners {
+		if resource.TLS.CredentialBinding == binding {
+			ids[resource.ID] = struct{}{}
+		}
+	}
+	for _, resource := range intent.ServiceConnectors {
+		if resource.TLS.CredentialBinding == binding {
+			ids[resource.ID] = struct{}{}
+		}
+	}
+	result := make([]routercontrol.ResourceID, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
 
 func (e *Engine) restartRequired(desired qdr.RouterConfig) string {

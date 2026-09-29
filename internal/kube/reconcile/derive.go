@@ -124,12 +124,25 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		}
 	}
 	for _, listener := range sortedMultiKeyListeners(snapshot.MultiKeyListeners) {
-		if listener.Spec.Strategy.Weighted != nil {
-			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "UnsupportedStrategy", Message: "weighted MultiKeyListener requires weighted routing intent support"})
-			continue
-		}
 		if listener.Spec.Port < 1 || listener.Spec.Port > 65535 {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "InvalidPort", Message: fmt.Sprintf("MultiKeyListener service port %d is outside 1-65535", listener.Spec.Port)})
+			continue
+		}
+		keys, strategy, weights := multiKeyRouting(listener)
+		invalidStrategy := ""
+		if len(keys) == 0 {
+			invalidStrategy = "MultiKeyListener strategy requires at least one routing key"
+		}
+		for _, key := range keys {
+			if strings.TrimSpace(key) == "" {
+				invalidStrategy = "MultiKeyListener routing keys must not be empty"
+			}
+			if strategy == routercontrol.RoutingStrategyWeighted && weights[key] == 0 {
+				invalidStrategy = fmt.Sprintf("MultiKeyListener routing key %q requires a positive weight", key)
+			}
+		}
+		if invalidStrategy != "" {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "InvalidStrategy", Message: invalidStrategy})
 			continue
 		}
 		port, err := allocatePort(desired.Allocations.Ports, reserved, string(listener.UID)+"/listener")
@@ -137,7 +150,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "PortExhausted", Message: err.Error()})
 			continue
 		}
-		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: routingKeys(listener), Host: "0.0.0.0", Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: serverTLSIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert)})
+		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: keys, RoutingStrategy: strategy, RoutingKeyWeights: weights, Host: "0.0.0.0", Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: serverTLSIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert)})
 		if listener.Spec.Host != "" {
 			if current := existingServices[listener.Spec.Host]; current != nil && (current.Annotations[controlledAnnotation] != "true" || !ownedBy(current.OwnerReferences, active.UID)) {
 				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "ForeignService", Message: fmt.Sprintf("Service %s/%s is not owned by the active Site", snapshot.Namespace.Name, listener.Spec.Host)})
@@ -378,8 +391,6 @@ func protocol(value string) (routercontrol.Protocol, error) {
 	switch value {
 	case "", "tcp":
 		return routercontrol.ProtocolTCP, nil
-	case "udp":
-		return routercontrol.ProtocolUDP, nil
 	default:
 		return "", fmt.Errorf("protocol %q is not supported", value)
 	}
@@ -448,8 +459,15 @@ func reservedPorts(accesses []*skupperv2alpha1.RouterAccess) map[int]bool {
 }
 
 func routingKeys(listener *skupperv2alpha1.MultiKeyListener) []string {
+	keys, _, _ := multiKeyRouting(listener)
+	return keys
+}
+
+func multiKeyRouting(listener *skupperv2alpha1.MultiKeyListener) ([]string, routercontrol.RoutingStrategy, map[string]uint) {
 	if listener.Spec.Strategy.Priority != nil {
-		return append([]string(nil), listener.Spec.Strategy.Priority.RoutingKeys...)
+		// Preserve the existing wire representation: an omitted strategy with
+		// multiple ordered keys is compiled as priority.
+		return append([]string(nil), listener.Spec.Strategy.Priority.RoutingKeys...), "", nil
 	}
 	var result []string
 	if listener.Spec.Strategy.Weighted != nil {
@@ -457,8 +475,13 @@ func routingKeys(listener *skupperv2alpha1.MultiKeyListener) []string {
 			result = append(result, key)
 		}
 		sort.Strings(result)
+		weights := make(map[string]uint, len(listener.Spec.Strategy.Weighted.RoutingKeys))
+		for key, weight := range listener.Spec.Strategy.Weighted.RoutingKeys {
+			weights[key] = weight
+		}
+		return result, routercontrol.RoutingStrategyWeighted, weights
 	}
-	return result
+	return result, "", nil
 }
 
 func credentialBindings(listeners []routercontrol.ServiceListener, connectors []routercontrol.ServiceConnector, connections []routercontrol.RouterConnection, access []routercontrol.RouterListener) []routercontrol.CredentialBinding {
@@ -553,6 +576,12 @@ func copyListeners(in []routercontrol.ServiceListener) []routercontrol.ServiceLi
 	out := append([]routercontrol.ServiceListener(nil), in...)
 	for i := range out {
 		out[i].RoutingKeys = append([]string(nil), in[i].RoutingKeys...)
+		if in[i].RoutingKeyWeights != nil {
+			out[i].RoutingKeyWeights = make(map[string]uint, len(in[i].RoutingKeyWeights))
+			for key, weight := range in[i].RoutingKeyWeights {
+				out[i].RoutingKeyWeights[key] = weight
+			}
+		}
 	}
 	return out
 }

@@ -70,6 +70,33 @@ func TestCompileIntentRejectsUnsupportedApplicationProtocols(t *testing.T) {
 	}
 }
 
+func TestCompileIntentPreservesWeightedAndPriorityStrategies(t *testing.T) {
+	intent := testIntent()
+	intent.ServiceListeners = []routercontrol.ServiceListener{
+		{ID: "weighted", Host: "0.0.0.0", Port: 8080, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"foo", "xfoo"}, RoutingStrategy: routercontrol.RoutingStrategyWeighted, RoutingKeyWeights: map[string]uint{"foo": 1, "xfoo": 3}, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}},
+		{ID: "priority", Host: "0.0.0.0", Port: 8081, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"xfoo", "foo"}, RoutingStrategy: routercontrol.RoutingStrategyPriority, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}},
+	}
+	compiled, err := CompileIntent(intent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weightedName := ownedName("tcp-listener", "weighted")
+	priorityName := ownedName("tcp-listener", "priority")
+	if compiled.Config.Bridges.TcpListeners[weightedName].MultiAddressStrategy != "weighted" || compiled.Config.Bridges.TcpListeners[priorityName].MultiAddressStrategy != "priority" {
+		t.Fatalf("multi-address strategies changed: %#v", compiled.Config.Bridges.TcpListeners)
+	}
+	values := map[string]int{}
+	for _, address := range compiled.Config.Bridges.ListenerAddresses {
+		values[address.Listener+"/"+address.Address] = address.Value
+	}
+	if values[weightedName+"/foo"] != 1 || values[weightedName+"/xfoo"] != 3 {
+		t.Fatalf("weighted values were not compiled exactly: %#v", values)
+	}
+	if values[priorityName+"/xfoo"] != 1 || values[priorityName+"/foo"] != 0 {
+		t.Fatalf("priority order changed: %#v", values)
+	}
+}
+
 func TestCompileIntentPreservesAMQPTLSModes(t *testing.T) {
 	intent := routercontrol.RouterIntent{
 		SchemaVersion: routercontrol.SchemaVersion,

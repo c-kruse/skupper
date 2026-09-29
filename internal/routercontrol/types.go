@@ -86,16 +86,26 @@ type RouterListener struct {
 	TLS  TLSIntent  `json:"tls"`
 }
 
-// RoutingKeys is ordered by routing priority and is never sorted during
-// normalization.
+type RoutingStrategy string
+
+const (
+	RoutingStrategyPriority RoutingStrategy = "priority"
+	RoutingStrategyWeighted RoutingStrategy = "weighted"
+)
+
+// RoutingKeys is ordered by routing priority for the priority strategy and is
+// never sorted during normalization. Weighted listeners carry their exact
+// values in RoutingKeyWeights; their RoutingKeys are normalized by key.
 type ServiceListener struct {
-	ID          ResourceID `json:"id"`
-	Host        string     `json:"host"`
-	Port        uint16     `json:"port"`
-	Protocol    Protocol   `json:"protocol"`
-	RoutingKeys []string   `json:"routingKeys"`
-	Observer    string     `json:"observer,omitempty"`
-	TLS         TLSIntent  `json:"tls"`
+	ID                ResourceID      `json:"id"`
+	Host              string          `json:"host"`
+	Port              uint16          `json:"port"`
+	Protocol          Protocol        `json:"protocol"`
+	RoutingKeys       []string        `json:"routingKeys"`
+	RoutingStrategy   RoutingStrategy `json:"routingStrategy,omitempty"`
+	RoutingKeyWeights map[string]uint `json:"routingKeyWeights,omitempty"`
+	Observer          string          `json:"observer,omitempty"`
+	TLS               TLSIntent       `json:"tls"`
 }
 
 type Endpoint struct {

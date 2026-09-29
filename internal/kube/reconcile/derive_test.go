@@ -240,14 +240,70 @@ func TestForeignListenerServiceIsDiagnosedWithoutBlockingOtherIntent(t *testing.
 
 func TestWeightedMultiKeyListenerIsNotFlattened(t *testing.T) {
 	snapshot := baseSnapshot()
-	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "weighted", Namespace: "site", UID: "weighted-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"a": 1, "b": 5}}}}}}
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "weighted", Namespace: "site", UID: "weighted-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"a": 1, "b": 5}}}}}}
 	desired := (NamespaceDeriver{}).Derive(snapshot)
-	if len(desired.Diagnostics) != 1 || desired.Diagnostics[0].Reason != "UnsupportedStrategy" {
-		t.Fatalf("expected weighted strategy diagnostic, got %#v", desired.Diagnostics)
+	if len(desired.Diagnostics) != 0 {
+		t.Fatalf("weighted strategy was diagnosed: %#v", desired.Diagnostics)
 	}
 	for _, intent := range desired.Intents {
-		if len(intent.ServiceListeners) != 0 {
-			t.Fatal("weighted listener was flattened into an unweighted intent")
+		if len(intent.ServiceListeners) != 1 || intent.ServiceListeners[0].RoutingStrategy != routercontrol.RoutingStrategyWeighted || intent.ServiceListeners[0].RoutingKeyWeights["a"] != 1 || intent.ServiceListeners[0].RoutingKeyWeights["b"] != 5 {
+			t.Fatalf("weighted listener was flattened or changed: %#v", intent.ServiceListeners)
+		}
+	}
+}
+
+func TestPriorityMultiKeyListenerPreservesExistingIntentDefaults(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "priority", Namespace: "site", UID: "priority-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Priority: &skupperv2alpha1.PriorityStrategySpec{RoutingKeys: []string{"xfoo", "foo"}}}}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	for _, intent := range desired.Intents {
+		listener := intent.ServiceListeners[0]
+		if listener.RoutingStrategy != "" || listener.RoutingKeyWeights != nil || listener.RoutingKeys[0] != "xfoo" || listener.RoutingKeys[1] != "foo" {
+			t.Fatalf("priority intent defaults or exact order changed: %#v", listener)
+		}
+	}
+}
+
+func TestUnsupportedUDPIsIsolatedFromValidTCPIntent(t *testing.T) {
+	snapshot := baseSnapshot()
+	udpListener := listener("udp", "udp-listener", "udp")
+	udpListener.Spec.Type = "udp"
+	tcpListener := listener("tcp", "tcp-listener", "tcp")
+	udpConnector := &skupperv2alpha1.Connector{ObjectMeta: metav1.ObjectMeta{Name: "udp", Namespace: "site", UID: "udp-connector"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "udp", Host: "udp.example", Port: 8080, Type: "udp"}}
+	tcpConnector := &skupperv2alpha1.Connector{ObjectMeta: metav1.ObjectMeta{Name: "tcp", Namespace: "site", UID: "tcp-connector"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "tcp", Host: "tcp.example", Port: 8080, Type: "tcp"}}
+	snapshot.Listeners = []*skupperv2alpha1.Listener{udpListener, tcpListener}
+	snapshot.Connectors = []*skupperv2alpha1.Connector{udpConnector, tcpConnector}
+
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Diagnostics) != 2 {
+		t.Fatalf("expected one diagnostic per UDP resource, got %#v", desired.Diagnostics)
+	}
+	for _, diagnostic := range desired.Diagnostics {
+		if diagnostic.Reason != "UnsupportedProtocol" || (diagnostic.Resource != udpListener.UID && diagnostic.Resource != udpConnector.UID) {
+			t.Fatalf("UDP diagnostic was not resource-specific: %#v", desired.Diagnostics)
+		}
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.ServiceListeners) != 1 || intent.ServiceListeners[0].ID != "tcp-listener/listener" || len(intent.ServiceConnectors) != 1 || intent.ServiceConnectors[0].ID != "tcp-connector/connector" {
+			t.Fatalf("UDP contribution blocked or entered valid TCP intent: listeners=%#v connectors=%#v", intent.ServiceListeners, intent.ServiceConnectors)
+		}
+		if _, _, err := routercontrol.CanonicalIntent(intent); err != nil {
+			t.Fatalf("isolated TCP intent is not publishable: %v", err)
+		}
+	}
+}
+
+func TestInvalidWeightedListenerIsIsolatedFromValidRouting(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "invalid", Namespace: "site", UID: "invalid-weight"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Port: 8080, Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"bad": 0}}}}}}
+	snapshot.Listeners = []*skupperv2alpha1.Listener{listener("valid", "valid-listener", "valid")}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Diagnostics) != 1 || desired.Diagnostics[0].Resource != "invalid-weight" || desired.Diagnostics[0].Reason != "InvalidStrategy" {
+		t.Fatalf("invalid weight was not isolated: %#v", desired.Diagnostics)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.ServiceListeners) != 1 || intent.ServiceListeners[0].ID != "valid-listener/listener" {
+			t.Fatalf("invalid weighted listener blocked valid routing: %#v", intent.ServiceListeners)
 		}
 	}
 }

@@ -80,8 +80,9 @@ func digest(canonical []byte) Digest {
 }
 
 // NormalizeIntent fills schema defaults, converts nil complete collections to
-// empty collections, and sorts sets by stable identity. RoutingKeys retains its
-// caller-provided priority order.
+// empty collections, and sorts sets by stable identity. Priority RoutingKeys
+// retain caller order; weighted RoutingKeys are sorted because their weights
+// carry the routing semantics.
 func NormalizeIntent(intent RouterIntent) (RouterIntent, error) {
 	copy := deepCopyIntent(intent)
 	if copy.SchemaVersion == "" {
@@ -111,6 +112,10 @@ func NormalizeIntent(intent RouterIntent) (RouterIntent, error) {
 	sort.Slice(copy.CredentialBindings, func(i, j int) bool { return copy.CredentialBindings[i].ID < copy.CredentialBindings[j].ID })
 	for i := range copy.ServiceListeners {
 		copy.ServiceListeners[i].RoutingKeys = nonNil(copy.ServiceListeners[i].RoutingKeys)
+		copy.ServiceListeners[i].RoutingKeyWeights = nonNilMap(copy.ServiceListeners[i].RoutingKeyWeights)
+		if copy.ServiceListeners[i].RoutingStrategy == RoutingStrategyWeighted {
+			sort.Strings(copy.ServiceListeners[i].RoutingKeys)
+		}
 	}
 	for i := range copy.ServiceConnectors {
 		copy.ServiceConnectors[i].Endpoints = nonNil(copy.ServiceConnectors[i].Endpoints)
@@ -141,6 +146,7 @@ func deepCopyIntent(intent RouterIntent) RouterIntent {
 	copy.ServiceListeners = append([]ServiceListener(nil), intent.ServiceListeners...)
 	for i := range copy.ServiceListeners {
 		copy.ServiceListeners[i].RoutingKeys = append([]string(nil), intent.ServiceListeners[i].RoutingKeys...)
+		copy.ServiceListeners[i].RoutingKeyWeights = cloneMap(intent.ServiceListeners[i].RoutingKeyWeights)
 	}
 	copy.ServiceConnectors = append([]ServiceConnector(nil), intent.ServiceConnectors...)
 	for i := range copy.ServiceConnectors {
@@ -159,6 +165,24 @@ func nonNil[S ~[]E, E any](value S) S {
 		return make(S, 0)
 	}
 	return value
+}
+
+func nonNilMap[M ~map[K]V, K comparable, V any](value M) M {
+	if value == nil {
+		return make(M)
+	}
+	return value
+}
+
+func cloneMap[M ~map[K]V, K comparable, V any](value M) M {
+	if value == nil {
+		return nil
+	}
+	copy := make(M, len(value))
+	for key, item := range value {
+		copy[key] = item
+	}
+	return copy
 }
 
 // ValidateIntent validates the complete graph, including global resource-ID
@@ -302,6 +326,24 @@ func ValidateIntent(intent RouterIntent) error {
 		}
 		if err := uniqueStrings("routing key", item.RoutingKeys); err != nil {
 			return fmt.Errorf("service listener %q: %w", item.ID, err)
+		}
+		switch item.RoutingStrategy {
+		case "", RoutingStrategyPriority:
+			if len(item.RoutingKeyWeights) != 0 {
+				return fmt.Errorf("service listener %q has routing key weights without weighted strategy", item.ID)
+			}
+		case RoutingStrategyWeighted:
+			if len(item.RoutingKeyWeights) != len(item.RoutingKeys) {
+				return fmt.Errorf("service listener %q requires one positive weight for every routing key", item.ID)
+			}
+			for _, key := range item.RoutingKeys {
+				weight, found := item.RoutingKeyWeights[key]
+				if !found || weight == 0 {
+					return fmt.Errorf("service listener %q routing key %q requires a positive weight", item.ID, key)
+				}
+			}
+		default:
+			return fmt.Errorf("service listener %q has invalid routing strategy %q", item.ID, item.RoutingStrategy)
 		}
 		if err := checkTLS(item.ID, item.TLS, true); err != nil {
 			return err

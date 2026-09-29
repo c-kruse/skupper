@@ -581,6 +581,15 @@ func evaluateTargets(evidence map[RouterTarget]targetEvidence, evaluate func(Obs
 
 func observedResourcesState(observation Observation, digest routercontrol.Digest, ids []routercontrol.ResourceID, operational bool) skupperv2alpha1.ConditionState {
 	if state := applicationState(observation, digest); state.Status != metav1.ConditionTrue {
+		if state.Reason == skupperv2alpha1.StatusError && observation.Application != nil && observation.Application.State == routercontrol.ApplicationFailed {
+			for _, id := range ids {
+				for _, applied := range observation.Application.Resources {
+					if applied.ResourceID == id && applied.State == routercontrol.ApplicationFailed && applied.Reason != "" {
+						return skupperv2alpha1.ErrorCondition(fmt.Errorf("%s", applied.Reason))
+					}
+				}
+			}
+		}
 		return state
 	}
 	snapshot, state := freshScope(observation, routercontrol.ObservationScopeResources)

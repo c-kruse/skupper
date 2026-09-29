@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/routercontrol"
 )
 
 type fakeLocalRouter struct {
@@ -149,6 +150,41 @@ func TestVerifyOwnedPreservesMultiAddressStrategyDifferences(t *testing.T) {
 				t.Fatalf("documented default did not normalize: %v", err)
 			}
 		})
+	}
+}
+
+func TestReconcileAppliesAndReadsBackWeightOnlyUpdate(t *testing.T) {
+	intent := testIntent()
+	intent.ServiceListeners = []routercontrol.ServiceListener{{ID: "weighted", Host: "0.0.0.0", Port: 8080, Protocol: routercontrol.ProtocolTCP, RoutingKeys: []string{"foo", "xfoo"}, RoutingStrategy: routercontrol.RoutingStrategyWeighted, RoutingKeyWeights: map[string]uint{"foo": 1, "xfoo": 3}, TLS: routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}}}
+	first, err := CompileIntent(intent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := &fakeLocalRouter{current: basicConfig()}
+	if result := Reconcile(router, first); !result.Applied {
+		t.Fatalf("initial weighted apply failed: %v", result.Err)
+	}
+
+	intent.ServiceListeners[0].RoutingKeyWeights = map[string]uint{"foo": 4, "xfoo": 3}
+	second, err := CompileIntent(intent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.RealizationID == second.RealizationID {
+		t.Fatal("weight-only update did not change realization identity")
+	}
+	if result := Reconcile(router, second); !result.Applied {
+		t.Fatalf("weight-only update did not verify by fresh readback: %v", result.Err)
+	}
+	listener := ownedName("tcp-listener", "weighted")
+	values := map[string]int{}
+	for _, address := range router.current.Bridges.ListenerAddresses {
+		if address.Listener == listener {
+			values[address.Address] = address.Value
+		}
+	}
+	if values["foo"] != 4 || values["xfoo"] != 3 {
+		t.Fatalf("updated weights were not present in readback: %#v", values)
 	}
 }
 
