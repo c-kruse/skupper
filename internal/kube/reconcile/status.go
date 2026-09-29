@@ -271,6 +271,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	if !reflect.DeepEqual(*beforeSite, site.Status) {
 		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
 	}
+	deriveInactiveSiteStatuses(snapshot, desired)
 }
 
 func deriveInactiveSiteStatuses(snapshot Snapshot, desired *DesiredNamespace) {
@@ -283,11 +284,14 @@ func deriveInactiveSiteStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	}
 	now := metav1.NewTime(evaluationTime)
 	for _, current := range snapshot.Sites {
+		if desired.Site != nil && current.UID == desired.Site.UID {
+			continue
+		}
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
 		setSiteIdentityStatus(updated, snapshot.Assignment)
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configuredState(desired.Diagnostics, updated.UID), updated.Generation, now)
-		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, unknownState("No active Site was selected"), updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, unknownState("This Site is not the active owner"), updated.Generation, now)
 		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.Sites = append(desired.Statuses.Sites, updated)

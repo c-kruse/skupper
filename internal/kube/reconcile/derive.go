@@ -297,6 +297,11 @@ func activeSite(snapshot Snapshot, desired *DesiredNamespace) *skupperv2alpha1.S
 	if snapshot.Allocations.SiteUID != "" {
 		for _, site := range snapshot.Sites {
 			if site.UID == snapshot.Allocations.SiteUID {
+				for _, other := range snapshot.Sites {
+					if other.UID != site.UID {
+						desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: other.UID, Reason: "SiteConflict", Message: fmt.Sprintf("Site %s/%s is already active in this namespace", site.Namespace, site.Name)})
+					}
+				}
 				return site
 			}
 		}

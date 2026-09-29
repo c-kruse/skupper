@@ -414,6 +414,34 @@ func TestReplacementSiteResetsPortsButRetainsAllocationCAS(t *testing.T) {
 	}
 }
 
+func TestCompetingSiteCannotReplaceEstablishedOwnerAndGetsQuietError(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Allocations.SiteUID = snapshot.Sites[0].UID
+	snapshot.Sites = append(snapshot.Sites, &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "site", UID: "other-site-uid"}})
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.SiteUID != "site-uid" || len(desired.Intents) != 1 || len(desired.Statuses.Sites) != 2 {
+		t.Fatalf("competitor replaced the active owner or remained statusless: %#v", desired)
+	}
+	for _, site := range desired.Statuses.Sites {
+		if site.Name == "other" {
+			if site.Status.StatusType != skupperv2alpha1.StatusError || site.Status.Message != "Site site/site is already active in this namespace" {
+				t.Fatalf("competitor did not receive the active owner diagnostic: %#v", site.Status)
+			}
+		} else if conditionStatus(site.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED) != metav1.ConditionTrue {
+			t.Fatalf("competitor disrupted active Site configuration: %#v", site.Status)
+		}
+	}
+	snapshot.Sites = desired.Statuses.Sites
+	if next := (NamespaceDeriver{}).Derive(snapshot); len(next.Statuses.Sites) != 0 {
+		t.Fatalf("unchanged competing Site statuses were reprojected: %#v", next.Statuses.Sites)
+	}
+	snapshot.Sites = snapshot.Sites[1:]
+	replacement := (NamespaceDeriver{}).Derive(snapshot)
+	if replacement.SiteUID != "other-site-uid" || len(replacement.Statuses.Sites) != 1 || conditionStatus(replacement.Statuses.Sites[0].Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED) != metav1.ConditionTrue {
+		t.Fatalf("remaining Site did not recover after old owner removal: %#v", replacement)
+	}
+}
+
 func baseSnapshot() Snapshot {
 	return Snapshot{
 		Namespace:   NamespaceIdentity{Name: "site", UID: "namespace-uid"},
