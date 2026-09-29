@@ -55,6 +55,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 		WatchNamespace: config.WatchNamespace, ControllerID: config.Namespace + "/" + config.Name,
 		RequireExplicitControl: config.WatchNamespace != "" || config.RequireExplicitControl,
 		Workers:                config.Workers, DisableSecurityContext: config.DisableSecurityContext, Bootstrap: bootstrap,
+		SecuredAccess: config.SecuredAccessConfig,
 	}, publisher, observations)
 	if err != nil {
 		return err
