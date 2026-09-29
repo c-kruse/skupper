@@ -786,8 +786,10 @@ replaces the old leader. Pod deletions use UID and resourceVersion preconditions
 It rechecks leadership before deletion and exits on a changed holder or template;
 these checks reduce races but do not make cross-resource reads transactional.
 Completion requires two updated replicas and one Ready lease holder, not two
-Ready Pods. The holder identity format is `<pod-name>/<pod-uid>/<process-id>`;
-namespace assignment continues using the stable controller namespace/name.
+Ready Pods. The holder identity format is `<controller-name>/<pod-name>/<pod-uid>`;
+it is stable across container restarts and distinct for replacement Pods, without
+a transient random identity. Namespace assignment continues using the stable
+controller namespace/name.
 
 Set `SKUPPER_CONTROLLER_NAMESPACE` when generating manifests for an installation
 outside the default namespace. Namespace-scoped installs also require the included

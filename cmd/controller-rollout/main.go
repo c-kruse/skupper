@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -146,7 +145,7 @@ func replacement(sts *appsv1.StatefulSet, pods []corev1.Pod, lease *coordination
 		if pod.DeletionTimestamp != nil {
 			return nil, "waiting for terminating controller Pod", nil
 		}
-		isLeader := strings.HasPrefix(*lease.Spec.HolderIdentity, pod.Name+"/"+string(pod.UID)+"/")
+		isLeader := *lease.Spec.HolderIdentity == sts.Name+"/"+pod.Name+"/"+string(pod.UID)
 		ready := false
 		for _, condition := range pod.Status.Conditions {
 			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {

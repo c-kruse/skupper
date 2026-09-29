@@ -10,15 +10,17 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/controller"
+	"github.com/skupperproject/skupper/internal/kube/grants"
 	"github.com/skupperproject/skupper/internal/kube/leadership"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
 	auth "github.com/skupperproject/skupper/internal/kube/routercontrol"
 	protocol "github.com/skupperproject/skupper/internal/routercontrol"
+	v2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -57,7 +59,30 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 	if err != nil {
 		return err
 	}
+	var grantFence atomic.Pointer[leadership.Fence]
+	lookupSite := func(ctx context.Context, namespace string) (*v2alpha1.Site, error) {
+		return lookupGrantSite(ctx, clients, config, namespaces.ActiveSite, namespace)
+	}
+	grantService, err := grants.NewService(grants.ServiceOptions{
+		Clients: clients, CurrentNamespace: config.Namespace, WatchNamespace: config.WatchNamespace,
+		Config: config.GrantConfig, LookupSite: lookupSite,
+		IsControlled: func(namespace string) bool {
+			if !namespaces.IsControlled(namespace) {
+				return false
+			}
+			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			return checkNamespaceAssignment(checkCtx, clients, config, namespace) == nil
+		},
+		Generator: grantGenerator(ctx, clients, lookupSite, &grantFence),
+	})
+	if err != nil {
+		return err
+	}
 	namespaces.StartCaches(ctx)
+	if err := grantService.StartCaches(ctx); err != nil {
+		return err
+	}
 	diagnostics := &leadership.Diagnostics{}
 	healthListener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -82,7 +107,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 			Lock: &resourcelock.LeaseLock{
 				LeaseMeta:  metav1.ObjectMeta{Namespace: config.Namespace, Name: "skupper-controller"},
 				Client:     clients.GetKubeClient().CoordinationV1(),
-				LockConfig: resourcelock.ResourceLockConfig{Identity: config.PodName + "/" + config.PodUID + "/" + uuid.NewString()},
+				LockConfig: resourcelock.ResourceLockConfig{Identity: config.Name + "/" + config.PodName + "/" + config.PodUID},
 			},
 			Diagnostics: diagnostics,
 			CacheSync: func(ctx context.Context) bool {
@@ -90,7 +115,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 					slog.Error("Namespace caches did not synchronize", "error", err)
 					return false
 				}
-				return true
+				return grantService.WaitForCacheSync(ctx)
 			},
 			Prepare: func(ctx context.Context) error {
 				initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -102,6 +127,9 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 					return err
 				}
 				if err := namespaces.SetRouterControlCA(installation.ServerCAData); err != nil {
+					return err
+				}
+				if err := grantService.Prepare(initCtx); err != nil {
 					return err
 				}
 				// Bind both ports before readiness; cancellation also closes them if
@@ -120,7 +148,13 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 				return ctx.Err()
 			},
 			Serve: func(ctx context.Context, fence *leadership.Fence) error {
-				return serveLeader(ctx, clients, config, namespaces, observations, publisher, prepared, fence)
+				grantFence.Store(fence)
+				group, ctx := errgroup.WithContext(ctx)
+				group.Go(func() error { return grantService.RunLeader(ctx, fence) })
+				group.Go(func() error {
+					return serveLeader(ctx, clients, config, namespaces, observations, publisher, prepared, fence)
+				})
+				return group.Wait()
 			},
 		})
 	})

@@ -43,7 +43,7 @@ func TestReplacement(t *testing.T) {
 	leader := pod("controller-1", "leader-uid", true)
 	standby := pod("controller-0", "standby-uid", false)
 	lease := &coordinationv1.Lease{Spec: coordinationv1.LeaseSpec{
-		HolderIdentity: ptr.To("controller-1/leader-uid/process-id"),
+		HolderIdentity: ptr.To("controller/controller-1/leader-uid"),
 		RenewTime:      &metav1.MicroTime{Time: now}, LeaseDurationSeconds: ptr.To(int32(30)),
 	}}
 	tests := []struct {
@@ -66,6 +66,9 @@ func TestReplacement(t *testing.T) {
 		}},
 		{name: "replaced pod cannot inherit old lease", wait: true, mutate: func(l, s *corev1.Pod, _ *coordinationv1.Lease) {
 			l.UID = "replacement-uid"
+		}},
+		{name: "different logical controller cannot own lease", wait: true, mutate: func(l, s *corev1.Pod, lease *coordinationv1.Lease) {
+			lease.Spec.HolderIdentity = ptr.To("other/controller-1/leader-uid")
 		}},
 		{name: "stale lease prevents deletion", wait: true, mutate: func(l, s *corev1.Pod, lease *coordinationv1.Lease) {
 			lease.Spec.RenewTime.Time = now.Add(-31 * time.Second)

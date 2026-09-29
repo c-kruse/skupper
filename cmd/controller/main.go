@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,8 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/controller"
+	"github.com/skupperproject/skupper/internal/kube/controllerruntime"
 	"github.com/skupperproject/skupper/internal/kube/metrics"
-	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/version"
 )
 
@@ -72,11 +74,9 @@ func main() {
 	}
 	config.Namespace = cli.Namespace
 
-	var eventProcessorMetrics watchers.MetricsProvider
 	if !config.MetricsConfig.Disabled {
 		reg := prometheus.NewRegistry()
 		metrics.MustRegisterClientGoMetrics(reg)
-		eventProcessorMetrics = metrics.MustRegisterEventProcessorMetrics(reg)
 		srv := metrics.NewServer(config.MetricsConfig, reg)
 		if err := srv.Start(stopCh); err != nil {
 			slog.Error("Error starting metrics server", slog.Any("error", err))
@@ -84,13 +84,10 @@ func main() {
 		}
 	}
 
-	controller, err := controller.NewController(cli, config, watchers.WithMetricsProvider(eventProcessorMetrics))
-	if err != nil {
-		slog.Error("Error getting new site controller", slog.Any("error", err))
-		os.Exit(1)
-	}
-
-	if err = controller.Run(stopCh); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { <-stopCh; cancel() }()
+	if err = controllerruntime.Run(ctx, cli, config); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("Error running site controller", slog.Any("error", err))
 		os.Exit(1)
 	}
