@@ -63,15 +63,51 @@ func TestCanonicalIntentDeterministicAndPreservesPriority(t *testing.T) {
 	}
 }
 
-func TestCredentialBindingLiteralsAndRequiredUsages(t *testing.T) {
+func TestOutboundClientTLSRequiresTrustOnly(t *testing.T) {
+	intent := testIntent()
+	intent.CredentialBindings = []CredentialBinding{{
+		ID:        "ca-secret",
+		Provider:  CredentialProviderKubernetesSecret,
+		Reference: "peer-ca",
+		Usages:    []string{CredentialUsageTrust},
+	}}
+	intent.ServiceConnectors[0].TLS = TLSIntent{Mode: TLSModeClient, CredentialBinding: "ca-secret"}
+	if _, _, err := CanonicalIntent(intent); err != nil {
+		t.Fatalf("trust-only outbound TLS rejected: %v", err)
+	}
+
+	intent.ServiceConnectors[0].TLS.Mode = TLSModeServer
+	if _, _, err := CanonicalIntent(intent); err == nil {
+		t.Fatal("accepted server TLS mode on connector")
+	}
+}
+
+func TestOutboundMutualTLSRequiresTrustAndClientAuth(t *testing.T) {
+	intent := testIntent()
+	intent.CredentialBindings = []CredentialBinding{{
+		ID:        "mutual-secret",
+		Provider:  CredentialProviderKubernetesSecret,
+		Reference: "mutual-tls",
+		Usages:    []string{CredentialUsageTrust},
+	}}
+	intent.ServiceConnectors[0].TLS = TLSIntent{Mode: TLSModeMutual, CredentialBinding: "mutual-secret"}
+	if _, _, err := CanonicalIntent(intent); err == nil {
+		t.Fatal("accepted outbound mutual TLS without client-auth usage")
+	}
+	intent.CredentialBindings[0].Usages = append(intent.CredentialBindings[0].Usages, CredentialUsageClientAuth)
+	if _, _, err := CanonicalIntent(intent); err != nil {
+		t.Fatalf("outbound mutual TLS rejected with trust and client-auth: %v", err)
+	}
+}
+
+func TestSharedListenerConnectorCredentialMergesUsages(t *testing.T) {
 	intent := testIntent()
 	intent.CredentialBindings = []CredentialBinding{{
 		ID:        "shared-secret",
 		Provider:  CredentialProviderKubernetesSecret,
 		Reference: "traffic-credentials",
-		Usages:    []string{CredentialUsageServerAuth, CredentialUsageProxy, CredentialUsageClientAuth},
+		Usages:    []string{CredentialUsageTrust, CredentialUsageServerAuth},
 	}}
-	intent.RouterConnections[0].ProxyCredentialBinding = "shared-secret"
 	intent.RouterListeners = []RouterListener{{
 		ID: "router-listener", Host: "0.0.0.0", Port: 55671, Role: "inter-router",
 		TLS: TLSIntent{Mode: TLSModeServer, CredentialBinding: "shared-secret"},
@@ -82,22 +118,27 @@ func TestCredentialBindingLiteralsAndRequiredUsages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(canonical), `"usages":["client-auth","proxy","server-auth"]`) {
+	if !strings.Contains(string(canonical), `"usages":["server-auth","trust"]`) {
 		t.Fatalf("merged credential usages were not canonicalized: %s", canonical)
 	}
 
+	intent.RouterListeners[0].TLS.Mode = TLSModeMutual
+	if _, _, err := CanonicalIntent(intent); err != nil {
+		t.Fatalf("inbound mutual TLS rejected with server-auth and trust: %v", err)
+	}
+
+	intent.RouterListeners[0].TLS.Mode = TLSModeClient
+	if _, _, err := CanonicalIntent(intent); err == nil {
+		t.Fatal("accepted client TLS mode on listener")
+	}
+
 	wrongProvider := intent
+	wrongProvider.RouterListeners = append([]RouterListener(nil), intent.RouterListeners...)
+	wrongProvider.RouterListeners[0].TLS.Mode = TLSModeServer
 	wrongProvider.CredentialBindings = append([]CredentialBinding(nil), intent.CredentialBindings...)
 	wrongProvider.CredentialBindings[0].Provider = "kubernetes"
 	if _, _, err := CanonicalIntent(wrongProvider); err == nil {
 		t.Fatal("accepted obsolete kubernetes credential provider")
-	}
-
-	missingUsage := intent
-	missingUsage.CredentialBindings = append([]CredentialBinding(nil), intent.CredentialBindings...)
-	missingUsage.CredentialBindings[0].Usages = []string{CredentialUsageServerAuth, CredentialUsageProxy}
-	if _, _, err := CanonicalIntent(missingUsage); err == nil {
-		t.Fatal("accepted connector binding without client-auth usage")
 	}
 }
 

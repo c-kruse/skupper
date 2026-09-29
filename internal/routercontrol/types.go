@@ -118,6 +118,7 @@ const (
 
 	CredentialUsageServerAuth = "server-auth"
 	CredentialUsageClientAuth = "client-auth"
+	CredentialUsageTrust      = "trust"
 	CredentialUsageProxy      = "proxy"
 )
 

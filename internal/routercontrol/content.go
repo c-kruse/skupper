@@ -203,7 +203,7 @@ func ValidateIntent(intent RouterIntent) error {
 		}
 		for _, usage := range item.Usages {
 			switch usage {
-			case CredentialUsageServerAuth, CredentialUsageClientAuth, CredentialUsageProxy:
+			case CredentialUsageServerAuth, CredentialUsageClientAuth, CredentialUsageTrust, CredentialUsageProxy:
 			default:
 				return fmt.Errorf("credential binding %q has invalid usage %q", item.ID, usage)
 			}
@@ -232,15 +232,31 @@ func ValidateIntent(intent RouterIntent) error {
 		}
 		return fmt.Errorf("resource %q credential binding %q lacks usage %q", owner, bindingID, usage)
 	}
-	checkTLS := func(owner ResourceID, value TLSIntent, usage string) error {
+	checkTLS := func(owner ResourceID, value TLSIntent, inbound bool) error {
 		switch value.Mode {
 		case TLSModeDisabled:
 			if value.CredentialBinding != "" {
 				return fmt.Errorf("resource %q has credential with disabled TLS", owner)
 			}
-		case TLSModeServer, TLSModeClient, TLSModeMutual:
-			if err := requireUsage(owner, value.CredentialBinding, usage); err != nil {
-				return err
+		case TLSModeServer:
+			if !inbound {
+				return fmt.Errorf("resource %q has server TLS mode on an outbound connection", owner)
+			}
+			return requireUsage(owner, value.CredentialBinding, CredentialUsageServerAuth)
+		case TLSModeClient:
+			if inbound {
+				return fmt.Errorf("resource %q has client TLS mode on an inbound listener", owner)
+			}
+			return requireUsage(owner, value.CredentialBinding, CredentialUsageTrust)
+		case TLSModeMutual:
+			required := []string{CredentialUsageTrust, CredentialUsageClientAuth}
+			if inbound {
+				required = []string{CredentialUsageServerAuth, CredentialUsageTrust}
+			}
+			for _, usage := range required {
+				if err := requireUsage(owner, value.CredentialBinding, usage); err != nil {
+					return err
+				}
 			}
 		default:
 			return fmt.Errorf("resource %q has invalid TLS mode %q", owner, value.Mode)
@@ -254,7 +270,7 @@ func ValidateIntent(intent RouterIntent) error {
 		if item.Host == "" || item.Port == 0 || item.Role == "" {
 			return fmt.Errorf("router connection %q requires host, port, and role", item.ID)
 		}
-		if err := checkTLS(item.ID, item.TLS, CredentialUsageClientAuth); err != nil {
+		if err := checkTLS(item.ID, item.TLS, false); err != nil {
 			return err
 		}
 		if item.ProxyCredentialBinding != "" {
@@ -270,7 +286,7 @@ func ValidateIntent(intent RouterIntent) error {
 		if item.Host == "" || item.Port == 0 || item.Role == "" {
 			return fmt.Errorf("router listener %q requires host, port, and role", item.ID)
 		}
-		if err := checkTLS(item.ID, item.TLS, CredentialUsageServerAuth); err != nil {
+		if err := checkTLS(item.ID, item.TLS, true); err != nil {
 			return err
 		}
 	}
@@ -287,7 +303,7 @@ func ValidateIntent(intent RouterIntent) error {
 		if err := uniqueStrings("routing key", item.RoutingKeys); err != nil {
 			return fmt.Errorf("service listener %q: %w", item.ID, err)
 		}
-		if err := checkTLS(item.ID, item.TLS, CredentialUsageServerAuth); err != nil {
+		if err := checkTLS(item.ID, item.TLS, true); err != nil {
 			return err
 		}
 	}
@@ -314,7 +330,7 @@ func ValidateIntent(intent RouterIntent) error {
 			}
 			endpointIDs[endpoint.ID] = struct{}{}
 		}
-		if err := checkTLS(item.ID, item.TLS, CredentialUsageClientAuth); err != nil {
+		if err := checkTLS(item.ID, item.TLS, false); err != nil {
 			return err
 		}
 	}
