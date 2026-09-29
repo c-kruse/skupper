@@ -69,19 +69,26 @@ func (s *Server) listen() error {
 		return err
 	}
 	s.logger.Info("Grant server listening", slog.Any("address", listener.Addr()))
+	s.lock.Lock()
 	s.listener = listener
+	s.lock.Unlock()
 	return nil
 }
 
 func (s *Server) serve() error {
-	if s.listener == nil {
+	listener := s.currentListener()
+	if listener == nil {
 		return fmt.Errorf("Cannot serve before listen() is called")
 	}
+	return s.serveListener(listener)
+}
+
+func (s *Server) serveListener(listener net.Listener) error {
 	if s.tlsEnabled {
 		s.server.TLSConfig.GetCertificate = s.getCertificate
-		return s.server.ServeTLS(s.listener, "", "")
+		return s.server.ServeTLS(listener, "", "")
 	} else {
-		return s.server.Serve(s.listener)
+		return s.server.Serve(listener)
 	}
 }
 
@@ -90,24 +97,42 @@ func (s *Server) listenAndServe() error {
 		s.logger.Error("Grant server failed to listen", slog.String("address", s.server.Addr), slog.Any("error", err))
 		return err
 	}
-	defer s.listener.Close()
-	return s.serve()
+	listener := s.currentListener()
+	defer func() {
+		_ = listener.Close()
+		s.clearListener(listener)
+	}()
+	return s.serveListener(listener)
 }
 
 func (s *Server) stop() error {
 	err := s.server.Close()
-	if s.listener != nil {
-		_ = s.listener.Close()
+	listener := s.takeListener()
+	if listener != nil {
+		_ = listener.Close()
 	}
-	s.listener = nil
 	return err
 }
 
 func (s *Server) run(ctx context.Context, gate EffectGate) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := gate.Check(); err != nil {
 		return err
 	}
 	if err := s.listen(); err != nil {
+		return err
+	}
+	listener := s.currentListener()
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
+		s.clearListener(listener)
+		return err
+	}
+	if err := gate.Check(); err != nil {
+		_ = listener.Close()
+		s.clearListener(listener)
 		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -118,10 +143,12 @@ func (s *Server) run(ctx context.Context, gate EffectGate) error {
 		case <-runCtx.Done():
 		case <-gate.Done():
 		}
-		_ = s.stop()
+		_ = s.server.Close()
+		_ = listener.Close()
+		s.clearListener(listener)
 		close(done)
 	}()
-	err := s.serve()
+	err := s.serveListener(listener)
 	cancel()
 	<-done
 	if err == http.ErrServerClosed {
@@ -131,8 +158,31 @@ func (s *Server) run(ctx context.Context, gate EffectGate) error {
 }
 
 func (s *Server) port() int {
-	if s.listener == nil {
+	listener := s.currentListener()
+	if listener == nil {
 		return 0
 	}
-	return s.listener.Addr().(*net.TCPAddr).Port
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func (s *Server) currentListener() net.Listener {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	return s.listener
+}
+
+func (s *Server) takeListener() net.Listener {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	listener := s.listener
+	s.listener = nil
+	return listener
+}
+
+func (s *Server) clearListener(listener net.Listener) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if s.listener == listener {
+		s.listener = nil
+	}
 }

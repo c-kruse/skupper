@@ -3,7 +3,13 @@ package routercontrol
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,6 +62,60 @@ func TestEnrollmentClientAppliesRequestTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("enrollment request timeout took %v", elapsed)
+	}
+}
+
+func TestEnrollmentResponseExpiryMustMatchLeaf(t *testing.T) {
+	leaf := &x509.Certificate{NotAfter: time.Date(2026, 9, 29, 12, 15, 0, 0, time.UTC)}
+	if err := validateEnrollmentExpiry(leaf.NotAfter.Format(time.RFC3339Nano), leaf); err != nil {
+		t.Fatalf("matching expiry rejected: %v", err)
+	}
+	if err := validateEnrollmentExpiry(leaf.NotAfter.Add(time.Second).Format(time.RFC3339Nano), leaf); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched expiry error = %v", err)
+	}
+	if err := validateEnrollmentExpiry("not-a-time", leaf); err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("invalid expiry error = %v", err)
+	}
+}
+
+func TestEnrollmentClientRejectsExpiryMetadataMismatch(t *testing.T) {
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	caTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var enrollment EnrollRequest
+		if err := json.NewDecoder(request.Body).Decode(&enrollment); err != nil {
+			t.Fatal(err)
+		}
+		csr, err := x509.ParseCertificateRequest(enrollment.CSR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafTemplate := &x509.Certificate{SerialNumber: big.NewInt(2), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(10 * time.Minute), BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+		leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, ca, csr.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(EnrollResponse{Certificate: [][]byte{leafDER, caDER}, NotAfter: leafTemplate.NotAfter.Add(time.Second).Format(time.RFC3339Nano)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	client := &EnrollmentClient{URL: "https://controller.example/enroll", TokenPath: writeTestToken(t), HTTP: &http.Client{Transport: transport}, RequestTimeout: time.Second}
+	if _, err := client.Enroll(context.Background()); err == nil || !strings.Contains(err.Error(), "expiry does not match") {
+		t.Fatalf("mismatched enrollment expiry error = %v", err)
 	}
 }
 

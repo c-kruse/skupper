@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"context"
 	"crypto/x509"
 	"fmt"
 	"net/http"
@@ -79,6 +80,15 @@ func Test_handlesServeBeforeListen(t *testing.T) {
 func Test_handlesPortBeforeListen(t *testing.T) {
 	server := newServer(":1234", true, &TestHandler{})
 	assert.Equal(t, 0, server.port())
+}
+
+func TestRunWithAlreadyCanceledContextDoesNotListen(t *testing.T) {
+	server := newServer(":0", false, &TestHandler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := server.run(ctx, &testEffectGate{done: make(chan struct{})})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, server.port(), 0)
 }
 
 type TestHandler struct{}

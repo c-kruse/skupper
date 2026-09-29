@@ -413,6 +413,9 @@ func (g *Grants) liveGrant(ctx context.Context, grant *skupperv2alpha1.AccessGra
 	if live.UID != grant.UID {
 		return nil, fmt.Errorf("AccessGrant ownership changed")
 	}
+	if live.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("AccessGrant is being deleted")
+	}
 	return live.DeepCopy(), nil
 }
 

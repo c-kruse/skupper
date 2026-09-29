@@ -273,6 +273,31 @@ func TestGrantRedemptionRevalidatesBeforeGenerator(t *testing.T) {
 	assert.Equal(t, live.Status.Redemptions, 1)
 }
 
+func TestGrantRedemptionRejectsDeletingGrant(t *testing.T) {
+	deleting := metav1.Now()
+	grant := &v2alpha1.AccessGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: "grant", Namespace: "test", UID: "grant-uid", DeletionTimestamp: &deleting},
+		Spec:       v2alpha1.AccessGrantSpec{RedemptionsAllowed: 1},
+		Status: v2alpha1.AccessGrantStatus{
+			Code:           "secret",
+			ExpirationTime: time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{grant}, "")
+	assert.NilError(t, err)
+	var generated atomic.Int32
+	registry := newGrants(client, func(string, string, string, io.Writer) error {
+		generated.Add(1)
+		return nil
+	}, "https", "host")
+	registry.record("test/grant", grant)
+	request := httptest.NewRequest(http.MethodPost, "/grant-uid", bytes.NewBufferString("secret"))
+	response := httptest.NewRecorder()
+	registry.ServeHTTP(response, request)
+	assert.Equal(t, response.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, generated.Load(), int32(0))
+}
+
 func Test_ServeHttp(t *testing.T) {
 	good := &v2alpha1.AccessGrant{
 		ObjectMeta: metav1.ObjectMeta{

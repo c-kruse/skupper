@@ -158,6 +158,9 @@ func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error
 	if err != nil {
 		return nil, fmt.Errorf("parse enrolled certificate: %w", err)
 	}
+	if err := validateEnrollmentExpiry(enrolled.NotAfter, leaf); err != nil {
+		return nil, err
+	}
 	identity, err := identityFromCertificate(leaf)
 	if err != nil || identity != enrolled.Identity {
 		return nil, fmt.Errorf("enrollment response identity does not match signed certificate")
@@ -175,6 +178,17 @@ func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error
 		return nil, fmt.Errorf("verify enrolled certificate chain: %w", err)
 	}
 	return &ClientCredential{Identity: identity, Certificate: enrolled.Certificate, PrivateKey: key, Leaf: leaf}, nil
+}
+
+func validateEnrollmentExpiry(encoded string, leaf *x509.Certificate) error {
+	notAfter, err := time.Parse(time.RFC3339Nano, encoded)
+	if err != nil {
+		return fmt.Errorf("parse enrollment certificate expiry: %w", err)
+	}
+	if !notAfter.Equal(leaf.NotAfter) {
+		return fmt.Errorf("enrollment response expiry does not match signed certificate")
+	}
+	return nil
 }
 
 func (c *ClientCredential) TLSCertificate() tls.Certificate {
