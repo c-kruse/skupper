@@ -104,6 +104,9 @@ func (c *KubeClient) GetRouteInterface() openshiftroute.Interface {
 }
 
 func (c *KubeClient) GetRouteClient() routev1client.RouteV1Interface {
+	if c.Route == nil {
+		return nil
+	}
 	return c.Route.RouteV1()
 }
 
