@@ -68,9 +68,9 @@ spec:
                   type: string
                 exposePodsByName:
                   description: |-
-                    If true, expose each pod as an individual service. This allows individual
-                    pods to be directly connected across a network. The pod names will be used
-                    to create each service.
+                    Deprecated and unsupported. New or changed resources must not
+                    set this field to true. Replace legacy pod-name exposure with
+                    pod selector targeting before controller cutover.
                   type: boolean
                 settings:
                   description: |-
@@ -85,6 +85,9 @@ spec:
                 - routingKey
                 - host
                 - port
+              x-kubernetes-validations:
+              - rule: '!has(self.exposePodsByName) || !self.exposePodsByName || (oldSelf != null && has(oldSelf.exposePodsByName) && oldSelf.exposePodsByName)'
+                message: exposePodsByName is unsupported; use pod selector targeting instead
             status:
               type: object
               properties:

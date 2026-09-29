@@ -180,8 +180,10 @@ spec:
                       group:
                         type: string
                 sitesInNetwork:
+                  description: Deprecated. Retained only for compatibility with status written by older controllers and no longer populated.
                   type: integer
                 network:
+                  description: Deprecated. Retained only for compatibility with status written by older controllers and no longer populated.
                   type: array
                   items:
                     type: object
@@ -231,10 +233,6 @@ spec:
         type: string
         description: The status of the site
         jsonPath: .status.status
-      - name: Sites In Network
-        type: integer
-        description: The number of sites in the network
-        jsonPath: .status.sitesInNetwork
       - name: Message
         type: string
         description: Any human readable message relevant to the site

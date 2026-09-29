@@ -73,9 +73,9 @@ func (s *Status) readyState(requiredConditions []string) ConditionState {
 		existing := meta.FindStatusCondition(s.Conditions, conditionType)
 		if existing == nil {
 			return PendingCondition("Not " + conditionType)
-		} else if existing.Status == v1.ConditionFalse {
+		} else if existing.Status != v1.ConditionTrue {
 			return ConditionState{
-				Status:  v1.ConditionFalse,
+				Status:  existing.Status,
 				Reason:  StatusType(existing.Reason),
 				Message: existing.Message,
 			}
@@ -288,12 +288,26 @@ const CONDITION_TYPE_OPERATIONAL = "Operational"
 const CONDITION_TYPE_READY = "Ready"
 
 type SiteStatus struct {
-	Status         `json:",inline"`
-	Endpoints      []Endpoint   `json:"endpoints,omitempty"`
-	SitesInNetwork int          `json:"sitesInNetwork,omitempty"`
-	Network        []SiteRecord `json:"network,omitempty"`
-	DefaultIssuer  string       `json:"defaultIssuer,omitempty"`
-	Controller     *Controller  `json:"controller,omitempty"`
+	Status    `json:",inline"`
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
+	// Deprecated: network-wide topology is no longer reported. Retained to decode
+	// status written by older controllers during migration.
+	SitesInNetwork int `json:"sitesInNetwork,omitempty"`
+	// Deprecated: network-wide topology is no longer reported. Retained to decode
+	// status written by older controllers during migration.
+	Network       []SiteRecord `json:"network,omitempty"`
+	DefaultIssuer string       `json:"defaultIssuer,omitempty"`
+	Controller    *Controller  `json:"controller,omitempty"`
+}
+
+// ClearLegacyNetworkStatus clears topology published by older controllers.
+func (s *Site) ClearLegacyNetworkStatus() bool {
+	if s.Status.SitesInNetwork == 0 && s.Status.Network == nil {
+		return false
+	}
+	s.Status.SitesInNetwork = 0
+	s.Status.Network = nil
+	return true
 }
 
 type Controller struct {
@@ -407,12 +421,14 @@ type ListenerList struct {
 }
 
 type ListenerSpec struct {
-	RoutingKey       string            `json:"routingKey"`
-	Host             string            `json:"host"`
-	Port             int               `json:"port"`
-	TlsCredentials   string            `json:"tlsCredentials,omitempty"`
-	Type             string            `json:"type,omitempty"`
-	Observer         string            `json:"observer,omitempty"`
+	RoutingKey     string `json:"routingKey"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	TlsCredentials string `json:"tlsCredentials,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Observer       string `json:"observer,omitempty"`
+	// Deprecated: pod-name exposure is unsupported. New and changed Kubernetes
+	// resources must not set this field to true.
 	ExposePodsByName bool              `json:"exposePodsByName,omitempty"`
 	Settings         map[string]string `json:"settings,omitempty"`
 }
@@ -438,19 +454,27 @@ type Connector struct {
 }
 
 func (c *Connector) SetConfigured(err error) bool {
-	if c.Status.SetCondition(CONDITION_TYPE_CONFIGURED, ErrorOrReadyCondition(err), c.ObjectMeta.Generation) {
-		c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED, CONDITION_TYPE_MATCHED}, c.ObjectMeta.Generation)
-		return true
+	changed := c.Status.SetCondition(CONDITION_TYPE_CONFIGURED, ErrorOrReadyCondition(err), c.ObjectMeta.Generation)
+	if c.clearLegacyMatchingStatus() {
+		changed = true
 	}
-	return false
+	if c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.ObjectMeta.Generation) {
+		changed = true
+	}
+	return changed
+}
+
+func (c *Connector) clearLegacyMatchingStatus() bool {
+	changed := c.Status.HasMatchingListener
+	c.Status.HasMatchingListener = false
+	return meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) || changed
 }
 
 func (c *Connector) matched() ConditionState {
 	if c.Status.HasMatchingListener {
 		return ReadyCondition()
-	} else {
-		return PendingCondition("No matching listeners")
 	}
+	return PendingCondition("No matching listeners")
 }
 
 func (c *Connector) setMatched() bool {
@@ -461,13 +485,19 @@ func (c *Connector) setMatched() bool {
 	return false
 }
 
+// SetHasMatchingListener is retained for non-Kubernetes compatibility.
+// Deprecated: Connector matching status is no longer reported.
 func (c *Connector) SetHasMatchingListener(value bool) bool {
-	changed := false
-	if c.Status.HasMatchingListener != value {
-		c.Status.HasMatchingListener = value
-		changed = true
-	}
-	if c.setMatched() {
+	changed := c.Status.HasMatchingListener != value
+	c.Status.HasMatchingListener = value
+	return c.setMatched() || changed
+}
+
+// ClearLegacyMatchingStatus clears Connector matching status written by older
+// controllers and recalculates Ready from Configured alone.
+func (c *Connector) ClearLegacyMatchingStatus() bool {
+	changed := c.clearLegacyMatchingStatus()
+	if c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.ObjectMeta.Generation) {
 		changed = true
 	}
 	return changed
@@ -495,14 +525,16 @@ type ConnectorList struct {
 }
 
 type ConnectorSpec struct {
-	RoutingKey          string            `json:"routingKey"`
-	Host                string            `json:"host,omitempty"`
-	Selector            string            `json:"selector,omitempty"`
-	Port                int               `json:"port"`
-	TlsCredentials      string            `json:"tlsCredentials,omitempty"`
-	UseClientCert       bool              `json:"useClientCert,omitempty"`
-	VerifyHostname      bool              `json:"verifyHostname,omitempty"`
-	Type                string            `json:"type,omitempty"`
+	RoutingKey     string `json:"routingKey"`
+	Host           string `json:"host,omitempty"`
+	Selector       string `json:"selector,omitempty"`
+	Port           int    `json:"port"`
+	TlsCredentials string `json:"tlsCredentials,omitempty"`
+	UseClientCert  bool   `json:"useClientCert,omitempty"`
+	VerifyHostname bool   `json:"verifyHostname,omitempty"`
+	Type           string `json:"type,omitempty"`
+	// Deprecated: pod-name exposure is unsupported. New and changed Kubernetes
+	// resources must not set this field to true.
 	ExposePodsByName    bool              `json:"exposePodsByName,omitempty"`
 	IncludeNotReadyPods bool              `json:"includeNotReadyPods,omitempty"`
 	Settings            map[string]string `json:"settings,omitempty"`
@@ -515,9 +547,11 @@ type PodDetails struct {
 }
 
 type ConnectorStatus struct {
-	Status              `json:",inline"`
-	SelectedPods        []PodDetails `json:"selectedPods,omitempty"`
-	HasMatchingListener bool         `json:"hasMatchingListener,omitempty"`
+	Status       `json:",inline"`
+	SelectedPods []PodDetails `json:"selectedPods,omitempty"`
+	// Deprecated: Connector matching status is no longer reported. Retained to
+	// decode status written by older controllers during migration.
+	HasMatchingListener bool `json:"hasMatchingListener,omitempty"`
 }
 
 // +genclient
@@ -1060,16 +1094,27 @@ type AttachedConnectorBinding struct {
 }
 
 type AttachedConnectorBindingStatus struct {
-	Status              `json:",inline"`
+	Status `json:",inline"`
+	// Deprecated: Binding matching status is no longer reported. Retained to
+	// decode status written by older controllers during migration.
 	HasMatchingListener bool `json:"hasMatchingListener,omitempty"`
 }
 
 func (c *AttachedConnectorBinding) SetConfigured(err error) bool {
-	if c.Status.SetCondition(CONDITION_TYPE_CONFIGURED, ErrorOrReadyCondition(err), c.ObjectMeta.Generation) {
-		c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED, CONDITION_TYPE_MATCHED}, c.ObjectMeta.Generation)
-		return true
+	changed := c.Status.SetCondition(CONDITION_TYPE_CONFIGURED, ErrorOrReadyCondition(err), c.ObjectMeta.Generation)
+	if c.clearLegacyMatchingStatus() {
+		changed = true
 	}
-	return false
+	if c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.ObjectMeta.Generation) {
+		changed = true
+	}
+	return changed
+}
+
+func (c *AttachedConnectorBinding) clearLegacyMatchingStatus() bool {
+	changed := c.Status.HasMatchingListener
+	c.Status.HasMatchingListener = false
+	return meta.RemoveStatusCondition(&c.Status.Conditions, CONDITION_TYPE_MATCHED) || changed
 }
 
 func (c *AttachedConnectorBinding) setMatched() bool {
@@ -1080,13 +1125,22 @@ func (c *AttachedConnectorBinding) setMatched() bool {
 	return false
 }
 
+// SetHasMatchingListener is retained for non-Kubernetes compatibility.
+// Deprecated: AttachedConnectorBinding matching status is no longer reported.
 func (c *AttachedConnectorBinding) SetHasMatchingListener(value bool) bool {
-	if c.Status.HasMatchingListener != value {
-		c.Status.HasMatchingListener = value
-		c.setMatched()
-		return true
+	changed := c.Status.HasMatchingListener != value
+	c.Status.HasMatchingListener = value
+	return c.setMatched() || changed
+}
+
+// ClearLegacyMatchingStatus clears Binding matching status written by older
+// controllers and recalculates Ready from Configured alone.
+func (c *AttachedConnectorBinding) ClearLegacyMatchingStatus() bool {
+	changed := c.clearLegacyMatchingStatus()
+	if c.Status.setReady([]string{CONDITION_TYPE_CONFIGURED}, c.ObjectMeta.Generation) {
+		changed = true
 	}
-	return false
+	return changed
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -1099,8 +1153,10 @@ type AttachedConnectorBindingList struct {
 }
 
 type AttachedConnectorBindingSpec struct {
-	ConnectorNamespace string            `json:"connectorNamespace"`
-	RoutingKey         string            `json:"routingKey"`
-	ExposePodsByName   bool              `json:"exposePodsByName,omitempty"`
-	Settings           map[string]string `json:"settings,omitempty"`
+	ConnectorNamespace string `json:"connectorNamespace"`
+	RoutingKey         string `json:"routingKey"`
+	// Deprecated: pod-name exposure is unsupported. New and changed Kubernetes
+	// resources must not set this field to true.
+	ExposePodsByName bool              `json:"exposePodsByName,omitempty"`
+	Settings         map[string]string `json:"settings,omitempty"`
 }

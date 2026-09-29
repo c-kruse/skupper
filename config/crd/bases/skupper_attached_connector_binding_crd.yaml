@@ -31,7 +31,9 @@ spec:
                   type: string
                 exposePodsByName:
                   description: |-
-                    If true, expose each pod as an individual service.
+                    Deprecated and unsupported. New or changed resources must not
+                    set this field to true. Replace legacy pod-name exposure with
+                    pod selector targeting before controller cutover.
                   type: boolean
                 settings:
                   description: |-
@@ -43,6 +45,9 @@ spec:
               required:
               - connectorNamespace
               - routingKey
+              x-kubernetes-validations:
+              - rule: '!has(self.exposePodsByName) || !self.exposePodsByName || (oldSelf != null && has(oldSelf.exposePodsByName) && oldSelf.exposePodsByName)'
+                message: exposePodsByName is unsupported; use pod selector targeting instead
             status:
               type: object
               properties:
@@ -96,8 +101,9 @@ spec:
                     - status
                     - type
                 hasMatchingListener:
-                  description: |- 
-                    Whether there is at least one listener in the network with a matching routing key.
+                  description: |-
+                    Deprecated. This field is retained only for compatibility with
+                    status written by older controllers and is no longer populated.
                   type: boolean
       subresources:
         status: {}
@@ -114,10 +120,6 @@ spec:
         type: string
         description: The status of the connector
         jsonPath: .status.status
-      - name: Has Matching Listener
-        type: boolean
-        description: Whether there is at least one listener in the network with a matching routing key.
-        jsonPath: .status.hasMatchingListener
   scope: Namespaced
   names:
     plural: attachedconnectorbindings

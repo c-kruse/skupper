@@ -689,6 +689,17 @@ cutover. Update CRD schema/documentation, generated clients, CLI displays/waits,
 and tests together. Public boolean/list fields cannot express uncertainty alone;
 use an explicit observation condition and freshness/generation identity.
 
+### Migration from `exposePodsByName`
+
+`spec.exposePodsByName: true` previously created per-pod routing and Services.
+It is not supported by the reconciled controller. Existing serialized fields are
+retained temporarily so resources and clients can be decoded, but no new value
+may request it and legacy `true` values must be removed before the namespace is
+cut over. Replace the per-pod-name endpoint assumption with a normal Listener or
+Connector pod selector and use `status.selectedPods` to inspect the selected
+workloads. The controller does not reinterpret `true` as `false`, because that
+would hide a behavior change.
+
 Use Kubernetes conditions with True/False/Unknown appropriately. `Configured`
 must distinguish intent publication from verified application; the proposal is
 to set it from application evidence and describe Pending/Unknown explicitly.
