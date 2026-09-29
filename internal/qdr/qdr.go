@@ -1064,6 +1064,18 @@ func (a TcpEndpoint) equivalentVerifyHostname(b TcpEndpoint) bool {
 	return *a.VerifyHostname == *b.VerifyHostname
 }
 
+func (a TcpEndpoint) equivalentMultiAddressStrategy(b TcpEndpoint) bool {
+	strategyA := a.MultiAddressStrategy
+	if a.Address != "" && strategyA == "none" {
+		strategyA = ""
+	}
+	strategyB := b.MultiAddressStrategy
+	if b.Address != "" && strategyB == "none" {
+		strategyB = ""
+	}
+	return strategyA == strategyB
+}
+
 func (a TcpEndpoint) Equivalent(b TcpEndpoint) bool {
 	obsA := a.Observer
 	if obsA == "" {
@@ -1075,7 +1087,7 @@ func (a TcpEndpoint) Equivalent(b TcpEndpoint) bool {
 	}
 	if !equivalentHost(a.Host, b.Host) || a.Port != b.Port || a.Address != b.Address ||
 		a.SiteId != b.SiteId || a.ProcessID != b.ProcessID || !a.equivalentVerifyHostname(b) ||
-		obsA != obsB || a.AuthenticatePeer != b.AuthenticatePeer || a.SslProfile != b.SslProfile {
+		!a.equivalentMultiAddressStrategy(b) || obsA != obsB || a.AuthenticatePeer != b.AuthenticatePeer || a.SslProfile != b.SslProfile {
 		return false
 	}
 	return true

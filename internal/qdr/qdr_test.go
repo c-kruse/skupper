@@ -777,4 +777,20 @@ func TestTcpEndpointEquivalentHttpModes(t *testing.T) {
 	if a.Equivalent(b) {
 		t.Errorf("expected http1 vs none to be not equivalent")
 	}
+	// The documented none default is equivalent to omission for a direct
+	// single address, but real multi-address strategies remain significant.
+	a = TcpEndpoint{Address: "orders"}
+	b = TcpEndpoint{Address: "orders", MultiAddressStrategy: "none"}
+	if !a.Equivalent(b) {
+		t.Errorf("expected omitted vs none single-address strategy to be equivalent")
+	}
+	b.MultiAddressStrategy = "priority"
+	if a.Equivalent(b) {
+		t.Errorf("expected omitted vs priority strategy to be not equivalent")
+	}
+	a = TcpEndpoint{MultiAddressStrategy: "priority"}
+	b = TcpEndpoint{MultiAddressStrategy: "weighted"}
+	if a.Equivalent(b) {
+		t.Errorf("expected priority vs weighted strategy to be not equivalent")
+	}
 }

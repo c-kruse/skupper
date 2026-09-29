@@ -247,6 +247,12 @@ func normalizeManagedReadback(config, desired *qdr.RouterConfig) {
 	for name, endpoint := range config.Bridges.TcpListeners {
 		endpoint.OperStatus = ""
 		endpoint.ConnectionMsg = ""
+		// QDR's documented single-address default is "none", which the TCP
+		// adaptor stores internally as an omitted strategy. Both forms are
+		// equivalent only when the listener has a direct address.
+		if endpoint.Address != "" && endpoint.MultiAddressStrategy == "none" {
+			endpoint.MultiAddressStrategy = ""
+		}
 		if endpoint.Observer == "auto" {
 			endpoint.Observer = ""
 		}

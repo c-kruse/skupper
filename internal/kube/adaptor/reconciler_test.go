@@ -92,6 +92,7 @@ func TestReconcileIgnoresOperationalReadbackAndRouterDefaults(t *testing.T) {
 		listener := applied.Bridges.TcpListeners[name]
 		listener.Host = "0.0.0.0"
 		listener.Observer = "auto"
+		listener.MultiAddressStrategy = "none"
 		listener.OperStatus = "up"
 		listener.ConnectionMsg = "listening"
 		applied.Bridges.TcpListeners[name] = listener
@@ -104,6 +105,50 @@ func TestReconcileIgnoresOperationalReadbackAndRouterDefaults(t *testing.T) {
 	result := Reconcile(fake, CompiledIntent{Config: *desired})
 	if !result.Applied {
 		t.Fatalf("QDR runtime/default fields caused false mismatch: %v", result.Err)
+	}
+}
+
+func TestVerifyOwnedPreservesMultiAddressStrategyDifferences(t *testing.T) {
+	name := ownedNamePrefix + "listener"
+	tests := []struct {
+		name     string
+		desired  qdr.TcpEndpoint
+		actual   qdr.TcpEndpoint
+		wantFail bool
+	}{
+		{
+			name:    "single address omitted and none are equivalent",
+			desired: qdr.TcpEndpoint{Name: name, Address: "orders"},
+			actual:  qdr.TcpEndpoint{Name: name, Address: "orders", MultiAddressStrategy: "none"},
+		},
+		{
+			name:     "single address priority is not none",
+			desired:  qdr.TcpEndpoint{Name: name, Address: "orders"},
+			actual:   qdr.TcpEndpoint{Name: name, Address: "orders", MultiAddressStrategy: "priority"},
+			wantFail: true,
+		},
+		{
+			name:     "multi address priority and weighted differ",
+			desired:  qdr.TcpEndpoint{Name: name, MultiAddressStrategy: "priority"},
+			actual:   qdr.TcpEndpoint{Name: name, MultiAddressStrategy: "weighted"},
+			wantFail: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			desired := basicConfig()
+			desired.Bridges.TcpListeners[name] = test.desired
+			actual := cloneRouterConfig(desired)
+			actual.Bridges.TcpListeners[name] = test.actual
+			err := verifyOwned(&actual, desired)
+			if test.wantFail {
+				if err == nil || !strings.Contains(err.Error(), `field "multiAddressStrategy"`) {
+					t.Fatalf("strategy mismatch not detected: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("documented default did not normalize: %v", err)
+			}
+		})
 	}
 }
 
