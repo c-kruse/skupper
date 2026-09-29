@@ -27,6 +27,15 @@ readonly SKUPPER_CLI_IMAGE=${SKUPPER_CLI_IMAGE:-${SKUPPER_IMAGE_REGISTRY}/cli:${
 readonly SKUPPER_NETWORK_OBSERVER_IMAGE=${SKUPPER_NETWORK_OBSERVER_IMAGE:-${SKUPPER_IMAGE_REGISTRY}/network-observer:${SKUPPER_IMAGE_TAG}}
 readonly SKUPPER_TESTING=${SKUPPER_TESTING:-false}
 
+# Namespace-scoped installations still need a cluster-scoped TokenReview grant.
+# Set this explicitly when generating manifests for a different namespace/context.
+if [ "${SCOPE}" = "cluster" ]; then
+    readonly SKUPPER_CONTROLLER_NAMESPACE=${SKUPPER_CONTROLLER_NAMESPACE:-skupper}
+else
+    context_namespace=$(${KUBECTL} config view --minify -o jsonpath='{..namespace}' 2>/dev/null || true)
+    readonly SKUPPER_CONTROLLER_NAMESPACE=${SKUPPER_CONTROLLER_NAMESPACE:-${context_namespace:-default}}
+fi
+
 DEBUG=${DEBUG:=false}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +46,7 @@ skupper::deployment::namespace() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: skupper
+  name: ${SKUPPER_CONTROLLER_NAMESPACE}
 EOF
 }
 
@@ -61,7 +70,7 @@ metadata:
     application: skupper-controller
     app.kubernetes.io/name: skupper-controller
   name: skupper-controller
-  namespace: skupper
+  namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
 EOF
 }
 
@@ -86,12 +95,16 @@ EOF
 skupper::deployment::deploy-cluster() {
 		cat << EOF
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: skupper-controller
-  namespace: skupper
+  namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
 spec:
-  replicas: 1
+  replicas: 2
+  serviceName: skupper-controller-headless
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       application: skupper-controller
@@ -125,7 +138,47 @@ spec:
           ports:
             - name: metrics
               containerPort: 9000
+            - name: enrollment
+              containerPort: 8443
+            - name: router-control
+              containerPort: 8444
+            - name: health
+              containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 150
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
           env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CONTROLLER_NAME
+              value: skupper-controller
             - name: SKUPPER_KUBE_ADAPTOR_IMAGE
               value: ${SKUPPER_KUBE_ADAPTOR_IMAGE}
             - name: SKUPPER_KUBE_ADAPTOR_IMAGE_PULL_POLICY
@@ -152,11 +205,15 @@ EOF
 skupper::deployment::deploy-namespace() {
 		cat << EOF
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: skupper-controller
 spec:
-  replicas: 1
+  replicas: 2
+  serviceName: skupper-controller-headless
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       application: skupper-controller
@@ -190,7 +247,47 @@ spec:
           ports:
             - name: metrics
               containerPort: 9000
+            - name: enrollment
+              containerPort: 8443
+            - name: router-control
+              containerPort: 8444
+            - name: health
+              containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 150
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
           env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CONTROLLER_NAME
+              value: skupper-controller
             - name: WATCH_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -218,13 +315,86 @@ spec:
 EOF
 }
 
+skupper::deployment::control-plane() {
+    cat << EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: skupper-controller
+spec:
+  selector:
+    application: skupper-controller
+  ports:
+    - name: enrollment
+      port: 8443
+      targetPort: enrollment
+    - name: router-control
+      port: 8444
+      targetPort: router-control
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skupper-controller-headless
+spec:
+  clusterIP: None
+  selector:
+    application: skupper-controller
+  ports:
+    - name: health
+      port: 8080
+      targetPort: health
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: skupper-controller
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      application: skupper-controller
+EOF
+    if [ "${SCOPE}" = "namespace" ]; then
+        cat << EOF
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: skupper-controller-enrollment
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: skupper-controller-enrollment-${SKUPPER_CONTROLLER_NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: skupper-controller
+    namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: skupper-controller-enrollment
+EOF
+    fi
+}
+
 skupper::deployment::kustomization-cluster() {
 		cat << EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
 resources:
 - namespace.yaml
 - manager.yaml
+- control-plane.yaml
 - service_account.yaml
 - ../../config/rbac/cluster
 EOF
@@ -234,8 +404,10 @@ skupper::deployment::kustomization-cluster-sans-ns() {
 		cat << EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
 resources:
 - manager.yaml
+- control-plane.yaml
 - service_account.yaml
 - ../../config/rbac/cluster
 EOF
@@ -245,9 +417,11 @@ skupper::deployment::kustomization-namespace() {
 		cat << EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: ${SKUPPER_CONTROLLER_NAMESPACE}
 resources:
 - controller-cm.yaml
 - manager.yaml
+- control-plane.yaml
 - service_account.yaml
 - ../../config/rbac/namespace
 EOF
@@ -258,7 +432,7 @@ skupper::patch::imagePullPolicy() {
 patches:
 - patch: |
     apiVersion: apps/v1
-    kind: Deployment
+    kind: StatefulSet
     spec:
       template:
         spec:
@@ -274,7 +448,7 @@ patches:
       name: skupper-controller
 EOF
 	if [ ${SCOPE} == "cluster" ]; then
-		echo "      namespace: skupper"
+		echo "      namespace: ${SKUPPER_CONTROLLER_NAMESPACE}"
 	fi
 }
 
@@ -305,8 +479,25 @@ main () {
     exit 1
   fi
 
+  skupper::deployment::control-plane > "${ktempdir}/manifests/control-plane.yaml"
+
   if [ ${FOR_CHART} != "true" ]; then
     skupper::deployment::add-crds >> "${ktempdir}/manifests/kustomization.yaml"
+  fi
+  if [ "${SCOPE}" = "cluster" ]; then
+    cat << EOF >> "${ktempdir}/manifests/kustomization.yaml"
+replacements:
+  - source:
+      kind: StatefulSet
+      name: skupper-controller
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          kind: ClusterRoleBinding
+          name: skupper-controller
+        fieldPaths:
+          - subjects.0.namespace
+EOF
   fi
   if [ "${SKUPPER_TESTING}" == "true" ]; then
 	  skupper::patch::imagePullPolicy >> "${ktempdir}/manifests/kustomization.yaml"

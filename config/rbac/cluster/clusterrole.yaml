@@ -9,6 +9,7 @@ rules:
       - ""
     resources:
       - nodes
+      - namespaces
     verbs:
       - get
       - list
@@ -18,7 +19,6 @@ rules:
     resources:
       - configmaps
       - pods
-      - pods/exec
       - services
       - secrets
       - serviceaccounts
@@ -31,6 +31,21 @@ rules:
       - update
       - delete
       - patch
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
   - apiGroups:
       - apps
     resources:

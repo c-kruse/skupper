@@ -115,6 +115,8 @@ fi
 
 # Substitute "namespace: <name>" with "namespace: {{ .Release.Namespace }}"
 sed 's/namespace: [a-zA-Z0-9.-]*/namespace: {{ .Release.Namespace }}/g' "$CLUSTER_TEMPLATE" > "${CLUSTER_TEMPLATE}.tmp" && mv "${CLUSTER_TEMPLATE}.tmp" "$CLUSTER_TEMPLATE"
+sed 's/namespace: [a-zA-Z0-9.-]*/namespace: {{ .Release.Namespace }}/g' "$NAMESPACE_TEMPLATE" > "${NAMESPACE_TEMPLATE}.tmp" && mv "${NAMESPACE_TEMPLATE}.tmp" "$NAMESPACE_TEMPLATE"
+sed -E 's/name: skupper-controller-enrollment-[a-zA-Z0-9.-]+/name: skupper-controller-enrollment-{{ .Release.Namespace }}/' "$NAMESPACE_TEMPLATE" > "${NAMESPACE_TEMPLATE}.tmp" && mv "${NAMESPACE_TEMPLATE}.tmp" "$NAMESPACE_TEMPLATE"
 
 sed -E 's|quay.io/skupper/controller:[a-zA-Z0-9.-]*|{{ .Values.controllerImage }}|' "$CLUSTER_TEMPLATE" > "${CLUSTER_TEMPLATE}.tmp" && mv "${CLUSTER_TEMPLATE}.tmp" "$CLUSTER_TEMPLATE"
 sed -E 's|quay.io/skupper/controller:[a-zA-Z0-9.-]*|{{ .Values.controllerImage }}|' "$NAMESPACE_TEMPLATE" > "${NAMESPACE_TEMPLATE}.tmp" && mv "${NAMESPACE_TEMPLATE}.tmp" "$NAMESPACE_TEMPLATE"
