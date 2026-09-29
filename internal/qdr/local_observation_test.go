@@ -3,6 +3,8 @@ package qdr
 import (
 	"strings"
 	"testing"
+
+	amqp "github.com/interconnectedcloud/go-amqp"
 )
 
 func TestDecodeLocalAddressPreservesClassAndExactRoutingKey(t *testing.T) {
@@ -44,6 +46,29 @@ func TestManagementLogAttributesRedactsProxyPasswordWithoutChangingRequest(t *te
 	}
 	if attributes["password"] != "secret" {
 		t.Fatal("redaction changed management request")
+	}
+}
+
+func TestProxyManagementResponseErrorOmitsCredentialBearingDescription(t *testing.T) {
+	const placeholderPassword = "placeholder-proxy-password"
+	response := &amqp.Message{ApplicationProperties: map[string]any{
+		"statusCode":        int32(400),
+		"statusDescription": "duplicate entity attributes include password=" + placeholderPassword,
+	}}
+
+	for _, operation := range []string{"CREATE", "UPDATE"} {
+		err := managementResponseError(operation, "io.skupper.router.proxyProfile", "proxy", response)
+		if err == nil {
+			t.Fatal("mock management failure was accepted")
+		}
+		if strings.Contains(err.Error(), placeholderPassword) || strings.Contains(err.Error(), "statusDescription") {
+			t.Fatal("credential-bearing management description escaped sanitization")
+		}
+		for _, expected := range []string{operation, "io.skupper.router.proxyProfile", "proxy", "400"} {
+			if !strings.Contains(err.Error(), expected) {
+				t.Fatalf("safe management diagnostic omitted %q", expected)
+			}
+		}
 	}
 }
 

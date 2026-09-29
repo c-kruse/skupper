@@ -451,10 +451,24 @@ func (a *Agent) request(operation string, typename string, name string, attribut
 		return fmt.Errorf("Failed to receive response: %s", err)
 	}
 	response.Accept()
+	return managementResponseError(operation, typename, name, response)
+}
+
+func managementResponseError(operation, typename, name string, response *amqp.Message) error {
 	if status, ok := AsInt(response.ApplicationProperties["statusCode"]); !ok || !isOk(status) {
+		if credentialBearingManagementRequest(operation, typename) {
+			if !ok {
+				return fmt.Errorf("management %s %s %q failed with invalid status", operation, typename, name)
+			}
+			return fmt.Errorf("management %s %s %q failed with status %d", operation, typename, name, status)
+		}
 		return fmt.Errorf("Query failed with: %s", response.ApplicationProperties["statusDescription"])
 	}
 	return nil
+}
+
+func credentialBearingManagementRequest(operation, typename string) bool {
+	return typename == "io.skupper.router.proxyProfile" && (operation == "CREATE" || operation == "UPDATE")
 }
 
 func (a *Agent) Create(typename string, name string, entity recordType) error {
