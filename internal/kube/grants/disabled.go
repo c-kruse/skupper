@@ -3,6 +3,7 @@ package grants
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -17,10 +18,16 @@ type GrantsDisabled struct {
 }
 
 func (s *GrantsDisabled) markGrantNotEnabled(key string, grant *skupperv2alpha1.AccessGrant) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.markGrantNotEnabledContext(ctx, key, grant)
+}
+
+func (s *GrantsDisabled) markGrantNotEnabledContext(ctx context.Context, key string, grant *skupperv2alpha1.AccessGrant) error {
 	if grant == nil || !grant.Status.SetStatusMessage("AccessGrants are not enabled") {
 		return nil
 	}
-	if _, err := s.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).UpdateStatus(context.TODO(), grant, metav1.UpdateOptions{}); err != nil {
+	if _, err := s.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).UpdateStatus(ctx, grant, metav1.UpdateOptions{}); err != nil {
 		s.logger.Error("AccessGrants are not enabled. Error updating status", slog.String("key", key), slog.Any("error", err))
 	}
 	return nil

@@ -3,6 +3,7 @@ package grants
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -13,9 +14,16 @@ import (
 type NamespaceFilter func(string) bool
 
 func enabled(controller *watchers.EventProcessor, currentNamespace string, watchNamespace string, config *GrantConfig, generator GrantResponse, filter NamespaceFilter) *GrantsEnabled {
+	return newEnabled(controller, currentNamespace, watchNamespace, config, generator, filter, false)
+}
+
+func newEnabled(controller *watchers.EventProcessor, currentNamespace string, watchNamespace string, config *GrantConfig, generator GrantResponse, filter NamespaceFilter, lifecycle bool) *GrantsEnabled {
 	gc := &GrantsEnabled{
-		grants: newGrants(controller, generator, config.scheme(), config.BaseUrl),
-		logger: slog.New(slog.Default().Handler()).With(slog.String("component", "kube.grants.enabled")),
+		grants:     newGrants(controller, generator, config.scheme(), config.BaseUrl),
+		logger:     slog.New(slog.Default().Handler()).With(slog.String("component", "kube.grants.enabled")),
+		filter:     filter,
+		lifecycle:  lifecycle,
+		serveReady: make(chan struct{}),
 	}
 	gc.server = newServer(config.addr(), config.tlsEnabled(), gc.grants)
 
@@ -23,11 +31,15 @@ func enabled(controller *watchers.EventProcessor, currentNamespace string, watch
 	gc.secretWatcher = controller.WatchSecrets(watchers.ByName(config.TlsCredentialsSecret), watchNamespace, watchers.FilterByNamespace(filter, gc.tlsCredentialsUpdated))
 
 	if config.AutoConfigure {
-		ac, err := newAutoConfigure(gc.securedAccessChanged, controller, currentNamespace, config)
-		if err != nil {
-			gc.logger.Error("Auto configuration of grant server failed", slog.Any("error", err))
+		if lifecycle {
+			gc.autoConfigure = newAutoConfigureDeferred(gc.securedAccessChanged, controller, currentNamespace, config)
+		} else {
+			ac, err := newAutoConfigure(gc.securedAccessChanged, controller, currentNamespace, config)
+			if err != nil {
+				gc.logger.Error("Auto configuration of grant server failed", slog.Any("error", err))
+			}
+			gc.autoConfigure = ac
 		}
-		gc.autoConfigure = ac
 	}
 	if config.RedeemByKey {
 		gc.grants.keyRedeem = true
@@ -44,6 +56,9 @@ type GrantsEnabled struct {
 	started       bool
 	filter        NamespaceFilter
 	logger        *slog.Logger
+	lifecycle     bool
+	serveReady    chan struct{}
+	readyOnce     sync.Once
 }
 
 func (c *GrantsEnabled) Start() {
@@ -77,7 +92,9 @@ func (s *GrantsEnabled) securedAccessChanged(key string, se *skupperv2alpha1.Sec
 		if s.grants.setUrl(se.Status.Endpoints[0].Url()) {
 			s.grants.recheckUrl()
 		}
-		if !s.started {
+		if s.lifecycle {
+			s.readyOnce.Do(func() { close(s.serveReady) })
+		} else if !s.started {
 			s.started = true
 			s.logger.Info("Starting grant server")
 			s.server.start()

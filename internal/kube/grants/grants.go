@@ -21,16 +21,18 @@ import (
 type GrantResponse func(namespace string, name string, subject string, writer io.Writer) error
 
 type Grants struct {
-	clients    internalclient.Clients
-	generator  GrantResponse
-	url        string
-	ca         string
-	scheme     string
-	grants     map[kubetypes.UID]*skupperv2alpha1.AccessGrant
-	grantIndex map[string]kubetypes.UID
-	keyRedeem  bool
-	lock       sync.Mutex
-	logger     *slog.Logger
+	clients       internalclient.Clients
+	generator     GrantResponse
+	url           string
+	ca            string
+	scheme        string
+	grants        map[kubetypes.UID]*skupperv2alpha1.AccessGrant
+	grantIndex    map[string]kubetypes.UID
+	keyRedeem     bool
+	lock          sync.Mutex
+	logger        *slog.Logger
+	authorize     func() error
+	effectContext func() (context.Context, context.CancelFunc)
 }
 
 func newGrants(clients internalclient.Clients, generator GrantResponse, scheme string, url string) *Grants {
@@ -179,6 +181,9 @@ func (g *Grants) checkCa(key string, grant *skupperv2alpha1.AccessGrant) bool {
 }
 
 func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) error {
+	if err := g.authorizeEffect(); err != nil {
+		return err
+	}
 	if grant == nil {
 		g.remove(key)
 		return nil
@@ -187,7 +192,12 @@ func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) erro
 	// if RedemptionsAllowed is not set default to 1 so that grant is usable
 	if grant.Spec.RedemptionsAllowed == 0 {
 		grant.Spec.RedemptionsAllowed = 1
-		_, e := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).Update(context.TODO(), grant, metav1.UpdateOptions{})
+		ctx, cancel := g.newEffectContext()
+		defer cancel()
+		if err := g.authorizeEffect(); err != nil {
+			return err
+		}
+		_, e := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).Update(ctx, grant, metav1.UpdateOptions{})
 		if e != nil {
 			return fmt.Errorf("%s", fmt.Sprintf("Failed updating Redemptions Allowed %s", e))
 		} else {
@@ -199,7 +209,9 @@ func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) erro
 	changed := false
 	var status []string
 
-	if sites, err := g.clients.GetSkupperClient().SkupperV2alpha1().Sites(grant.Namespace).List(context.TODO(), metav1.ListOptions{}); err == nil && sites != nil {
+	ctx, cancel := g.newEffectContext()
+	defer cancel()
+	if sites, err := g.clients.GetSkupperClient().SkupperV2alpha1().Sites(grant.Namespace).List(ctx, metav1.ListOptions{}); err == nil && sites != nil {
 		for _, site := range sites.Items {
 			if site.IsReady() && site.Spec.Edge {
 				status = append(status, "Edge sites cannot accept incoming links from remote sites")
@@ -266,7 +278,12 @@ func (g *Grants) checkGrant(key string, grant *skupperv2alpha1.AccessGrant) erro
 }
 
 func (g *Grants) updateGrantStatus(grant *skupperv2alpha1.AccessGrant) error {
-	updated, err := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).UpdateStatus(context.TODO(), grant, metav1.UpdateOptions{})
+	if err := g.authorizeEffect(); err != nil {
+		return err
+	}
+	ctx, cancel := g.newEffectContext()
+	defer cancel()
+	updated, err := g.clients.GetSkupperClient().SkupperV2alpha1().AccessGrants(grant.ObjectMeta.Namespace).UpdateStatus(ctx, grant, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -313,6 +330,10 @@ func (g *Grants) checkAndUpdateAccessToken(key string, data []byte) (*skupperv2a
 }
 
 func (g *Grants) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := g.authorizeEffect(); err != nil {
+		http.Error(w, "Grant server is not active", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodPost {
 		g.logger.Error("Bad method for path", slog.String("method", r.Method), slog.String("path", r.URL.Path))
 		http.Error(w, "Only POST is supported", http.StatusMethodNotAllowed)
@@ -336,6 +357,10 @@ func (g *Grants) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.write(w)
 		return
 	}
+	if err := g.authorizeEffect(); err != nil {
+		http.Error(w, "Grant server lost authority", http.StatusServiceUnavailable)
+		return
+	}
 
 	name := r.Header.Get("name")
 	if name == "" {
@@ -357,6 +382,20 @@ func (g *Grants) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.logger.Info("Redemption of access token succeeded", slog.String("namespace", grant.Namespace), slog.String("name", grant.Name))
+}
+
+func (g *Grants) authorizeEffect() error {
+	if g.authorize != nil {
+		return g.authorize()
+	}
+	return nil
+}
+
+func (g *Grants) newEffectContext() (context.Context, context.CancelFunc) {
+	if g.effectContext != nil {
+		return g.effectContext()
+	}
+	return context.WithTimeout(context.Background(), 10*time.Second)
 }
 
 func (g *Grants) keyFromUrl(url string) (string, bool) {

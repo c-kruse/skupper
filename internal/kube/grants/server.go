@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -95,8 +96,37 @@ func (s *Server) listenAndServe() error {
 
 func (s *Server) stop() error {
 	err := s.server.Close()
-	s.listener.Close()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
 	s.listener = nil
+	return err
+}
+
+func (s *Server) run(ctx context.Context, gate EffectGate) error {
+	if err := gate.Check(); err != nil {
+		return err
+	}
+	if err := s.listen(); err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-runCtx.Done():
+		case <-gate.Done():
+		}
+		_ = s.stop()
+		close(done)
+	}()
+	err := s.serve()
+	cancel()
+	<-done
+	if err == http.ErrServerClosed {
+		return nil
+	}
 	return err
 }
 

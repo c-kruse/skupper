@@ -31,11 +31,18 @@ func Test_configure(t *testing.T) {
 		expectedError     string
 	}{
 		{
-			name:              "simple",
-			podname:           "my-pod",
-			port:              1234,
-			namespace:         "test",
-			k8sObjects:        []runtime.Object{tf.pod("my-pod", "test", map[string]string{"foo": "bar"}, ref1)},
+			name:      "simple",
+			podname:   "my-pod",
+			port:      1234,
+			namespace: "test",
+			k8sObjects: []runtime.Object{tf.pod("my-pod", "test", map[string]string{
+				"foo":                                "bar",
+				"pod-index":                          "0",
+				"apps.kubernetes.io/pod-index":       "0",
+				"controller-revision-hash":           "revision",
+				"statefulset.kubernetes.io/pod-name": "my-pod",
+				"pod-template-hash":                  "template",
+			}, ref1)},
 			expectedSelector:  map[string]string{"foo": "bar"},
 			expectedOwnerRefs: ref1,
 		},
@@ -148,7 +155,7 @@ func Test_configure(t *testing.T) {
 				port:                 tt.port,
 				tlsCredentialsSecret: "skupper-grant-server",
 			}
-			err = ac.configure(client, tt.namespace)
+			err = ac.configure(context.Background(), client, tt.namespace)
 			if tt.expectedError != "" {
 				assert.ErrorContains(t, err, tt.expectedError)
 			} else if err != nil {

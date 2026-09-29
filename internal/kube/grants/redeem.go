@@ -11,10 +11,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
@@ -22,23 +24,45 @@ import (
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
+const redemptionResponseKey = "response"
+
 func RedeemAccessToken(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients) error {
+	return RedeemAccessTokenContext(context.Background(), token, site, clients, nil)
+}
+
+func RedeemAccessTokenContext(ctx context.Context, token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients, beforeEffects func(context.Context) error) error {
 	if token.Spec.Ca == "" {
 		err := fmt.Errorf("token does not have a CA")
-		return updateAccessTokenStatus(token, err, clients)
+		return updateAccessTokenStatusContext(ctx, token, err, clients, beforeEffects)
 	}
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig(token),
 	}
-	body, err := postTokenRequest(token, site, transport)
+	body, err := postTokenRequestContext(ctx, token, site, transport)
 	if err != nil {
-		return updateAccessTokenStatus(token, err, clients)
+		return updateAccessTokenStatusContext(ctx, token, err, clients, beforeEffects)
 	}
 	slog.Info("HTTP Post was successful, decoding response body",
 		slog.String("URL", token.Spec.Url),
 		slog.String("namespace", token.Namespace),
 		slog.String("name", token.Name))
-	return handleTokenResponse(body, token, site, clients)
+	if beforeEffects != nil {
+		if err := beforeEffects(ctx); err != nil {
+			return err
+		}
+	}
+	return handleTokenResponseContext(ctx, body, token, site, clients, beforeEffects)
+}
+
+func requestAccessTokenContext(ctx context.Context, token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site) ([]byte, error) {
+	if token.Spec.Ca == "" {
+		return nil, fmt.Errorf("token does not have a CA")
+	}
+	body, err := postTokenRequestContext(ctx, token, site, &http.Transport{TLSClientConfig: tlsConfig(token)})
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(body)
 }
 
 func tlsConfig(token *skupperv2alpha1.AccessToken) *tls.Config {
@@ -51,6 +75,10 @@ func tlsConfig(token *skupperv2alpha1.AccessToken) *tls.Config {
 }
 
 func postTokenRequest(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, transport http.RoundTripper) (io.Reader, error) {
+	return postTokenRequestContext(context.Background(), token, site, transport)
+}
+
+func postTokenRequestContext(ctx context.Context, token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, transport http.RoundTripper) (io.Reader, error) {
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   10 * time.Second,
@@ -65,7 +93,7 @@ func postTokenRequest(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.
 	if url.Scheme != "https" {
 		return nil, fmt.Errorf("token url scheme must be https")
 	}
-	request, err := http.NewRequest(http.MethodPost, token.Spec.Url, bytes.NewReader([]byte(token.Spec.Code)))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, token.Spec.Url, bytes.NewReader([]byte(token.Spec.Code)))
 	if err != nil {
 		return nil, fmt.Errorf("Controller got error: %s", err)
 	}
@@ -75,21 +103,32 @@ func postTokenRequest(token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.
 	if err != nil {
 		return nil, fmt.Errorf("Controller got error: %s", err)
 	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1024*1024+1))
+	if readErr != nil {
+		return nil, fmt.Errorf("Controller could not read response: %s", readErr)
+	}
+	if len(body) > 1024*1024 {
+		return nil, fmt.Errorf("Controller response exceeds size limit")
+	}
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
 		return nil, fmt.Errorf("Controller got failed response: %d (%s) %s", response.StatusCode, http.StatusText(response.StatusCode), strings.TrimSpace(string(body)))
 	}
-	return response.Body, nil
+	return bytes.NewReader(body), nil
 }
 
 func handleTokenResponse(body io.Reader, token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients) error {
+	return handleTokenResponseContext(context.Background(), body, token, site, clients, nil)
+}
+
+func handleTokenResponseContext(ctx context.Context, body io.Reader, token *skupperv2alpha1.AccessToken, site *skupperv2alpha1.Site, clients internalclient.Clients, beforeEffects func(context.Context) error) error {
 	decoder := newLinkDecoder(body)
 	if err := decoder.decodeAll(); err != nil {
 		slog.Error("Could not decode response for AccessToken",
 			slog.String("namespace", token.Namespace),
 			slog.String("name", token.Name),
 			slog.Any("error", err))
-		return updateAccessTokenStatus(token, errors.New("Controller could not decode response"), clients)
+		return updateAccessTokenStatusContext(ctx, token, errors.New("Controller could not decode response"), clients, beforeEffects)
 	}
 	refs := []metav1.OwnerReference{
 		{
@@ -100,25 +139,120 @@ func handleTokenResponse(body io.Reader, token *skupperv2alpha1.AccessToken, sit
 		},
 	}
 	decoder.secret.ObjectMeta.OwnerReferences = refs
-	if _, err := clients.GetKubeClient().CoreV1().Secrets(token.ObjectMeta.Namespace).Create(context.TODO(), &decoder.secret, metav1.CreateOptions{}); err != nil {
-		return updateAccessTokenStatus(token, fmt.Errorf("Controller could not create received secret: %s", err), clients)
+	if err := authorizeEffect(ctx, beforeEffects); err != nil {
+		return err
+	}
+	if err := ensureResponseSecret(ctx, token.Namespace, &decoder.secret, clients); err != nil {
+		return updateAccessTokenStatusContext(ctx, token, fmt.Errorf("Controller could not create received secret: %s", err), clients, beforeEffects)
 	}
 	for _, link := range decoder.links {
 		link.ObjectMeta.OwnerReferences = refs
 		if token.Spec.LinkCost > 0 {
 			link.Spec.Cost = token.Spec.LinkCost
 		}
-		if _, err := clients.GetSkupperClient().SkupperV2alpha1().Links(token.ObjectMeta.Namespace).Create(context.TODO(), &link, metav1.CreateOptions{}); err != nil {
-			return updateAccessTokenStatus(token, fmt.Errorf("Controller could not create received link: %s", err), clients)
+		if err := authorizeEffect(ctx, beforeEffects); err != nil {
+			return err
+		}
+		if err := ensureResponseLink(ctx, token.Namespace, &link, clients); err != nil {
+			return updateAccessTokenStatusContext(ctx, token, fmt.Errorf("Controller could not create received link: %s", err), clients, beforeEffects)
 		}
 	}
 
-	return updateAccessTokenStatus(token, nil, clients)
+	return updateAccessTokenStatusContext(ctx, token, nil, clients, beforeEffects)
 }
 
 func updateAccessTokenStatus(token *skupperv2alpha1.AccessToken, err error, clients internalclient.Clients) error {
+	return updateAccessTokenStatusContext(context.Background(), token, err, clients, nil)
+}
+
+func updateAccessTokenStatusContext(ctx context.Context, token *skupperv2alpha1.AccessToken, err error, clients internalclient.Clients, beforeEffects func(context.Context) error) error {
 	if token.SetRedeemed(err) {
-		_, err = clients.GetSkupperClient().SkupperV2alpha1().AccessTokens(token.ObjectMeta.Namespace).UpdateStatus(context.TODO(), token, metav1.UpdateOptions{})
+		if gateErr := authorizeEffect(ctx, beforeEffects); gateErr != nil {
+			return gateErr
+		}
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err = clients.GetSkupperClient().SkupperV2alpha1().AccessTokens(token.ObjectMeta.Namespace).UpdateStatus(ctx, token, metav1.UpdateOptions{})
+		return err
+	}
+	return nil
+}
+
+func authorizeEffect(ctx context.Context, authorize func(context.Context) error) error {
+	if authorize != nil {
+		return authorize(ctx)
+	}
+	return nil
+}
+
+func redemptionResponseName(token *skupperv2alpha1.AccessToken) string {
+	return "skupper-redemption-" + string(token.UID)
+}
+
+func redemptionResponseOwner(token *skupperv2alpha1.AccessToken) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: "skupper.io/v2alpha1",
+		Kind:       "AccessToken",
+		Name:       token.Name,
+		UID:        token.UID,
+	}
+}
+
+func saveRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, body []byte, clients internalclient.Clients) error {
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            redemptionResponseName(token),
+			Namespace:       token.Namespace,
+			OwnerReferences: []metav1.OwnerReference{redemptionResponseOwner(token)},
+		},
+		Data: map[string][]byte{redemptionResponseKey: body},
+	}
+	return ensureResponseSecret(ctx, token.Namespace, desired, clients)
+}
+
+func loadRedemptionResponse(ctx context.Context, token *skupperv2alpha1.AccessToken, clients internalclient.Clients) ([]byte, bool, error) {
+	secret, err := clients.GetKubeClient().CoreV1().Secrets(token.Namespace).Get(ctx, redemptionResponseName(token), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !reflect.DeepEqual(secret.OwnerReferences, []metav1.OwnerReference{redemptionResponseOwner(token)}) {
+		return nil, false, fmt.Errorf("stored redemption response ownership changed")
+	}
+	body, ok := secret.Data[redemptionResponseKey]
+	if !ok {
+		return nil, false, fmt.Errorf("stored redemption response is missing")
+	}
+	return body, true, nil
+}
+
+func ensureResponseSecret(ctx context.Context, namespace string, desired *corev1.Secret, clients internalclient.Clients) error {
+	_, err := clients.GetKubeClient().CoreV1().Secrets(namespace).Create(ctx, desired, metav1.CreateOptions{})
+	if !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	existing, getErr := clients.GetKubeClient().CoreV1().Secrets(namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return getErr
+	}
+	if !reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) || !reflect.DeepEqual(existing.Data, desired.Data) || existing.Type != desired.Type {
+		return err
+	}
+	return nil
+}
+
+func ensureResponseLink(ctx context.Context, namespace string, desired *skupperv2alpha1.Link, clients internalclient.Clients) error {
+	_, err := clients.GetSkupperClient().SkupperV2alpha1().Links(namespace).Create(ctx, desired, metav1.CreateOptions{})
+	if !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	existing, getErr := clients.GetSkupperClient().SkupperV2alpha1().Links(namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return getErr
+	}
+	if !reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) || !reflect.DeepEqual(existing.Spec, desired.Spec) {
 		return err
 	}
 	return nil

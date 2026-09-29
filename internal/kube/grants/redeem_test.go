@@ -277,6 +277,53 @@ func Test_handleTokenResponse(t *testing.T) {
 	}
 }
 
+func TestHandleTokenResponseIsRetryableAndFenced(t *testing.T) {
+	credential, err := tf.secret("received", "", "subject", nil)
+	assert.NilError(t, err)
+	response := &CertToken{
+		tlsCredentials: credential,
+		links: []*v2alpha1.Link{
+			tf.link("received", "", []v2alpha1.Endpoint{{Host: "example", Port: "45671"}}, "received"),
+		},
+	}
+	token := tf.token("token", "test", "https://unused", "code", "ca")
+	token.UID = "token-uid"
+	site := tf.site("site", "test")
+	site.UID = "site-uid"
+	client, err := fake.NewFakeClient("test", nil, []runtime.Object{token, site}, "")
+	assert.NilError(t, err)
+
+	apply := func(authorize func(context.Context) error) error {
+		var body bytes.Buffer
+		assert.NilError(t, response.Write(&body))
+		return handleTokenResponseContext(context.Background(), &body, token.DeepCopy(), site, client, authorize)
+	}
+	assert.NilError(t, apply(nil))
+	assert.NilError(t, apply(nil), "identical effects must be safe to retry without another POST")
+
+	otherCredential, err := tf.secret("other", "", "subject", nil)
+	assert.NilError(t, err)
+	otherResponse := &CertToken{
+		tlsCredentials: otherCredential,
+		links: []*v2alpha1.Link{
+			tf.link("other", "", []v2alpha1.Endpoint{{Host: "example", Port: "45672"}}, "other"),
+		},
+	}
+	var body bytes.Buffer
+	assert.NilError(t, otherResponse.Write(&body))
+	checks := 0
+	err = handleTokenResponseContext(context.Background(), &body, token.DeepCopy(), site, client, func(context.Context) error {
+		checks++
+		if checks > 1 {
+			return ErrNotLeader
+		}
+		return nil
+	})
+	assert.ErrorIs(t, err, ErrNotLeader)
+	_, err = client.GetSkupperClient().SkupperV2alpha1().Links("test").Get(context.Background(), "other", metav1.GetOptions{})
+	assert.ErrorContains(t, err, "not found")
+}
+
 func stringP(val string) *string {
 	return &val
 }
