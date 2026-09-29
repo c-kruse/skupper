@@ -289,3 +289,16 @@ func TestSiteGeneratedAccessProjectsHTTPProxyEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestTLSRouteDesiredSpecIncludesGatewayAPIDefaults(t *testing.T) {
+	access := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "access-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443}}}}
+	snapshot := Snapshot{AccessConfig: AccessConfig{ControllerNamespace: "controller-ns"}}
+	route := securedAccessTLSRoutes(snapshot, access, "apps.example")[0]
+	parents, _, _ := unstructured.NestedSlice(route.Object, "spec", "parentRefs")
+	backends, _, _ := unstructured.NestedSlice(route.Object, "spec", "rules")
+	parent := parents[0].(map[string]interface{})
+	backend := backends[0].(map[string]interface{})["backendRefs"].([]interface{})[0].(map[string]interface{})
+	if parent["group"] != "gateway.networking.k8s.io" || parent["kind"] != "Gateway" || backend["group"] != "" || backend["kind"] != "Service" || backend["weight"] != int64(1) {
+		t.Fatalf("Gateway API defaults missing from TLSRoute: %#v", route.Object["spec"])
+	}
+}

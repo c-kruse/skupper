@@ -200,7 +200,7 @@ func securedAccessTLSRoutes(snapshot Snapshot, a *skupperv2alpha1.SecuredAccess,
 	for _, p := range a.Spec.Ports {
 		name := a.Name + "-" + p.Name
 		host := name + "." + a.Namespace + "." + domain
-		spec := map[string]interface{}{"parentRefs": []interface{}{map[string]interface{}{"name": "skupper", "namespace": snapshot.AccessConfig.ControllerNamespace, "sectionName": "tls", "kind": "Gateway"}}, "hostnames": []interface{}{host}, "rules": []interface{}{map[string]interface{}{"backendRefs": []interface{}{map[string]interface{}{"name": a.Name, "namespace": a.Namespace, "port": int64(p.Port)}}}}}
+		spec := map[string]interface{}{"parentRefs": []interface{}{map[string]interface{}{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "skupper", "namespace": snapshot.AccessConfig.ControllerNamespace, "sectionName": "tls"}}, "hostnames": []interface{}{host}, "rules": []interface{}{map[string]interface{}{"backendRefs": []interface{}{map[string]interface{}{"group": "", "kind": "Service", "name": a.Name, "namespace": a.Namespace, "port": int64(p.Port), "weight": int64(1)}}}}}
 		result = append(result, dynamicAccessObject(schema.GroupVersionKind{Group: TLSRouteGVR.Group, Version: TLSRouteGVR.Version, Kind: "TLSRoute"}, name, a.Namespace, securedAccessOwner(a), spec))
 	}
 	return result
