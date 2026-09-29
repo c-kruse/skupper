@@ -27,7 +27,6 @@ type RouterNode struct {
 type LocalAddress struct {
 	Key             string
 	Class           byte
-	Phase           int
 	RoutingKey      string
 	SubscriberCount int
 	InProcess       int
@@ -39,13 +38,9 @@ func DecodeLocalAddress(record Record) (LocalAddress, error) {
 	if err != nil {
 		return LocalAddress{}, err
 	}
-	if len(key) < 3 || key[0] != 'M' {
-		return LocalAddress{}, fmt.Errorf("router address key %q is not a phased mobile address", key)
+	if len(key) < 2 || key[0] != 'M' {
+		return LocalAddress{}, fmt.Errorf("router address key %q is not a mobile address", key)
 	}
-	if key[1] < '0' || key[1] > '9' {
-		return LocalAddress{}, fmt.Errorf("router address key %q has no numeric mobile phase", key)
-	}
-	phase := int(key[1] - '0')
 	subscriberCount, err := record.Int("subscriberCount")
 	if err != nil {
 		return LocalAddress{}, err
@@ -61,7 +56,7 @@ func DecodeLocalAddress(record Record) (LocalAddress, error) {
 	if subscriberCount < 0 || inProcess < 0 || remoteCount < 0 {
 		return LocalAddress{}, fmt.Errorf("router address key %q has negative counts", key)
 	}
-	return LocalAddress{Key: key, Class: key[0], Phase: phase, RoutingKey: key[2:], SubscriberCount: subscriberCount, InProcess: inProcess, RemoteCount: remoteCount}, nil
+	return LocalAddress{Key: key, Class: key[0], RoutingKey: key[1:], SubscriberCount: subscriberCount, InProcess: inProcess, RemoteCount: remoteCount}, nil
 }
 
 func (r *RouterNode) IsSelf() bool {
@@ -1049,8 +1044,8 @@ func (a *Agent) GetLocalListenerAddresses() (map[string]ListenerAddress, error) 
 }
 
 // GetLocalAddresses queries only the local router and returns exact mobile
-// address keys. Callers decide which address class and phase are applicable;
-// counts from different records are deliberately not combined.
+// address keys. The router's hash view uses one M class byte followed directly
+// by the configured address; counts from different records are not combined.
 func (a *Agent) GetLocalAddresses(routingKeys map[string]struct{}) ([]LocalAddress, error) {
 	results, err := a.Query("io.skupper.router.router.address", []string{"key", "subscriberCount", "inProcess", "remoteCount"})
 	if err != nil {
@@ -1063,10 +1058,10 @@ func (a *Agent) GetLocalAddresses(routingKeys map[string]struct{}) ([]LocalAddre
 			return nil, err
 		}
 		// H records are edge summaries; other non-M classes are internal.
-		if len(key) < 3 || key[0] != 'M' || key[1] < '0' || key[1] > '9' {
+		if len(key) < 2 || key[0] != 'M' {
 			continue
 		}
-		if _, wanted := routingKeys[key[2:]]; !wanted {
+		if _, wanted := routingKeys[key[1:]]; !wanted {
 			continue
 		}
 		address, err := DecodeLocalAddress(record)

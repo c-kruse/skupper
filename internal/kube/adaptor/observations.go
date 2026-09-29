@@ -87,8 +87,8 @@ func buildAddressObservation(observation routercontrol.ObservationSnapshot, _ ro
 		observation.Reason = queryErr.Error()
 		return observation
 	}
-	// Application addresses are phased M records in both router modes. H is
-	// the unphased edge-summary class and must not be matched as traffic.
+	// Application addresses use one M class byte followed directly by the exact
+	// routing key. H is an edge-summary class and is not application traffic.
 	class := byte('M')
 	keys := make([]string, 0, len(wanted))
 	for key := range wanted {
@@ -98,13 +98,13 @@ func buildAddressObservation(observation routercontrol.ObservationSnapshot, _ ro
 	for _, key := range keys {
 		var matched *localAddressCounts
 		for _, address := range addresses {
-			if address.Class != class || address.Phase != 0 || address.RoutingKey != key {
+			if address.Class != class || address.RoutingKey != key {
 				continue
 			}
 			if matched != nil {
 				observation.Knowledge = routercontrol.KnowledgeUnknown
 				observation.Addresses = nil
-				observation.Reason = fmt.Sprintf("multiple local address records for %q class %c phase 0", key, class)
+				observation.Reason = fmt.Sprintf("multiple local address records for %q class %c", key, class)
 				return observation
 			}
 			matched = &localAddressCounts{subscriber: address.SubscriberCount, inProcess: address.InProcess, remote: address.RemoteCount}

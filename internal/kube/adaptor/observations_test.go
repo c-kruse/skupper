@@ -21,6 +21,23 @@ func TestAddressObservationDistinguishesKnownEmptyFromFailedQuery(t *testing.T) 
 	}
 }
 
+func TestAddressObservationMatchesExactUnphasedKeyIncludingLeadingDigit(t *testing.T) {
+	base := routercontrol.ObservationSnapshot{Scope: routercontrol.ObservationScopeAddresses, Knowledge: routercontrol.KnowledgeComplete}
+	wanted := map[string]struct{}{"orders": {}, "0orders": {}}
+	addresses := []qdr.LocalAddress{{Key: "M0orders", Class: 'M', RoutingKey: "0orders", SubscriberCount: 1}}
+	observation := buildAddressObservation(base, routercontrol.RoutingModeEdge, wanted, addresses, nil)
+	got := map[string]routercontrol.LocalAddressObservation{}
+	for _, address := range observation.Addresses {
+		got[address.RoutingKey] = address
+	}
+	if got["orders"].Reachable {
+		t.Fatalf("suffix match incorrectly reached orders: %#v", observation.Addresses)
+	}
+	if !got["0orders"].Reachable || got["0orders"].SubscriberCount != 1 {
+		t.Fatalf("leading-digit routing key did not match exactly: %#v", observation.Addresses)
+	}
+}
+
 func TestResourceObservationUsesOnlyApplicableLocalOperationalState(t *testing.T) {
 	listenerName := ownedNamePrefix + "listener"
 	tcpConnectorName := ownedNamePrefix + "tcp-connector"
