@@ -3,6 +3,8 @@ package controllerruntime
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -114,10 +116,15 @@ func (c *observationCache) Application(ctx context.Context, key protocol.Session
 		c.mu.Unlock()
 		return nil // An older, once-accepted application cannot satisfy newer intent.
 	}
+	next := copyApplication(&report)
+	if reflect.DeepEqual(session.application, next) {
+		c.mu.Unlock()
+		return nil // Periodic verified readback has not changed the evidence.
+	}
 	if session.application == nil || session.application.RealizationID != report.RealizationID || session.application.State != report.State {
 		session.invalidateScopes()
 	}
-	session.application = copyApplication(&report)
+	session.application = next
 	namespace := c.namespaces[key.Target.NamespaceUID]
 	c.mu.Unlock()
 	c.changed(namespace)
@@ -152,6 +159,7 @@ func (c *observationCache) Observation(ctx context.Context, key protocol.Session
 		return nil
 	}
 	now := c.now()
+	wasFresh := now.Before(scope.freshUntil)
 	// A late response is not allowed to overwrite newer facts or authenticate
 	// their freshness. A new session starts with neither a sample nor freshness.
 	if observation.RefreshRequestID != "" {
@@ -164,14 +172,21 @@ func (c *observationCache) Observation(ctx context.Context, key protocol.Session
 		scope.expiryNotified = false
 		scope.pending = nil
 	}
-	scope.sequence = observation.SampleSequence
-	scope.snapshot = copyObservation(observation)
 	if observation.Knowledge == protocol.KnowledgeUnknown {
 		scope.freshUntil = time.Time{}
 	}
+	// Renew freshness and retain sequence fencing even for identical facts, but
+	// do not turn each periodic refresh into a complete namespace effect plan.
+	changed := wasFresh != now.Before(scope.freshUntil) ||
+		scope.snapshot.Knowledge != observation.Knowledge || scope.snapshot.Reason != observation.Reason ||
+		!slices.Equal(scope.snapshot.Resources, observation.Resources) || !slices.Equal(scope.snapshot.Addresses, observation.Addresses)
+	scope.sequence = observation.SampleSequence
+	scope.snapshot = copyObservation(observation)
 	namespace := c.namespaces[key.Target.NamespaceUID]
 	c.mu.Unlock()
-	c.changed(namespace)
+	if changed {
+		c.changed(namespace)
+	}
 	return nil
 }
 

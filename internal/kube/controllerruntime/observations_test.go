@@ -184,6 +184,95 @@ func TestAcceptedAppliedAndSnapshotsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestRepeatedApplicationDoesNotInvalidateNamespace(t *testing.T) {
+	c, key := testObservationCache()
+	c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "intent", Sequence: 1})
+	invalidations := 0
+	c.invalidate = func(...string) { invalidations++ }
+	report := protocol.ApplicationReport{SessionID: "session-1", RouterIncarnation: "router-1", IntentDigest: "intent", Sequence: 1, State: protocol.ApplicationApplied, RealizationID: "realization", Resources: []protocol.ResourceApplication{{ResourceID: "one", State: protocol.ApplicationApplied}}}
+	for i := 0; i < 2; i++ {
+		if err := c.Application(context.Background(), key, report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if invalidations != 1 {
+		t.Fatalf("identical periodic application requeued namespace: %d invalidations", invalidations)
+	}
+	report.Resources[0].State = protocol.ApplicationFailed
+	if err := c.Application(context.Background(), key, report); err != nil {
+		t.Fatal(err)
+	}
+	if invalidations != 2 {
+		t.Fatal("changed per-resource application was ignored")
+	}
+}
+
+func TestObservationInvalidatesOnlyChangedEvidenceOrFreshness(t *testing.T) {
+	for _, scopeName := range []string{protocol.ObservationScopeResources, protocol.ObservationScopeAddresses} {
+		t.Run(scopeName, func(t *testing.T) {
+			c, key := testObservationCache()
+			now := time.Unix(4000, 0)
+			c.now = func() time.Time { return now }
+			invalidations := 0
+			c.invalidate = func(...string) { invalidations++ }
+			requests := map[string]string{}
+			sender := refreshFunc(func(_ protocol.SessionKey, _, request, scope string) error {
+				requests[scope] = request
+				return nil
+			})
+			observation := protocol.ObservationSnapshot{SessionID: "session-1", RouterIncarnation: "router-1", Scope: scopeName, Knowledge: protocol.KnowledgeComplete}
+			send := func(want int) {
+				t.Helper()
+				observation.SampleSequence++
+				if err := c.Observation(context.Background(), key, observation); err != nil {
+					t.Fatal(err)
+				}
+				if invalidations != want {
+					t.Fatalf("sample %d: invalidations=%d want=%d", observation.SampleSequence, invalidations, want)
+				}
+			}
+			c.refresh(sender)
+			observation.RefreshRequestID = requests[scopeName]
+			send(1) // Known empty, now fresh.
+			now = now.Add(observationRefreshEvery)
+			c.refresh(sender)
+			observation.RefreshRequestID = requests[scopeName]
+			send(1) // New sequence/request and extended TTL are not new facts.
+			observation.RefreshRequestID = ""
+			if scopeName == protocol.ObservationScopeResources {
+				observation.Resources = []protocol.LocalResourceObservation{{ResourceID: "one", Operational: protocol.OperationalUp}}
+			} else {
+				observation.Addresses = []protocol.LocalAddressObservation{{RoutingKey: "orders", Reachable: true, SubscriberCount: 1}}
+			}
+			send(2)
+			send(2) // Duplicate unsolicited facts are quiet too.
+			now = now.Add(observationFreshFor)
+			c.refresh(sender)
+			if invalidations != 3 {
+				t.Fatal("expiry did not invalidate once")
+			}
+			c.refresh(sender)
+			if invalidations != 3 {
+				t.Fatal("expiry repeatedly invalidated")
+			}
+			observation.RefreshRequestID = requests[scopeName]
+			send(4) // Identical facts becoming fresh must still wake the queue.
+			observation.RefreshRequestID = ""
+			observation.Knowledge = protocol.KnowledgeUnknown
+			observation.Reason = "management unavailable"
+			observation.Resources, observation.Addresses = nil, nil
+			send(5)
+			send(5)
+			observation.Knowledge = protocol.KnowledgeComplete
+			observation.Reason = ""
+			send(6) // Known empty differs from unknown, but does not renew TTL.
+			if c.Snapshot("tenant", now)[key.Target][0].Scopes[scopeName].Fresh {
+				t.Fatal("unsolicited observation restored freshness")
+			}
+		})
+	}
+}
+
 func TestRealizationChangesFencePreviouslyRequestedObservations(t *testing.T) {
 	for _, change := range []string{"accept", "credential rotation", "application recovery"} {
 		t.Run(change, func(t *testing.T) {
