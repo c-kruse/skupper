@@ -3,6 +3,7 @@ package adaptor
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/skupperproject/skupper/internal/qdr"
@@ -14,6 +15,7 @@ const ownedNamePrefix = "skupper.v2."
 
 type CredentialRealization struct {
 	Profile       qdr.SslProfile
+	ProxyProfile  *qdr.ProxyProfile
 	RealizationID string
 }
 
@@ -37,6 +39,21 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 	}
 	edge := intent.Settings.Mode == routercontrol.RoutingModeEdge
 	config := qdr.InitialConfig(intent.Target.RouterGroup+"-${HOSTNAME}", intent.Target.SiteUID, version.Version, edge, 3)
+	if intent.Settings.DataConnectionCount > 0 {
+		config.Metadata.DataConnectionCount = strconv.FormatUint(uint64(intent.Settings.DataConnectionCount), 10)
+	}
+	for _, setting := range intent.Settings.Logging {
+		parsed, err := qdr.ParseRouterLogConfig(func() string {
+			if setting.Module == "" {
+				return setting.Level
+			}
+			return setting.Module + ":" + setting.Level
+		}())
+		if err != nil {
+			return CompiledIntent{}, err
+		}
+		qdr.ConfigureRouterLogging(&config, parsed)
+	}
 	config.AddAddress(qdr.Address{Prefix: "mc", Distribution: "multicast"})
 	config.AddHealthAndMetricsListener(9090)
 	config.AddListener(qdr.Listener{Name: "amqp", Host: "localhost", Port: 5672})
@@ -62,7 +79,19 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 			return CompiledIntent{}, err
 		}
 		name := ownedName("connection", resource.ID)
-		result.Config.AddConnector(qdr.Connector{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), Role: qdr.Role(resource.Role), Cost: int32(resource.Cost), SslProfile: profile, VerifyHostname: resource.TLS.VerifyHostname})
+		connector := qdr.Connector{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), Role: qdr.Role(resource.Role), Cost: int32(resource.Cost), SslProfile: profile, VerifyHostname: resource.TLS.VerifyHostname}
+		if resource.ProxyCredentialBinding != "" {
+			proxy, found := credentials[resource.ProxyCredentialBinding]
+			if !found || proxy.ProxyProfile == nil {
+				return CompiledIntent{}, fmt.Errorf("proxy credential %q for resource %q is unavailable", resource.ProxyCredentialBinding, resource.ID)
+			}
+			profile := *proxy.ProxyProfile
+			profile.Name = ownedName("proxy", resource.ProxyCredentialBinding)
+			result.Config.ProxyProfiles[profile.Name] = profile
+			connector.ProxyProfile = profile.Name
+			result.CredentialIDs[resource.ProxyCredentialBinding] = proxy.RealizationID
+		}
+		result.Config.AddConnector(connector)
 		result.ResourceNames[resource.ID] = []string{name}
 	}
 	for _, resource := range intent.RouterListeners {
@@ -113,8 +142,13 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		}
 	}
 	hash := sha256.New()
-	for _, id := range result.CredentialIDs {
-		fmt.Fprintf(hash, "%s\x00", id)
+	credentialKeys := make([]string, 0, len(result.CredentialIDs))
+	for binding := range result.CredentialIDs {
+		credentialKeys = append(credentialKeys, string(binding))
+	}
+	slices.Sort(credentialKeys)
+	for _, binding := range credentialKeys {
+		fmt.Fprintf(hash, "%s:%s\x00", binding, result.CredentialIDs[routercontrol.ResourceID(binding)])
 	}
 	intentDigest, _ := DigestIntent(intent)
 	fmt.Fprintf(hash, "%s", intentDigest)

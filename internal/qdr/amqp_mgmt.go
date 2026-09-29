@@ -39,15 +39,13 @@ func DecodeLocalAddress(record Record) (LocalAddress, error) {
 	if err != nil {
 		return LocalAddress{}, err
 	}
-	if len(key) < 2 || (key[0] != 'M' && key[0] != 'H') {
-		return LocalAddress{}, fmt.Errorf("router address key %q is not a mobile address", key)
+	if len(key) < 3 || key[0] != 'M' {
+		return LocalAddress{}, fmt.Errorf("router address key %q is not a phased mobile address", key)
 	}
-	phase := 0
-	start := 1
-	if len(key) > 2 && key[1] >= '0' && key[1] <= '9' {
-		phase = int(key[1] - '0')
-		start = 2
+	if key[1] < '0' || key[1] > '9' {
+		return LocalAddress{}, fmt.Errorf("router address key %q has no numeric mobile phase", key)
 	}
+	phase := int(key[1] - '0')
 	subscriberCount, err := record.Int("subscriberCount")
 	if err != nil {
 		return LocalAddress{}, err
@@ -60,7 +58,10 @@ func DecodeLocalAddress(record Record) (LocalAddress, error) {
 	if err != nil {
 		return LocalAddress{}, err
 	}
-	return LocalAddress{Key: key, Class: key[0], Phase: phase, RoutingKey: key[start:], SubscriberCount: subscriberCount, InProcess: inProcess, RemoteCount: remoteCount}, nil
+	if subscriberCount < 0 || inProcess < 0 || remoteCount < 0 {
+		return LocalAddress{}, fmt.Errorf("router address key %q has negative counts", key)
+	}
+	return LocalAddress{Key: key, Class: key[0], Phase: phase, RoutingKey: key[2:], SubscriberCount: subscriberCount, InProcess: inProcess, RemoteCount: remoteCount}, nil
 }
 
 func (r *RouterNode) IsSelf() bool {
@@ -1043,13 +1044,22 @@ func (a *Agent) GetLocalAddresses(routingKeys map[string]struct{}) ([]LocalAddre
 	}
 	addresses := make([]LocalAddress, 0, len(results))
 	for _, record := range results {
+		key, err := record.String("key")
+		if err != nil {
+			return nil, err
+		}
+		// H records are edge summaries; other non-M classes are internal.
+		if len(key) < 3 || key[0] != 'M' || key[1] < '0' || key[1] > '9' {
+			continue
+		}
+		if _, wanted := routingKeys[key[2:]]; !wanted {
+			continue
+		}
 		address, err := DecodeLocalAddress(record)
 		if err != nil {
 			return nil, err
 		}
-		if _, wanted := routingKeys[address.RoutingKey]; wanted {
-			addresses = append(addresses, address)
-		}
+		addresses = append(addresses, address)
 	}
 	return addresses, nil
 }

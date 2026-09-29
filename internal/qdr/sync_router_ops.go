@@ -1,11 +1,20 @@
 package qdr
 
 import (
+	"errors"
 	"fmt"
-	"log"
 )
 
+var ErrNotConverged = errors.New("router configuration changed; read-back required")
+
 func SyncSslProfilesToRouter(agentPool *AgentPool, desired map[string]SslProfile) error {
+	if err := UpsertSslProfilesToRouter(agentPool, desired); err != nil {
+		return err
+	}
+	return PruneSslProfilesFromRouter(agentPool, desired)
+}
+
+func UpsertSslProfilesToRouter(agentPool *AgentPool, desired map[string]SslProfile) error {
 
 	agent, err := agentPool.Get()
 	if err != nil {
@@ -24,12 +33,26 @@ func SyncSslProfilesToRouter(agentPool *AgentPool, desired map[string]SslProfile
 			if err := agent.CreateSslProfile(profile); err != nil {
 				return err
 			}
+			continue
 		}
 		if current != profile {
 			if err := agent.UpdateSslProfile(profile); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func PruneSslProfilesFromRouter(agentPool *AgentPool, desired map[string]SslProfile) error {
+	agent, err := agentPool.Get()
+	if err != nil {
+		return err
+	}
+	defer agentPool.Put(agent)
+	actual, err := agent.GetSslProfiles()
+	if err != nil {
+		return err
 	}
 	for _, profile := range actual {
 		if _, ok := desired[profile.Name]; !ok {
@@ -52,10 +75,10 @@ func SyncBridgeConfig(agentPool *AgentPool, desired *BridgeConfig) error {
 
 	agentPool.Put(agent)
 	if err != nil {
-		return fmt.Errorf("Error while syncing bridge config : %s", err)
+		return fmt.Errorf("Error while syncing bridge config: %w", err)
 	}
 	if !synced {
-		log.Default().Println("Bridge config is not synchronised yet")
+		return ErrNotConverged
 	}
 	return nil
 }
@@ -128,6 +151,13 @@ func syncBridgeConfig(agent *Agent, desired *BridgeConfig) (bool, error) {
 }
 
 func SyncProxyProfilesToRouter(agentPool *AgentPool, desired map[string]ProxyProfile) error {
+	if err := UpsertProxyProfilesToRouter(agentPool, desired); err != nil {
+		return err
+	}
+	return PruneProxyProfilesFromRouter(agentPool, desired)
+}
+
+func UpsertProxyProfilesToRouter(agentPool *AgentPool, desired map[string]ProxyProfile) error {
 	agent, err := agentPool.Get()
 	if err != nil {
 		return err
@@ -152,6 +182,19 @@ func SyncProxyProfilesToRouter(agentPool *AgentPool, desired map[string]ProxyPro
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func PruneProxyProfilesFromRouter(agentPool *AgentPool, desired map[string]ProxyProfile) error {
+	agent, err := agentPool.Get()
+	if err != nil {
+		return err
+	}
+	defer agentPool.Put(agent)
+	actual, err := agent.GetProxyProfiles()
+	if err != nil {
+		return err
 	}
 	for _, profile := range actual {
 		if _, ok := desired[profile.Name]; !ok {

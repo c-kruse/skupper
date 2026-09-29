@@ -50,11 +50,17 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 		return CredentialRealization{}, err
 	}
 	ca, cert, key := secret.Data["ca.crt"], secret.Data["tls.crt"], secret.Data["tls.key"]
-	if err := validateTrafficCredential(binding, ca, cert, key); err != nil {
-		return CredentialRealization{}, err
+	isProxy := slices.Contains(binding.Usages, "proxy")
+	if isProxy && (len(secret.Data["host"]) == 0 || len(secret.Data["port"]) == 0) {
+		return CredentialRealization{}, fmt.Errorf("proxy credential %q requires host and port", binding.ID)
+	}
+	if !isProxy {
+		if err := validateTrafficCredential(binding, ca, cert, key); err != nil {
+			return CredentialRealization{}, err
+		}
 	}
 	hash := sha256.New()
-	for _, name := range []string{"ca.crt", "tls.crt", "tls.key"} {
+	for _, name := range []string{"ca.crt", "tls.crt", "tls.key", "host", "port", "username", "password"} {
 		value := secret.Data[name]
 		fmt.Fprintf(hash, "%s:%d:", name, len(value))
 		hash.Write(value)
@@ -68,10 +74,18 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 		}
 	}
 	directory := filepath.Join(p.root, ownedName("credential", binding.ID), id)
-	if err := materializeCredential(directory, ca, cert, key); err != nil {
+	if err := materializeCredential(directory, ca, cert, key, secret.Data["password"]); err != nil {
 		return CredentialRealization{}, err
 	}
 	result := CredentialRealization{RealizationID: id, Profile: qdr.SslProfile{CaCertFile: filepath.Join(directory, "ca.crt")}}
+	if isProxy {
+		password := ""
+		if len(secret.Data["password"]) > 0 {
+			password = "file:" + filepath.Join(directory, "password.txt")
+		}
+		result.Profile = qdr.SslProfile{}
+		result.ProxyProfile = &qdr.ProxyProfile{Host: string(secret.Data["host"]), Port: string(secret.Data["port"]), Username: string(secret.Data["username"]), Password: password}
+	}
 	if len(cert) > 0 {
 		result.Profile.CertFile = filepath.Join(directory, "tls.crt")
 		result.Profile.PrivateKeyFile = filepath.Join(directory, "tls.key")
@@ -100,7 +114,7 @@ func validateTrafficCredential(binding routercontrol.CredentialBinding, ca, cert
 	return nil
 }
 
-func materializeCredential(directory string, ca, cert, key []byte) error {
+func materializeCredential(directory string, ca, cert, key, password []byte) error {
 	parent := filepath.Dir(directory)
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
@@ -119,7 +133,7 @@ func materializeCredential(directory string, ca, cert, key []byte) error {
 		name string
 		data []byte
 		mode os.FileMode
-	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}} {
+	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}, {"password.txt", password, 0600}} {
 		if len(file.data) == 0 {
 			continue
 		}

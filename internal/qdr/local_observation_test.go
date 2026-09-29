@@ -19,3 +19,12 @@ func TestDecodeLocalAddressRejectsPartialRecord(t *testing.T) {
 		t.Fatal("missing remoteCount was converted to zero")
 	}
 }
+
+func TestDecodeLocalAddressRejectsNegativeCountsAndEdgeSummary(t *testing.T) {
+	if _, err := DecodeLocalAddress(Record{"key": "M0orders", "subscriberCount": -1, "inProcess": 0, "remoteCount": 0}); err == nil {
+		t.Fatal("negative count was accepted")
+	}
+	if _, err := DecodeLocalAddress(Record{"key": "Hedge-router", "subscriberCount": 1, "inProcess": 0, "remoteCount": 0}); err == nil {
+		t.Fatal("edge-summary address was decoded as phased mobile traffic")
+	}
+}

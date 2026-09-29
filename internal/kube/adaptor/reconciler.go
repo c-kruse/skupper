@@ -14,6 +14,11 @@ type LocalRouter interface {
 	Apply(*qdr.RouterConfig) error
 }
 
+type dependencySafeLocalRouter interface {
+	ApplyDependents(*qdr.RouterConfig) error
+	PruneDependencies(*qdr.RouterConfig) error
+}
+
 type ApplyResult struct {
 	Applied bool
 	Actual  *qdr.RouterConfig
@@ -28,7 +33,21 @@ func Reconcile(router LocalRouter, compiled CompiledIntent) ApplyResult {
 		return ApplyResult{Err: fmt.Errorf("read local router: %w", err)}
 	}
 	desired := mergeOwned(actual, &compiled.Config)
-	if err := router.Apply(desired); err != nil {
+	if staged, ok := router.(dependencySafeLocalRouter); ok {
+		if err := staged.ApplyDependents(desired); err != nil {
+			return ApplyResult{Actual: actual, Err: fmt.Errorf("apply local router dependents: %w", err)}
+		}
+		dependents, err := router.Read()
+		if err != nil {
+			return ApplyResult{Err: fmt.Errorf("verify local router dependents: %w", err)}
+		}
+		if err := verifyOwnedDependents(dependents, desired); err != nil {
+			return ApplyResult{Actual: dependents, Err: err}
+		}
+		if err := staged.PruneDependencies(desired); err != nil {
+			return ApplyResult{Actual: dependents, Err: fmt.Errorf("prune local router dependencies: %w", err)}
+		}
+	} else if err := router.Apply(desired); err != nil {
 		return ApplyResult{Actual: actual, Err: fmt.Errorf("apply local router: %w", err)}
 	}
 	verified, err := router.Read()
@@ -119,14 +138,95 @@ func removeOwned(config *qdr.RouterConfig) {
 func isOwned(name string) bool { return strings.HasPrefix(name, ownedNamePrefix) }
 
 func verifyOwned(actual, desired *qdr.RouterConfig) error {
+	return verifyOwnedConfig(actual, desired, true)
+}
+
+func verifyOwnedDependents(actual, desired *qdr.RouterConfig) error {
+	return verifyOwnedConfig(actual, desired, false)
+}
+
+func verifyOwnedConfig(actual, desired *qdr.RouterConfig, profiles bool) error {
 	a := cloneRouterConfig(actual)
 	d := cloneRouterConfig(desired)
 	retainOwned(&a)
 	retainOwned(&d)
+	normalizeManagedReadback(&a, &d)
+	normalizeManagedReadback(&d, &d)
+	if !profiles {
+		a.SslProfiles = nil
+		d.SslProfiles = nil
+		a.ProxyProfiles = nil
+		d.ProxyProfiles = nil
+	}
 	if !reflect.DeepEqual(a, d) {
 		return fmt.Errorf("local router read-back does not match desired owned configuration")
 	}
 	return nil
+}
+
+func normalizeManagedReadback(config, desired *qdr.RouterConfig) {
+	for name, profile := range config.SslProfiles {
+		profile.Ordinal = 0
+		profile.OldestValidOrdinal = 0
+		config.SslProfiles[name] = profile
+	}
+	for name, endpoint := range config.Bridges.TcpListeners {
+		endpoint.OperStatus = ""
+		endpoint.ConnectionMsg = ""
+		if endpoint.Observer == "auto" {
+			endpoint.Observer = ""
+		}
+		if endpoint.Host == "0.0.0.0" && desired.Bridges.TcpListeners[name].Host == "" {
+			endpoint.Host = ""
+		}
+		config.Bridges.TcpListeners[name] = endpoint
+	}
+	for name, endpoint := range config.Bridges.TcpConnectors {
+		endpoint.OperStatus = ""
+		endpoint.ConnectionMsg = ""
+		if endpoint.Observer == "auto" {
+			endpoint.Observer = ""
+		}
+		if endpoint.VerifyHostname != nil && *endpoint.VerifyHostname && desired.Bridges.TcpConnectors[name].VerifyHostname == nil {
+			endpoint.VerifyHostname = nil
+		}
+		config.Bridges.TcpConnectors[name] = endpoint
+	}
+	for name, connector := range config.Connectors {
+		wanted := desired.Connectors[name]
+		if wanted.Cost == 0 && connector.Cost == 1 {
+			connector.Cost = 0
+		}
+		if wanted.LinkCapacity == 0 {
+			connector.LinkCapacity = 0
+		}
+		if wanted.MaxFrameSize == 0 {
+			connector.MaxFrameSize = 0
+		}
+		if wanted.MaxSessionFrames == 0 {
+			connector.MaxSessionFrames = 0
+		}
+		config.Connectors[name] = connector
+	}
+	for name, listener := range config.Listeners {
+		wanted := desired.Listeners[name]
+		if wanted.Cost == 0 {
+			listener.Cost = 0
+		}
+		if wanted.LinkCapacity == 0 {
+			listener.LinkCapacity = 0
+		}
+		if wanted.MaxFrameSize == 0 {
+			listener.MaxFrameSize = 0
+		}
+		if wanted.MaxSessionFrames == 0 {
+			listener.MaxSessionFrames = 0
+		}
+		listener.Websockets = wanted.Websockets
+		listener.Healthz = wanted.Healthz
+		listener.Metrics = wanted.Metrics
+		config.Listeners[name] = listener
+	}
 }
 
 func retainOwned(config *qdr.RouterConfig) {
