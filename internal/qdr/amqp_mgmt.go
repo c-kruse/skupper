@@ -1308,19 +1308,25 @@ func asConnectorStatus(record Record) ConnectorStatus {
 }
 
 func asConnector(record Record) Connector {
-	return Connector{
+	connector := Connector{
 		Name:             record.AsString("name"),
 		Host:             record.AsString("host"),
 		Port:             record.AsString("port"),
 		RouteContainer:   record.AsBool("routeContainer"),
-		VerifyHostname:   record.AsBool("verifyHostname"),
 		SslProfile:       record.AsString("sslProfile"),
 		ProxyProfile:     record.AsString("proxyProfile"),
 		Cost:             int32(record.AsInt("cost")),
 		Role:             Role(record.AsString("role")),
+		SaslMechanisms:   record.AsString("saslMechanisms"),
 		ConnectionStatus: record.AsString("connectionStatus"),
 		ConnectionMsg:    record.AsString("connectionMsg"),
 	}
+	if value, found := record["verifyHostname"]; found {
+		if verify, ok := value.(bool); ok {
+			connector.VerifyHostname = &verify
+		}
+	}
+	return connector
 }
 
 func asInt32(s string) int32 {
@@ -1337,6 +1343,7 @@ func asListener(record Record) Listener {
 		Cost:             int32(record.AsInt("cost")),
 		LinkCapacity:     int32(record.AsInt("linkCapacity")),
 		AuthenticatePeer: record.AsBool("authenticatePeer"),
+		RequireSsl:       record.AsBool("requireSsl"),
 		SaslMechanisms:   record.AsString("saslMechanisms"),
 		RouteContainer:   record.AsBool("routeContainer"),
 		Http:             record.AsBool("http"),

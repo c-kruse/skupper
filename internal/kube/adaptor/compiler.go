@@ -92,7 +92,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 			return CompiledIntent{}, err
 		}
 		name := ownedName("connection", resource.ID)
-		connector := qdr.Connector{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), Role: qdr.Role(resource.Role), Cost: int32(resource.Cost), SslProfile: profile, VerifyHostname: resource.TLS.VerifyHostname}
+		verifyHostname := resource.TLS.VerifyHostname
+		connector := qdr.Connector{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), Role: qdr.Role(resource.Role), Cost: int32(resource.Cost), SslProfile: profile, VerifyHostname: &verifyHostname}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			connector.SaslMechanisms = "EXTERNAL"
+		}
 		if resource.ProxyCredentialBinding != "" {
 			if !slices.Contains(bindings[resource.ProxyCredentialBinding].Usages, routercontrol.CredentialUsageProxy) {
 				return CompiledIntent{}, fmt.Errorf("credential %q for resource %q lacks proxy usage", resource.ProxyCredentialBinding, resource.ID)
@@ -120,7 +124,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 			return CompiledIntent{}, err
 		}
 		name := ownedName("router-listener", resource.ID)
-		result.Config.AddListener(qdr.Listener{Name: name, Host: resource.Host, Port: int32(resource.Port), Role: qdr.Role(resource.Role), SslProfile: profile, AuthenticatePeer: resource.TLS.Mode == routercontrol.TLSModeMutual})
+		listener := qdr.Listener{Name: name, Host: resource.Host, Port: int32(resource.Port), Role: qdr.Role(resource.Role), SslProfile: profile, RequireSsl: resource.TLS.Mode != routercontrol.TLSModeDisabled, AuthenticatePeer: resource.TLS.Mode == routercontrol.TLSModeMutual}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			listener.SaslMechanisms = "EXTERNAL"
+		}
+		result.Config.AddListener(listener)
 		result.ResourceNames[resource.ID] = []string{name}
 	}
 	for _, resource := range intent.ServiceListeners {

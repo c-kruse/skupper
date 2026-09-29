@@ -276,6 +276,10 @@ func normalizeManagedReadback(config, desired *qdr.RouterConfig) {
 		wanted := desired.Connectors[name]
 		connector.ConnectionStatus = ""
 		connector.ConnectionMsg = ""
+		if connector.VerifyHostname == nil && wanted.VerifyHostname != nil && *wanted.VerifyHostname {
+			value := true
+			connector.VerifyHostname = &value
+		}
 		if wanted.Cost == 0 && connector.Cost == 1 {
 			connector.Cost = 0
 		}

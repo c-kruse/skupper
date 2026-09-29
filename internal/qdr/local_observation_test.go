@@ -1,6 +1,9 @@
 package qdr
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDecodeLocalAddressPreservesClassAndExactRoutingKey(t *testing.T) {
 	record := Record{"key": "Morders", "subscriberCount": int32(2), "inProcess": uint32(3), "remoteCount": int64(4)}
@@ -54,5 +57,68 @@ func TestDecodeConnectorIncludesLocalOperationalState(t *testing.T) {
 	})
 	if connector.ConnectionStatus != "SUCCESS" || connector.ConnectionMsg != "Connection Opened: dir=out" {
 		t.Fatalf("connector operational fields not decoded: %#v", connector)
+	}
+}
+
+func TestConnectorSecurityFieldsEncodeForStartupAndDynamicManagement(t *testing.T) {
+	verifyHostname := false
+	connector := Connector{Name: "peer", Host: "peer.example", Port: "55671", VerifyHostname: &verifyHostname, SaslMechanisms: "EXTERNAL"}
+	record := connector.toRecord()
+	if verify, found := record["verifyHostname"]; !found || verify != false {
+		t.Fatalf("dynamic connector did not encode explicit false: %#v", record)
+	}
+	if record["saslMechanisms"] != "EXTERNAL" {
+		t.Fatalf("dynamic connector omitted SASL EXTERNAL: %#v", record)
+	}
+	decoded := asConnector(record)
+	if decoded.VerifyHostname == nil || *decoded.VerifyHostname || decoded.SaslMechanisms != "EXTERNAL" {
+		t.Fatalf("connector management read-back lost security settings: %#v", decoded)
+	}
+
+	config := InitialConfig("router", "site", "version", false, 3)
+	config.AddConnector(connector)
+	startup, err := MarshalRouterConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(startup, `"verifyHostname": false`) || !strings.Contains(startup, `"saslMechanisms": "EXTERNAL"`) {
+		t.Fatalf("startup connector omitted explicit security settings: %s", startup)
+	}
+	roundTrip, err := UnmarshalRouterConfig(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := roundTrip.Connectors[connector.Name]
+	if got.VerifyHostname == nil || *got.VerifyHostname || got.SaslMechanisms != "EXTERNAL" {
+		t.Fatalf("startup round trip lost connector security settings: %#v", got)
+	}
+}
+
+func TestListenerSecurityFieldsEncodeForStartupAndDynamicManagement(t *testing.T) {
+	listener := Listener{Name: "peer", Port: 55671, SslProfile: "tls", RequireSsl: true, AuthenticatePeer: true, SaslMechanisms: "EXTERNAL"}
+	record := listener.toRecord()
+	if record["requireSsl"] != true || record["authenticatePeer"] != true || record["saslMechanisms"] != "EXTERNAL" {
+		t.Fatalf("dynamic listener omitted security settings: %#v", record)
+	}
+	decoded := asListener(record)
+	if !decoded.RequireSsl || !decoded.AuthenticatePeer || decoded.SaslMechanisms != "EXTERNAL" {
+		t.Fatalf("listener management read-back lost security settings: %#v", decoded)
+	}
+	config := InitialConfig("router", "site", "version", false, 3)
+	config.AddListener(listener)
+	startup, err := MarshalRouterConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(startup, `"requireSsl": true`) || !strings.Contains(startup, `"saslMechanisms": "EXTERNAL"`) {
+		t.Fatalf("startup listener omitted security settings: %s", startup)
+	}
+	roundTrip, err := UnmarshalRouterConfig(startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := roundTrip.Listeners[listener.Name]
+	if !got.RequireSsl || !got.AuthenticatePeer || got.SaslMechanisms != "EXTERNAL" {
+		t.Fatalf("startup round trip lost listener security settings: %#v", got)
 	}
 }

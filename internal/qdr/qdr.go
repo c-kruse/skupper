@@ -520,6 +520,7 @@ type Listener struct {
 	SslProfile       string `json:"sslProfile,omitempty" yaml:"ssl-profile,omitempty"`
 	SaslMechanisms   string `json:"saslMechanisms,omitempty" yaml:"sasl-mechanisms,omitempty"`
 	AuthenticatePeer bool   `json:"authenticatePeer,omitempty" yaml:"authenticate-peer,omitempty"`
+	RequireSsl       bool   `json:"requireSsl,omitempty" yaml:"require-ssl,omitempty"`
 	LinkCapacity     int32  `json:"linkCapacity,omitempty" yaml:"link-capacity,omitempty"`
 	HttpRootDir      string `json:"httpRootDir,omitempty" yaml:"http-rootdir,omitempty"`
 	Websockets       bool   `json:"websockets,omitempty" yaml:"web-sockets,omitempty"`
@@ -546,6 +547,9 @@ func (listener Listener) toRecord() Record {
 	}
 	if listener.AuthenticatePeer {
 		record["authenticatePeer"] = listener.AuthenticatePeer
+	}
+	if listener.RequireSsl {
+		record["requireSsl"] = listener.RequireSsl
 	}
 	if len(listener.SaslMechanisms) > 0 {
 		record["saslMechanisms"] = listener.SaslMechanisms
@@ -620,9 +624,10 @@ type Connector struct {
 	Port             string `json:"port"`
 	RouteContainer   bool   `json:"routeContainer,omitempty"`
 	Cost             int32  `json:"cost,omitempty"`
-	VerifyHostname   bool   `json:"verifyHostname,omitempty"`
+	VerifyHostname   *bool  `json:"verifyHostname,omitempty"`
 	SslProfile       string `json:"sslProfile,omitempty"`
 	ProxyProfile     string `json:"proxyProfile,omitempty"`
+	SaslMechanisms   string `json:"saslMechanisms,omitempty"`
 	LinkCapacity     int32  `json:"linkCapacity,omitempty"`
 	MaxFrameSize     int    `json:"maxFrameSize,omitempty"`
 	MaxSessionFrames int    `json:"maxSessionFrames,omitempty"`
@@ -644,6 +649,12 @@ func (connector Connector) toRecord() Record {
 	}
 	if len(connector.ProxyProfile) > 0 {
 		record["proxyProfile"] = connector.ProxyProfile
+	}
+	if connector.VerifyHostname != nil {
+		record["verifyHostname"] = *connector.VerifyHostname
+	}
+	if connector.SaslMechanisms != "" {
+		record["saslMechanisms"] = connector.SaslMechanisms
 	}
 	if connector.MaxFrameSize > 0 {
 		record["maxFrameSize"] = connector.MaxFrameSize
@@ -1296,7 +1307,21 @@ func (desired Connector) Equivalent(actual Connector) bool {
 		desired.Host == actual.Host &&
 		desired.Port == actual.Port &&
 		normaliseCost(desired.Cost) == normaliseCost(actual.Cost) &&
-		desired.SslProfile == actual.SslProfile
+		desired.SslProfile == actual.SslProfile &&
+		desired.SaslMechanisms == actual.SaslMechanisms &&
+		desired.equivalentVerifyHostname(actual)
+}
+
+func (desired Connector) equivalentVerifyHostname(actual Connector) bool {
+	desiredValue := true
+	if desired.VerifyHostname != nil {
+		desiredValue = *desired.VerifyHostname
+	}
+	actualValue := true
+	if actual.VerifyHostname != nil {
+		actualValue = *actual.VerifyHostname
+	}
+	return desiredValue == actualValue
 }
 
 type ListenerDifference struct {
@@ -1314,6 +1339,7 @@ func (desired Listener) Equivalent(actual Listener) bool {
 		desired.SslProfile == actual.SslProfile &&
 		desired.SaslMechanisms == actual.SaslMechanisms &&
 		desired.AuthenticatePeer == actual.AuthenticatePeer &&
+		desired.RequireSsl == actual.RequireSsl &&
 		(desired.Cost == 0 || desired.Cost == actual.Cost) &&
 		(desired.MaxFrameSize == 0 || desired.MaxFrameSize == actual.MaxFrameSize) &&
 		(desired.MaxSessionFrames == 0 || desired.MaxSessionFrames == actual.MaxSessionFrames) &&
