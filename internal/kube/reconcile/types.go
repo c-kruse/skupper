@@ -80,6 +80,7 @@ type Snapshot struct {
 	Observations      map[RouterTarget][]Observation
 	Allocations       AllocationState
 	Bootstrap         RouterControlBootstrap
+	SourceNamespaces  map[string]types.UID
 }
 
 // RouterControlBootstrap contains only public endpoint/trust and projected-token
@@ -124,6 +125,20 @@ type DesiredNamespace struct {
 	Bootstrap        RouterControlBootstrap
 	Site             *skupperv2alpha1.Site
 	ListenerServices []*corev1.Service
+	Statuses         StatusProjection
+}
+
+type StatusProjection struct {
+	Owner            *skupperv2alpha1.Site
+	SourceNamespaces map[string]types.UID
+	Sites            []*skupperv2alpha1.Site
+	Listeners        []*skupperv2alpha1.Listener
+	MultiKey         []*skupperv2alpha1.MultiKeyListener
+	Connectors       []*skupperv2alpha1.Connector
+	Links            []*skupperv2alpha1.Link
+	Accesses         []*skupperv2alpha1.RouterAccess
+	Bindings         []*skupperv2alpha1.AttachedConnectorBinding
+	Attached         []*skupperv2alpha1.AttachedConnector
 }
 
 func copyBootstrap(in RouterControlBootstrap) RouterControlBootstrap {

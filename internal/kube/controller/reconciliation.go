@@ -100,7 +100,8 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
 	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
-	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.WorkloadPlanner{Next: planner, Ensurer: c}, Executor: reconcile.Executor{}})
+	workloads := reconcile.WorkloadPlanner{Next: planner, Ensurer: c}
+	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}})
 	if err := c.registerInvalidations(); err != nil {
 		return nil, err
 	}
@@ -338,6 +339,7 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 		return reconcile.Snapshot{}, fmt.Errorf("collect allocations: %w", err)
 	}
 	sources := map[string]bool{namespace: true}
+	snapshot.SourceNamespaces = map[string]types.UID{namespace: ns.UID}
 	for _, value := range c.informers.attached.GetStore().List() {
 		definition := value.(*skupperv2alpha1.AttachedConnector)
 		if definition.Namespace == namespace || definition.Spec.SiteNamespace == namespace {
@@ -349,6 +351,9 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	}
 	for source := range sources {
 		snapshot.Pods = append(snapshot.Pods, listNamespace[*corev1.Pod](c.informers.pods, source)...)
+		if value, exists, _ := c.informers.namespaces.GetStore().GetByKey(source); exists {
+			snapshot.SourceNamespaces[source] = value.(*corev1.Namespace).UID
+		}
 	}
 	if c.observations != nil {
 		snapshot.Observations = c.observations.Snapshot(namespace, evaluationTime)
@@ -585,6 +590,151 @@ func (c *NamespaceController) EnsureListenerServices(ctx context.Context, namesp
 		if err := client.Delete(ctx, service.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &service.UID}}); err != nil && !apierrors.IsNotFound(err) {
 			return classifyWriteError(err)
 		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) ApplyStatuses(ctx context.Context, namespace reconcile.NamespaceIdentity, projection reconcile.StatusProjection) error {
+	if err := c.verifySite(ctx, namespace, projection.Owner); err != nil {
+		return err
+	}
+	check := func(uid types.UID, resourceVersion string, generation int64, current metav1.Object) error {
+		if current.GetUID() != uid || current.GetResourceVersion() != resourceVersion || current.GetGeneration() != generation || current.GetDeletionTimestamp() != nil {
+			return reconcile.SupersededError{Reason: "status resource changed or is deleting"}
+		}
+		return nil
+	}
+	api := c.clients.GetSkupperClient().SkupperV2alpha1()
+	for _, desired := range projection.Listeners {
+		current, err := api.Listeners(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.Listeners(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.MultiKey {
+		current, err := api.MultiKeyListeners(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.MultiKeyListeners(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Connectors {
+		current, err := api.Connectors(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.Connectors(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Links {
+		current, err := api.Links(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.Links(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Accesses {
+		current, err := api.RouterAccesses(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.RouterAccesses(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Bindings {
+		current, err := api.AttachedConnectorBindings(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.AttachedConnectorBindings(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Attached {
+		expectedNamespaceUID, found := projection.SourceNamespaces[desired.Namespace]
+		if !found {
+			return reconcile.SupersededError{Reason: "attached source namespace identity is missing"}
+		}
+		if err := c.verifyControlledNamespace(ctx, desired.Namespace, expectedNamespaceUID); err != nil {
+			return err
+		}
+		current, err := api.AttachedConnectors(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.AttachedConnectors(desired.Namespace).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Sites {
+		current, err := api.Sites(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.Sites(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) verifyControlledNamespace(ctx context.Context, namespace string, expectedUID types.UID) error {
+	current, err := c.clients.GetKubeClient().CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if current.UID != expectedUID {
+		return reconcile.SupersededError{Reason: "source namespace UID changed"}
+	}
+	config, err := c.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, namespaceConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		config = nil
+	} else if err != nil {
+		return classifyWriteError(err)
+	}
+	if !ControlsNamespace(config, namespace, c.controllerID, c.requireExplicitControl) {
+		return reconcile.SupersededError{Reason: "source namespace controller assignment changed"}
 	}
 	return nil
 }

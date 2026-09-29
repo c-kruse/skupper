@@ -157,6 +157,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		desired.ListenerServices = append(desired.ListenerServices, service)
 	}
 	sort.Slice(desired.ListenerServices, func(i, j int) bool { return desired.ListenerServices[i].Name < desired.ListenerServices[j].Name })
+	deriveStatuses(snapshot, &desired)
 	return desired
 }
 
