@@ -14,7 +14,7 @@ func TestConnectorConfiguredRetiresLegacyMatchingStatus(t *testing.T) {
 		Status: ConnectorStatus{
 			HasMatchingListener: true,
 			Status: Status{Conditions: []metav1.Condition{
-				{Type: CONDITION_TYPE_CONFIGURED, Status: metav1.ConditionTrue, Reason: string(StatusReady), Message: STATUS_OK},
+				{Type: CONDITION_TYPE_CONFIGURED, Status: metav1.ConditionTrue, Reason: string(StatusReady), Message: STATUS_OK, ObservedGeneration: 3},
 				{Type: CONDITION_TYPE_MATCHED, Status: metav1.ConditionFalse, Reason: string(StatusPending), Message: "No matching listeners"},
 				{Type: CONDITION_TYPE_READY, Status: metav1.ConditionFalse, Reason: string(StatusPending), Message: "No matching listeners"},
 			}},
@@ -34,7 +34,7 @@ func TestAttachedConnectorBindingConfiguredRetiresLegacyMatchingStatus(t *testin
 		Status: AttachedConnectorBindingStatus{
 			HasMatchingListener: true,
 			Status: Status{Conditions: []metav1.Condition{
-				{Type: CONDITION_TYPE_CONFIGURED, Status: metav1.ConditionTrue, Reason: string(StatusReady), Message: STATUS_OK},
+				{Type: CONDITION_TYPE_CONFIGURED, Status: metav1.ConditionTrue, Reason: string(StatusReady), Message: STATUS_OK, ObservedGeneration: 3},
 				{Type: CONDITION_TYPE_MATCHED, Status: metav1.ConditionFalse, Reason: string(StatusPending), Message: "No matching listeners"},
 				{Type: CONDITION_TYPE_READY, Status: metav1.ConditionFalse, Reason: string(StatusPending), Message: "No matching listeners"},
 			}},

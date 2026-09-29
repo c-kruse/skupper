@@ -86,7 +86,7 @@ spec:
                 - host
                 - port
               x-kubernetes-validations:
-              - rule: '!has(self.exposePodsByName) || !self.exposePodsByName || (oldSelf != null && has(oldSelf.exposePodsByName) && oldSelf.exposePodsByName)'
+              - rule: '!has(self.exposePodsByName) || !self.exposePodsByName'
                 message: exposePodsByName is unsupported; use pod selector targeting instead
             status:
               type: object
