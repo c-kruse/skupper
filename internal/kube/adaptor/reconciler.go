@@ -170,6 +170,12 @@ func normalizeManagedReadback(config, desired *qdr.RouterConfig) {
 		profile.OldestValidOrdinal = 0
 		config.SslProfiles[name] = profile
 	}
+	for name, profile := range config.ProxyProfiles {
+		// QDR marks proxy passwords hidden and does not return the submitted
+		// value. The credential revision is reported separately.
+		profile.Password = ""
+		config.ProxyProfiles[name] = profile
+	}
 	for name, endpoint := range config.Bridges.TcpListeners {
 		endpoint.OperStatus = ""
 		endpoint.ConnectionMsg = ""

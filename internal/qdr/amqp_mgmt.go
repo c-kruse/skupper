@@ -466,7 +466,7 @@ func (a *Agent) Create(typename string, name string, entity recordType) error {
 		slog.String("action", "CREATE"),
 		slog.String("typename", typename),
 		slog.String("name", name),
-		slog.Any("attributes", attributes))
+		slog.Any("attributes", managementLogAttributes(typename, attributes)))
 	return a.request("CREATE", typename, name, attributes)
 }
 
@@ -476,8 +476,22 @@ func (a *Agent) Update(typename string, name string, entity recordType) error {
 		slog.String("action", "UPDATE"),
 		slog.String("typename", typename),
 		slog.String("name", name),
-		slog.Any("attributes", attributes))
+		slog.Any("attributes", managementLogAttributes(typename, attributes)))
 	return a.request("UPDATE", typename, name, attributes)
+}
+
+func managementLogAttributes(typename string, attributes Record) Record {
+	if typename != "io.skupper.router.proxyProfile" {
+		return attributes
+	}
+	redacted := make(Record, len(attributes))
+	for key, value := range attributes {
+		redacted[key] = value
+	}
+	if _, found := redacted["password"]; found {
+		redacted["password"] = "[redacted]"
+	}
+	return redacted
 }
 
 func (a *Agent) Delete(typename string, name string) error {

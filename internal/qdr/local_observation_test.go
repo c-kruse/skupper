@@ -28,3 +28,14 @@ func TestDecodeLocalAddressRejectsNegativeCountsAndEdgeSummary(t *testing.T) {
 		t.Fatal("edge-summary address was decoded as phased mobile traffic")
 	}
 }
+
+func TestManagementLogAttributesRedactsProxyPasswordWithoutChangingRequest(t *testing.T) {
+	attributes := Record{"host": "proxy", "password": "secret"}
+	logged := managementLogAttributes("io.skupper.router.proxyProfile", attributes)
+	if logged["password"] != "[redacted]" {
+		t.Fatalf("proxy password not redacted: %#v", logged)
+	}
+	if attributes["password"] != "secret" {
+		t.Fatal("redaction changed management request")
+	}
+}

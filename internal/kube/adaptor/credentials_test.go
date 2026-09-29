@@ -39,7 +39,7 @@ func TestCredentialRotationChangesRealizationWithoutIntent(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "traffic", Namespace: "test"}, Data: credentialData(t, 1)}
 	client := fake.NewSimpleClientset(secret)
 	provider := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), t.TempDir())
-	binding := routercontrol.CredentialBinding{ID: "credential", Provider: "kubernetes-secret", Reference: "traffic", Usages: []string{"client-auth"}}
+	binding := routercontrol.CredentialBinding{ID: "credential", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageClientAuth}}
 	first, err := provider.Resolve(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestInvalidRotationDoesNotDowngradeMaterial(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "traffic", Namespace: "test"}, Data: credentialData(t, 1)}
 	client := fake.NewSimpleClientset(secret)
 	provider := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), t.TempDir())
-	binding := routercontrol.CredentialBinding{ID: "credential", Provider: "kubernetes-secret", Reference: "traffic", Usages: []string{"client-auth"}}
+	binding := routercontrol.CredentialBinding{ID: "credential", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageClientAuth}}
 	valid, err := provider.Resolve(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
@@ -82,5 +82,33 @@ func TestInvalidRotationDoesNotDowngradeMaterial(t *testing.T) {
 	}
 	if _, err := os.Stat(valid.Profile.PrivateKeyFile); err != nil {
 		t.Fatalf("valid material removed after invalid rotation: %v", err)
+	}
+}
+
+func TestSharedProxyAndTLSCredentialUsesExactV1Contract(t *testing.T) {
+	data := credentialData(t, 3)
+	data["host"] = []byte("proxy.example")
+	data["port"] = []byte("3128")
+	data["username"] = []byte("user")
+	data["password"] = []byte("private")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test"}, Data: data}
+	client := fake.NewSimpleClientset(secret)
+	provider := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), t.TempDir())
+	binding := routercontrol.CredentialBinding{ID: "shared", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "shared", Usages: []string{routercontrol.CredentialUsageClientAuth, routercontrol.CredentialUsageProxy}}
+	got, err := provider.Resolve(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Profile.PrivateKeyFile == "" || got.ProxyProfile == nil || got.ProxyProfile.Password != "private" {
+		t.Fatalf("shared TLS/proxy realization incomplete: %#v", got)
+	}
+	binding.Provider = "kubernetes"
+	if _, err := provider.Resolve(context.Background(), binding); err == nil {
+		t.Fatal("alternate provider spelling was accepted")
+	}
+	binding.Provider = routercontrol.CredentialProviderKubernetesSecret
+	binding.Usages = []string{"client"}
+	if _, err := provider.Resolve(context.Background(), binding); err == nil {
+		t.Fatal("alternate usage spelling was accepted")
 	}
 }

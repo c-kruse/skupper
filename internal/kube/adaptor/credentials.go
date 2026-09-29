@@ -39,8 +39,13 @@ func NewSecretCredentialProvider(secrets corev1client.SecretInterface, root stri
 }
 
 func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routercontrol.CredentialBinding) (CredentialRealization, error) {
-	if binding.Provider != "kubernetes-secret" {
+	if binding.Provider != routercontrol.CredentialProviderKubernetesSecret {
 		return CredentialRealization{}, fmt.Errorf("credential %q uses unsupported provider %q", binding.ID, binding.Provider)
+	}
+	for _, usage := range binding.Usages {
+		if usage != routercontrol.CredentialUsageServerAuth && usage != routercontrol.CredentialUsageClientAuth && usage != routercontrol.CredentialUsageProxy {
+			return CredentialRealization{}, fmt.Errorf("credential %q uses unsupported usage %q", binding.ID, usage)
+		}
 	}
 	if binding.Reference == "" || strings.Contains(binding.Reference, "/") || filepath.Base(binding.Reference) != binding.Reference {
 		return CredentialRealization{}, fmt.Errorf("credential %q has invalid Secret reference", binding.ID)
@@ -50,11 +55,12 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 		return CredentialRealization{}, err
 	}
 	ca, cert, key := secret.Data["ca.crt"], secret.Data["tls.crt"], secret.Data["tls.key"]
-	isProxy := slices.Contains(binding.Usages, "proxy")
+	isProxy := slices.Contains(binding.Usages, routercontrol.CredentialUsageProxy)
+	isTLS := slices.Contains(binding.Usages, routercontrol.CredentialUsageClientAuth) || slices.Contains(binding.Usages, routercontrol.CredentialUsageServerAuth)
 	if isProxy && (len(secret.Data["host"]) == 0 || len(secret.Data["port"]) == 0) {
 		return CredentialRealization{}, fmt.Errorf("proxy credential %q requires host and port", binding.ID)
 	}
-	if !isProxy {
+	if isTLS {
 		if err := validateTrafficCredential(binding, ca, cert, key); err != nil {
 			return CredentialRealization{}, err
 		}
@@ -74,19 +80,17 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 		}
 	}
 	directory := filepath.Join(p.root, ownedName("credential", binding.ID), id)
-	if err := materializeCredential(directory, ca, cert, key, secret.Data["password"]); err != nil {
+	if err := materializeCredential(directory, ca, cert, key); err != nil {
 		return CredentialRealization{}, err
 	}
-	result := CredentialRealization{RealizationID: id, Profile: qdr.SslProfile{CaCertFile: filepath.Join(directory, "ca.crt")}}
-	if isProxy {
-		password := ""
-		if len(secret.Data["password"]) > 0 {
-			password = "file:" + filepath.Join(directory, "password.txt")
-		}
-		result.Profile = qdr.SslProfile{}
-		result.ProxyProfile = &qdr.ProxyProfile{Host: string(secret.Data["host"]), Port: string(secret.Data["port"]), Username: string(secret.Data["username"]), Password: password}
+	result := CredentialRealization{RealizationID: id}
+	if isTLS {
+		result.Profile = qdr.SslProfile{CaCertFile: filepath.Join(directory, "ca.crt")}
 	}
-	if len(cert) > 0 {
+	if isProxy {
+		result.ProxyProfile = &qdr.ProxyProfile{Host: string(secret.Data["host"]), Port: string(secret.Data["port"]), Username: string(secret.Data["username"]), Password: string(secret.Data["password"])}
+	}
+	if isTLS && len(cert) > 0 {
 		result.Profile.CertFile = filepath.Join(directory, "tls.crt")
 		result.Profile.PrivateKeyFile = filepath.Join(directory, "tls.key")
 	}
@@ -102,7 +106,7 @@ func validateTrafficCredential(binding routercontrol.CredentialBinding, ca, cert
 	if len(ca) == 0 || !pool.AppendCertsFromPEM(ca) {
 		return fmt.Errorf("credential %q has no valid ca.crt", binding.ID)
 	}
-	requiresKeypair := slices.Contains(binding.Usages, "client-auth") || slices.Contains(binding.Usages, "server-auth")
+	requiresKeypair := slices.Contains(binding.Usages, routercontrol.CredentialUsageClientAuth) || slices.Contains(binding.Usages, routercontrol.CredentialUsageServerAuth)
 	if requiresKeypair && (len(cert) == 0 || len(key) == 0) {
 		return fmt.Errorf("credential %q requires tls.crt and tls.key", binding.ID)
 	}
@@ -114,7 +118,7 @@ func validateTrafficCredential(binding routercontrol.CredentialBinding, ca, cert
 	return nil
 }
 
-func materializeCredential(directory string, ca, cert, key, password []byte) error {
+func materializeCredential(directory string, ca, cert, key []byte) error {
 	parent := filepath.Dir(directory)
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
@@ -133,7 +137,7 @@ func materializeCredential(directory string, ca, cert, key, password []byte) err
 		name string
 		data []byte
 		mode os.FileMode
-	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}, {"password.txt", password, 0600}} {
+	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}} {
 		if len(file.data) == 0 {
 			continue
 		}

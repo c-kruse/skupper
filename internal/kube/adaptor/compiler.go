@@ -58,10 +58,17 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 	config.AddHealthAndMetricsListener(9090)
 	config.AddListener(qdr.Listener{Name: "amqp", Host: "localhost", Port: 5672})
 	result := CompiledIntent{Config: config, ResourceNames: map[routercontrol.ResourceID][]string{}, CredentialIDs: map[routercontrol.ResourceID]string{}}
+	bindings := map[routercontrol.ResourceID]routercontrol.CredentialBinding{}
+	for _, binding := range intent.CredentialBindings {
+		bindings[binding.ID] = binding
+	}
 
-	credentialProfile := func(owner routercontrol.ResourceID, tls routercontrol.TLSIntent) (string, error) {
+	credentialProfile := func(owner routercontrol.ResourceID, tls routercontrol.TLSIntent, usage string) (string, error) {
 		if tls.Mode == "" || tls.Mode == routercontrol.TLSModeDisabled {
 			return "", nil
+		}
+		if !slices.Contains(bindings[tls.CredentialBinding].Usages, usage) {
+			return "", fmt.Errorf("credential %q for resource %q lacks %q usage", tls.CredentialBinding, owner, usage)
 		}
 		realization, found := credentials[tls.CredentialBinding]
 		if !found {
@@ -74,13 +81,16 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		return profile.Name, nil
 	}
 	for _, resource := range intent.RouterConnections {
-		profile, err := credentialProfile(resource.ID, resource.TLS)
+		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageClientAuth)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
 		name := ownedName("connection", resource.ID)
 		connector := qdr.Connector{Name: name, Host: resource.Host, Port: strconv.Itoa(int(resource.Port)), Role: qdr.Role(resource.Role), Cost: int32(resource.Cost), SslProfile: profile, VerifyHostname: resource.TLS.VerifyHostname}
 		if resource.ProxyCredentialBinding != "" {
+			if !slices.Contains(bindings[resource.ProxyCredentialBinding].Usages, routercontrol.CredentialUsageProxy) {
+				return CompiledIntent{}, fmt.Errorf("credential %q for resource %q lacks proxy usage", resource.ProxyCredentialBinding, resource.ID)
+			}
 			proxy, found := credentials[resource.ProxyCredentialBinding]
 			if !found || proxy.ProxyProfile == nil {
 				return CompiledIntent{}, fmt.Errorf("proxy credential %q for resource %q is unavailable", resource.ProxyCredentialBinding, resource.ID)
@@ -95,7 +105,7 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		result.ResourceNames[resource.ID] = []string{name}
 	}
 	for _, resource := range intent.RouterListeners {
-		profile, err := credentialProfile(resource.ID, resource.TLS)
+		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageServerAuth)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
@@ -107,7 +117,7 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		if resource.Protocol != routercontrol.ProtocolTCP {
 			return CompiledIntent{}, fmt.Errorf("service listener %q protocol %q is unsupported", resource.ID, resource.Protocol)
 		}
-		profile, err := credentialProfile(resource.ID, resource.TLS)
+		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageServerAuth)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
@@ -130,7 +140,7 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		if resource.Protocol != routercontrol.ProtocolTCP {
 			return CompiledIntent{}, fmt.Errorf("service connector %q protocol %q is unsupported", resource.ID, resource.Protocol)
 		}
-		profile, err := credentialProfile(resource.ID, resource.TLS)
+		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageClientAuth)
 		if err != nil {
 			return CompiledIntent{}, err
 		}

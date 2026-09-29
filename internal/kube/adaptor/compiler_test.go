@@ -17,8 +17,8 @@ func TestCompileIntentIncludesTypedSettingsProxyAndStableCredentialIdentity(t *t
 			Logging:             []routercontrol.RouterLogSetting{{Module: "TCP_ADAPTOR", Level: "debug"}},
 		},
 		CredentialBindings: []routercontrol.CredentialBinding{
-			{ID: "proxy", Provider: "kubernetes-secret", Reference: "proxy", Usages: []string{"proxy"}},
-			{ID: "tls", Provider: "kubernetes-secret", Reference: "tls", Usages: []string{"client-auth"}},
+			{ID: "proxy", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "proxy", Usages: []string{routercontrol.CredentialUsageProxy}},
+			{ID: "tls", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "tls", Usages: []string{routercontrol.CredentialUsageClientAuth}},
 		},
 		RouterConnections: []routercontrol.RouterConnection{{
 			ID: "link", Host: "peer", Port: 55671, Role: "inter-router",
@@ -26,7 +26,7 @@ func TestCompileIntentIncludesTypedSettingsProxyAndStableCredentialIdentity(t *t
 			ProxyCredentialBinding: "proxy",
 		}},
 	}
-	proxy := qdr.ProxyProfile{Host: "proxy", Port: "3128", Username: "user", Password: "file:/secret"}
+	proxy := qdr.ProxyProfile{Host: "proxy", Port: "3128", Username: "user", Password: "secret"}
 	tls := qdr.SslProfile{CaCertFile: "/ca"}
 	first, err := CompileIntent(intent, map[routercontrol.ResourceID]CredentialRealization{
 		"proxy": {ProxyProfile: &proxy, RealizationID: "proxy-revision"},
