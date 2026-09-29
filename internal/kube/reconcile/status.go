@@ -18,7 +18,7 @@ import (
 type targetEvidence struct {
 	observations []Observation
 	digest       routercontrol.Digest
-	expectedPods int
+	currentPods  int
 }
 
 func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
@@ -36,8 +36,8 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		if err != nil {
 			continue
 		}
-		observations, expectedPods := currentTargetObservations(snapshot, target)
-		evidence[target] = targetEvidence{observations: observations, digest: digest, expectedPods: expectedPods}
+		observations, currentPods := currentTargetObservations(snapshot, target)
+		evidence[target] = targetEvidence{observations: observations, digest: digest, currentPods: currentPods}
 	}
 	evaluationTime := snapshot.EvaluationTime
 	if evaluationTime.IsZero() {
@@ -48,10 +48,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	site := desired.Site.DeepCopy()
 	beforeSite := site.Status.DeepCopy()
 	site.ClearLegacyNetworkStatus()
-	configured := skupperv2alpha1.ReadyCondition()
-	if len(desired.Diagnostics) > 0 {
-		configured = skupperv2alpha1.ErrorCondition(fmt.Errorf("%s", desired.Diagnostics[0].Message))
-	}
+	configured := configuredState(desired.Diagnostics, site.UID)
 	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, site.Generation, now)
 	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, allTargetsApplied(evidence), site.Generation, now)
 	required := []string{skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING}
@@ -67,11 +64,14 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
 		id := resourceID(updated.UID, "listener")
-		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, resourceApplied(evidence, id), updated.Generation, now)
-		matched := routingKeysReachable(evidence, []string{updated.Spec.RoutingKey})
+		configured := combineStates(configuredState(desired.Diagnostics, updated.UID), resourceApplied(evidence, id))
+		operational := resourceOperational(evidence, id)
+		matched, _ := routingKeysReachable(evidence, []string{updated.Spec.RoutingKey})
 		updated.Status.HasMatchingConnector = matched.Status == metav1.ConditionTrue
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL, operational, updated.Generation, now)
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_MATCHED, matched, updated.Generation, now)
-		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_MATCHED)
+		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL, skupperv2alpha1.CONDITION_TYPE_MATCHED)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.Listeners = append(desired.Statuses.Listeners, updated)
 		}
@@ -79,11 +79,13 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range sortedMultiKeyListeners(snapshot.MultiKeyListeners) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		configured := resourceApplied(evidence, resourceID(updated.UID, "listener"))
-		matched := routingKeysReachable(evidence, routingKeys(updated))
+		configured := combineStates(configuredState(desired.Diagnostics, updated.UID), resourceApplied(evidence, resourceID(updated.UID, "listener")))
+		socket := resourceOperational(evidence, resourceID(updated.UID, "listener"))
+		matched, reachable := routingKeysReachable(evidence, routingKeys(updated))
 		setMultiKeyCondition(&updated.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, updated.Generation, now)
-		setMultiKeyCondition(&updated.Status, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL, matched, updated.Generation, now)
+		setMultiKeyCondition(&updated.Status, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL, combineStates(socket, matched), updated.Generation, now)
 		updated.Status.HasDestination = matched.Status == metav1.ConditionTrue
+		updated.SetRoutingKeysReachable(reachable)
 		aggregateMultiKey(&updated.Status, updated.Generation, now)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.MultiKey = append(desired.Statuses.MultiKey, updated)
@@ -92,9 +94,9 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range sortedConnectors(snapshot.Connectors) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		state := resourceApplied(evidence, resourceID(updated.UID, "connector"))
+		state := combineStates(configuredState(desired.Diagnostics, updated.UID), resourceApplied(evidence, resourceID(updated.UID, "connector")))
 		selected := selectedPodsForConnector(snapshot, updated)
-		if len(selected) == 0 {
+		if updated.Spec.Selector != "" && len(selected) == 0 && state.Reason != skupperv2alpha1.StatusError {
 			state = pendingState("No selected endpoints")
 		}
 		updated.Status.SelectedPods = selected
@@ -109,7 +111,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 	for _, current := range sortedBindings(snapshot.Bindings) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
-		state := resourceApplied(evidence, resourceID(updated.UID, "attached-connector"))
+		state := combineStates(configuredState(desired.Diagnostics, updated.UID), resourceApplied(evidence, resourceID(updated.UID, "attached-connector")))
 		updated.Status.HasMatchingListener = false
 		removeCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_MATCHED)
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, state, updated.Generation, now)
@@ -133,7 +135,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		}
 		state := pendingState("No authorizing AttachedConnectorBinding")
 		if binding != nil {
-			state = resourceApplied(evidence, resourceID(binding.UID, "attached-connector"))
+			state = combineStates(configuredState(desired.Diagnostics, updated.UID), resourceApplied(evidence, resourceID(binding.UID, "attached-connector")))
 		}
 		selected := selectedPodsForAttached(snapshot, updated)
 		if len(selected) == 0 {
@@ -153,7 +155,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		for _, endpoint := range updated.Spec.Endpoints {
 			ids = append(ids, resourceID(updated.UID, "link/"+endpoint.Name))
 		}
-		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, resourcesApplied(evidence, ids), updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, combineStates(configuredState(desired.Diagnostics, updated.UID), resourcesApplied(evidence, ids)), updated.Generation, now)
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL, resourcesOperational(evidence, ids), updated.Generation, now)
 		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_OPERATIONAL)
 		if !reflect.DeepEqual(*before, updated.Status) {
@@ -167,7 +169,7 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		for _, role := range updated.Spec.Roles {
 			ids = append(ids, resourceID(updated.UID, "access/"+role.Name))
 		}
-		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, resourcesApplied(evidence, ids), updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, combineStates(configuredState(desired.Diagnostics, updated.UID), resourcesApplied(evidence, ids)), updated.Generation, now)
 		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RESOLVED)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.Accesses = append(desired.Statuses.Accesses, updated)
@@ -200,33 +202,28 @@ func currentTargetObservations(snapshot Snapshot, target RouterTarget) ([]Observ
 			result = append(result, observation)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Key.Identity.PodUID != result[j].Key.Identity.PodUID {
+			return result[i].Key.Identity.PodUID < result[j].Key.Identity.PodUID
+		}
+		return result[i].SessionID < result[j].SessionID
+	})
 	return result, len(pods)
 }
 
 func allTargetsApplied(evidence map[RouterTarget]targetEvidence) skupperv2alpha1.ConditionState {
-	if len(evidence) == 0 {
-		return unknownState("No desired router targets")
-	}
-	for _, target := range evidence {
-		if target.expectedPods == 0 || len(target.observations) != target.expectedPods {
-			return unknownState("No authenticated observation from a current router Pod")
+	return evaluateTargets(evidence, func(observation Observation, digest routercontrol.Digest) skupperv2alpha1.ConditionState {
+		if state := applicationState(observation, digest); state.Status != metav1.ConditionTrue {
+			return state
 		}
-		for _, observation := range target.observations {
-			if state := applicationState(observation, target.digest); state.Status != metav1.ConditionTrue {
-				return state
-			}
-			scope, ok := observation.Scopes[routercontrol.ObservationScopeResources]
-			if !ok || !scope.Fresh || scope.Snapshot.SessionID != observation.SessionID || scope.Snapshot.Knowledge == routercontrol.KnowledgeUnknown {
-				return unknownState("Local router observation is missing, stale, or unknown")
-			}
-		}
-	}
-	return skupperv2alpha1.ReadyCondition()
+		_, state := freshScope(observation, routercontrol.ObservationScopeResources)
+		return state
+	})
 }
 
 func applicationState(observation Observation, digest routercontrol.Digest) skupperv2alpha1.ConditionState {
 	application := observation.Application
-	if application == nil || application.SessionID != observation.SessionID || observation.AcceptedDigest != digest || application.IntentDigest != digest {
+	if application == nil || application.SessionID != observation.SessionID || observation.AcceptedDigest != digest || application.IntentDigest != digest || application.RealizationID == "" {
 		return unknownState("Desired intent has no fresh applied report for this session")
 	}
 	switch application.State {
@@ -245,99 +242,175 @@ func resourceApplied(evidence map[RouterTarget]targetEvidence, id routercontrol.
 
 func resourcesApplied(evidence map[RouterTarget]targetEvidence, ids []routercontrol.ResourceID) skupperv2alpha1.ConditionState {
 	if len(ids) == 0 {
-		return skupperv2alpha1.ReadyCondition()
+		return unknownState("No desired router resources")
 	}
-	for _, target := range evidence {
-		if target.expectedPods == 0 || len(target.observations) != target.expectedPods {
-			return unknownState("No authenticated observation from a current router Pod")
-		}
-		for _, observation := range target.observations {
-			if state := applicationState(observation, target.digest); state.Status != metav1.ConditionTrue {
-				return state
-			}
-			for _, id := range ids {
-				found := false
-				for _, resource := range observation.Application.Resources {
-					if resource.ResourceID != id {
-						continue
-					}
-					found = true
-					if resource.State == routercontrol.ApplicationFailed {
-						return skupperv2alpha1.ErrorCondition(fmt.Errorf("router resource %s failed: %s", id, resource.Reason))
-					}
-					if resource.State != routercontrol.ApplicationApplied {
-						return pendingState("Router resource application pending")
-					}
-				}
-				if !found {
-					return unknownState("Applied report does not contain the desired resource")
-				}
-			}
-		}
-	}
-	return skupperv2alpha1.ReadyCondition()
+	return evaluateTargets(evidence, func(observation Observation, digest routercontrol.Digest) skupperv2alpha1.ConditionState {
+		return observedResourcesState(observation, digest, ids, false)
+	})
 }
 
 func resourcesOperational(evidence map[RouterTarget]targetEvidence, ids []routercontrol.ResourceID) skupperv2alpha1.ConditionState {
 	if len(ids) == 0 {
-		return skupperv2alpha1.ReadyCondition()
+		return unknownState("No desired router resources")
 	}
-	for _, target := range evidence {
-		if target.expectedPods == 0 || len(target.observations) != target.expectedPods {
-			return unknownState("No authenticated local router observation")
+	return evaluateTargets(evidence, func(observation Observation, digest routercontrol.Digest) skupperv2alpha1.ConditionState {
+		return observedResourcesState(observation, digest, ids, true)
+	})
+}
+
+func resourceOperational(evidence map[RouterTarget]targetEvidence, id routercontrol.ResourceID) skupperv2alpha1.ConditionState {
+	return resourcesOperational(evidence, []routercontrol.ResourceID{id})
+}
+
+func evaluateTargets(evidence map[RouterTarget]targetEvidence, evaluate func(Observation, routercontrol.Digest) skupperv2alpha1.ConditionState) skupperv2alpha1.ConditionState {
+	if len(evidence) == 0 {
+		return unknownState("No desired router targets")
+	}
+	for _, key := range sortedEvidenceTargets(evidence) {
+		target := evidence[key]
+		if target.currentPods == 0 || len(target.observations) == 0 {
+			return unknownState("No authenticated observation from a current router Pod")
 		}
+		state := unknownState("No verified serving realization")
 		for _, observation := range target.observations {
-			scope, ok := observation.Scopes[routercontrol.ObservationScopeResources]
-			if !ok || !scope.Fresh || scope.Snapshot.SessionID != observation.SessionID || scope.Snapshot.Knowledge == routercontrol.KnowledgeUnknown {
-				return unknownState("Local resource observation is missing, stale, or unknown")
+			candidate := evaluate(observation, target.digest)
+			if candidate.Status == metav1.ConditionTrue {
+				state = candidate
+				break
 			}
-			for _, id := range ids {
-				found := false
-				for _, resource := range scope.Snapshot.Resources {
-					if resource.ResourceID == id {
-						found = true
-						if resource.Operational == routercontrol.OperationalDown {
-							return pendingState("Router resource is not operational")
-						}
-						if resource.Operational != routercontrol.OperationalUp {
-							return unknownState("Router resource operational state is unknown")
-						}
-					}
-				}
-				if !found {
-					return unknownState("Local observation does not contain the desired resource")
-				}
-			}
+			state = preferState(state, candidate)
+		}
+		if state.Status != metav1.ConditionTrue {
+			return state
 		}
 	}
 	return skupperv2alpha1.ReadyCondition()
 }
 
-func routingKeysReachable(evidence map[RouterTarget]targetEvidence, keys []string) skupperv2alpha1.ConditionState {
-	known := false
-	for _, target := range evidence {
-		if target.expectedPods == 0 || len(target.observations) != target.expectedPods {
-			return unknownState("Local address observation is missing, stale, or unknown")
-		}
-		for _, observation := range target.observations {
-			scope, ok := observation.Scopes[routercontrol.ObservationScopeAddresses]
-			if !ok || !scope.Fresh || scope.Snapshot.SessionID != observation.SessionID || scope.Snapshot.Knowledge == routercontrol.KnowledgeUnknown {
-				return unknownState("Local address observation is missing, stale, or unknown")
+func observedResourcesState(observation Observation, digest routercontrol.Digest, ids []routercontrol.ResourceID, operational bool) skupperv2alpha1.ConditionState {
+	if state := applicationState(observation, digest); state.Status != metav1.ConditionTrue {
+		return state
+	}
+	snapshot, state := freshScope(observation, routercontrol.ObservationScopeResources)
+	if state.Status != metav1.ConditionTrue {
+		return state
+	}
+	for _, id := range ids {
+		var applied *routercontrol.ResourceApplication
+		for index := range observation.Application.Resources {
+			if observation.Application.Resources[index].ResourceID == id {
+				applied = &observation.Application.Resources[index]
+				break
 			}
-			known = true
-			for _, address := range scope.Snapshot.Addresses {
+		}
+		if applied == nil {
+			return unknownState("Applied report does not contain the desired resource")
+		}
+		if applied.State == routercontrol.ApplicationFailed {
+			return skupperv2alpha1.ErrorCondition(fmt.Errorf("router resource %s failed: %s", id, applied.Reason))
+		}
+		if applied.State != routercontrol.ApplicationApplied {
+			return pendingState("Router resource application pending")
+		}
+		if applied.RealizationID == "" {
+			return unknownState("Applied resource has no realization identity")
+		}
+		var observed *routercontrol.LocalResourceObservation
+		for index := range snapshot.Resources {
+			if snapshot.Resources[index].ResourceID == id {
+				observed = &snapshot.Resources[index]
+				break
+			}
+		}
+		if observed == nil || observed.RealizationID == "" || observed.RealizationID != applied.RealizationID {
+			return unknownState("Local observation does not match the applied resource realization")
+		}
+		if !operational {
+			continue
+		}
+		switch observed.Operational {
+		case routercontrol.OperationalUp:
+		case routercontrol.OperationalDown:
+			return pendingState("Router resource is not operational")
+		default:
+			return unknownState("Router resource operational state is unknown")
+		}
+	}
+	return skupperv2alpha1.ReadyCondition()
+}
+
+func freshScope(observation Observation, name string) (routercontrol.ObservationSnapshot, skupperv2alpha1.ConditionState) {
+	scope, ok := observation.Scopes[name]
+	if !ok || !scope.Fresh || scope.Snapshot.SessionID != observation.SessionID || scope.Snapshot.Knowledge == routercontrol.KnowledgeUnknown {
+		return routercontrol.ObservationSnapshot{}, unknownState("Local router observation is missing, stale, or unknown")
+	}
+	return scope.Snapshot, skupperv2alpha1.ReadyCondition()
+}
+
+func routingKeysReachable(evidence map[RouterTarget]targetEvidence, keys []string) (skupperv2alpha1.ConditionState, []string) {
+	if len(evidence) == 0 || len(keys) == 0 {
+		return unknownState("Local address observation is missing, stale, or unknown"), nil
+	}
+	var reachableAcrossTargets map[string]bool
+	for _, targetKey := range sortedEvidenceTargets(evidence) {
+		target := evidence[targetKey]
+		if target.currentPods == 0 || len(target.observations) == 0 {
+			return unknownState("Local address observation is missing, stale, or unknown"), nil
+		}
+		targetReachable := map[string]bool{}
+		known := false
+		for _, observation := range target.observations {
+			if applicationState(observation, target.digest).Status != metav1.ConditionTrue {
+				continue
+			}
+			if _, state := freshScope(observation, routercontrol.ObservationScopeResources); state.Status != metav1.ConditionTrue {
+				continue
+			}
+			snapshot, state := freshScope(observation, routercontrol.ObservationScopeAddresses)
+			if state.Status != metav1.ConditionTrue {
+				continue
+			}
+			seen := map[string]bool{}
+			for _, address := range snapshot.Addresses {
 				for _, key := range keys {
-					if address.RoutingKey == key && address.Reachable {
-						return skupperv2alpha1.ReadyCondition()
+					if address.RoutingKey == key {
+						seen[key] = true
+						if address.Reachable {
+							targetReachable[key] = true
+						}
 					}
+				}
+			}
+			if len(targetReachable) > 0 || snapshot.Knowledge == routercontrol.KnowledgeComplete || containsAllKeys(seen, keys) {
+				known = true
+			}
+		}
+		if !known {
+			return unknownState("Local address observation is missing, stale, partial, or unknown"), nil
+		}
+		if len(targetReachable) == 0 {
+			return pendingState("No matching local routing address"), nil
+		}
+		if reachableAcrossTargets == nil {
+			reachableAcrossTargets = targetReachable
+		} else {
+			for key := range reachableAcrossTargets {
+				if !targetReachable[key] {
+					delete(reachableAcrossTargets, key)
 				}
 			}
 		}
 	}
-	if !known {
-		return unknownState("Local address observation is missing, stale, or unknown")
+	if len(reachableAcrossTargets) == 0 {
+		return pendingState("No routing key is reachable on every router group"), nil
 	}
-	return pendingState("No matching local routing address")
+	reachable := make([]string, 0, len(reachableAcrossTargets))
+	for _, key := range keys {
+		if reachableAcrossTargets[key] {
+			reachable = append(reachable, key)
+		}
+	}
+	return skupperv2alpha1.ReadyCondition(), reachable
 }
 
 func selectedPodsForConnector(snapshot Snapshot, connector *skupperv2alpha1.Connector) []skupperv2alpha1.PodDetails {
@@ -376,6 +449,67 @@ func selectedPodsForAttached(snapshot Snapshot, attached *skupperv2alpha1.Attach
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].UID < result[j].UID })
 	return result
+}
+
+func sortedEvidenceTargets(evidence map[RouterTarget]targetEvidence) []RouterTarget {
+	result := make([]RouterTarget, 0, len(evidence))
+	for target := range evidence {
+		result = append(result, target)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].NamespaceUID != result[j].NamespaceUID {
+			return result[i].NamespaceUID < result[j].NamespaceUID
+		}
+		if result[i].SiteUID != result[j].SiteUID {
+			return result[i].SiteUID < result[j].SiteUID
+		}
+		return result[i].RouterGroup < result[j].RouterGroup
+	})
+	return result
+}
+
+func containsAllKeys(seen map[string]bool, keys []string) bool {
+	for _, key := range keys {
+		if !seen[key] {
+			return false
+		}
+	}
+	return true
+}
+
+func configuredState(diagnostics []Diagnostic, resource types.UID) skupperv2alpha1.ConditionState {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Resource == resource || (resource == "" && diagnostic.Resource == "") {
+			return skupperv2alpha1.ErrorCondition(fmt.Errorf("%s", diagnostic.Message))
+		}
+	}
+	return skupperv2alpha1.ReadyCondition()
+}
+
+func combineStates(first, second skupperv2alpha1.ConditionState) skupperv2alpha1.ConditionState {
+	if first.Status != metav1.ConditionTrue {
+		return first
+	}
+	return second
+}
+
+func preferState(current, candidate skupperv2alpha1.ConditionState) skupperv2alpha1.ConditionState {
+	priority := func(state skupperv2alpha1.ConditionState) int {
+		if state.Status == metav1.ConditionTrue {
+			return 4
+		}
+		if state.Reason == skupperv2alpha1.StatusError {
+			return 3
+		}
+		if state.Status == metav1.ConditionFalse {
+			return 2
+		}
+		return 1
+	}
+	if priority(candidate) > priority(current) {
+		return candidate
+	}
+	return current
 }
 
 func unknownState(message string) skupperv2alpha1.ConditionState {
