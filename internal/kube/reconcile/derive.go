@@ -379,18 +379,34 @@ func credentialBindings(listeners []routercontrol.ServiceListener, connectors []
 		requirement.usages[usage] = true
 		ids[id] = requirement
 	}
+	addTLS := func(tls routercontrol.TLSIntent, inbound bool) {
+		if tls.CredentialBinding == "" {
+			return
+		}
+		if inbound {
+			add(tls.CredentialBinding, "credential/", routercontrol.CredentialUsageServerAuth)
+			if tls.Mode == routercontrol.TLSModeMutual {
+				add(tls.CredentialBinding, "credential/", routercontrol.CredentialUsageTrust)
+			}
+			return
+		}
+		add(tls.CredentialBinding, "credential/", routercontrol.CredentialUsageTrust)
+		if tls.Mode == routercontrol.TLSModeMutual {
+			add(tls.CredentialBinding, "credential/", routercontrol.CredentialUsageClientAuth)
+		}
+	}
 	for _, listener := range listeners {
-		add(listener.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageServerAuth)
+		addTLS(listener.TLS, true)
 	}
 	for _, connector := range connectors {
-		add(connector.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageClientAuth)
+		addTLS(connector.TLS, false)
 	}
 	for _, connection := range connections {
-		add(connection.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageClientAuth)
+		addTLS(connection.TLS, false)
 		add(connection.ProxyCredentialBinding, "proxy/", routercontrol.CredentialUsageProxy)
 	}
 	for _, listener := range access {
-		add(listener.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageServerAuth)
+		addTLS(listener.TLS, true)
 	}
 	ordered := make([]string, 0, len(ids))
 	for id := range ids {
