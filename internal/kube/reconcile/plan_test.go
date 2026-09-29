@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -28,11 +29,58 @@ func (failingPublishPlanner) Plan(Snapshot, DesiredNamespace) Plan {
 	return Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return errors.New("prerequisite failed") }}}}
 }
 
-type recordingStatusWriter struct{ calls int }
+type recordingStatusWriter struct {
+	calls int
+	run   func()
+}
 
 func (w *recordingStatusWriter) ApplyStatuses(context.Context, NamespaceIdentity, StatusProjection) error {
 	w.calls++
+	if w.run != nil {
+		w.run()
+	}
 	return nil
+}
+
+type fixedPlanner struct{ plan Plan }
+
+func (p fixedPlanner) Plan(Snapshot, DesiredNamespace) Plan { return p.plan }
+
+func TestStatusProjectionFollowsEffectsEvenOnFailure(t *testing.T) {
+	for _, effectError := range []error{nil, errors.New("foreign prerequisite"), SupersededError{Reason: "external edit"}} {
+		t.Run(fmt.Sprint(effectError), func(t *testing.T) {
+			var ran []string
+			// A public Site status write increments the resourceVersion used by
+			// every effect's verifySite check. It must not supersede its own plan.
+			resourceVersion := "collected"
+			writer := &recordingStatusWriter{run: func() {
+				resourceVersion = "status-written"
+				ran = append(ran, "status")
+			}}
+			planner := fixedPlanner{Plan{Operations: []Operation{
+				{ID: "z-prerequisite", Run: func(context.Context) error {
+					if resourceVersion != "collected" {
+						t.Error("status write superseded the plan before its effects ran")
+					}
+					ran = append(ran, "prerequisite")
+					return effectError
+				}},
+				{ID: "a-dependent", Dependencies: []OperationID{"z-prerequisite"}, Run: func(context.Context) error {
+					ran = append(ran, "dependent")
+					return nil
+				}},
+			}}}
+			desired := DesiredNamespace{Statuses: StatusProjection{Sites: []*skupperv2alpha1.Site{{ObjectMeta: metav1.ObjectMeta{Name: "site"}}}}}
+			report := (Executor{}).Execute(context.Background(), (StatusPlanner{Next: planner, Writer: writer}).Plan(Snapshot{}, desired))
+			want := []string{"prerequisite", "dependent", "status"}
+			if effectError != nil {
+				want = []string{"prerequisite", "status"}
+			}
+			if !reflect.DeepEqual(ran, want) || writer.calls != 1 || report.Results[len(report.Results)-1].ID != "apply-public-status" {
+				t.Fatalf("status must follow all completed/skipped effects without requiring their success: ran=%v report=%#v", ran, report)
+			}
+		})
+	}
 }
 
 func TestSiteLessStatusProjectionExecutes(t *testing.T) {

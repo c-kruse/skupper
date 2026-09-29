@@ -14,7 +14,10 @@ type Operation struct {
 	ID           OperationID
 	Kind         string
 	Dependencies []OperationID
-	Run          func(context.Context) error
+	// After orders effects without requiring their success. Diagnostics can
+	// run last even when a prerequisite failed or its dependents were skipped.
+	After []OperationID
+	Run   func(context.Context) error
 }
 
 type Plan struct {
@@ -107,6 +110,15 @@ func (Executor) Execute(ctx context.Context, plan Plan) ExecutionReport {
 				}
 				if state != Succeeded {
 					blocked = true
+				}
+			}
+			for _, predecessor := range operation.After {
+				if _, completed := states[predecessor]; !completed {
+					if _, exists := pending[predecessor]; exists {
+						ready = false
+					} else {
+						blocked = true
+					}
 				}
 			}
 			if !ready {

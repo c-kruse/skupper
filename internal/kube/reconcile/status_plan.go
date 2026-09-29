@@ -19,7 +19,13 @@ func (p StatusPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 		return plan
 	}
 	projection := copyStatusProjection(desired.Statuses)
-	plan.Operations = append(plan.Operations, Operation{ID: "apply-public-status", Kind: "ApplyPublicStatus", Run: func(ctx context.Context) error {
+	// Status can change the Site resourceVersion used to fence every other
+	// effect. Write it last, but do not hide diagnostics when an effect fails.
+	after := make([]OperationID, 0, len(plan.Operations))
+	for _, operation := range plan.Operations {
+		after = append(after, operation.ID)
+	}
+	plan.Operations = append(plan.Operations, Operation{ID: "apply-public-status", Kind: "ApplyPublicStatus", After: after, Run: func(ctx context.Context) error {
 		return p.Writer.ApplyStatuses(ctx, snapshot.Namespace, projection)
 	}})
 	return plan
