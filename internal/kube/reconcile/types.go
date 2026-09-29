@@ -82,6 +82,9 @@ type Snapshot struct {
 	Bindings          []*skupperv2alpha1.AttachedConnectorBinding
 	Pods              []*corev1.Pod
 	Services          []*corev1.Service
+	ServiceAccounts   []*corev1.ServiceAccount
+	Roles             []*rbacv1.Role
+	RoleBindings      []*rbacv1.RoleBinding
 	Routes            []*routev1.Route
 	Ingresses         []*networkingv1.Ingress
 	HTTPProxies       []*unstructured.Unstructured

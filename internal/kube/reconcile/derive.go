@@ -59,6 +59,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		return desired
 	}
 	deriveRouterPrerequisites(active, &desired)
+	diagnoseRouterPrerequisites(snapshot, active, &desired)
 	if snapshot.Allocations.SiteUID == active.UID {
 		desired.Allocations = copyAllocations(snapshot.Allocations)
 	} else {
@@ -269,6 +270,27 @@ func deriveRouterPrerequisites(site *skupperv2alpha1.Site, desired *DesiredNames
 	desired.ServiceAccount = &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}}
 	desired.Role = &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}, Rules: []rbacv1.PolicyRule{{Verbs: []string{"get", "list", "watch"}, APIGroups: []string{""}, Resources: []string{"secrets"}}}}
 	desired.RoleBinding = &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: site.Namespace, OwnerReferences: owner}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "skupper-router", Namespace: site.Namespace}}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "skupper-router"}}
+}
+
+func diagnoseRouterPrerequisites(snapshot Snapshot, site *skupperv2alpha1.Site, desired *DesiredNamespace) {
+	if desired.ServiceAccount == nil {
+		return
+	}
+	for _, current := range snapshot.ServiceAccounts {
+		if current.Name == desired.ServiceAccount.Name && !metav1.IsControlledBy(current, site) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignServiceAccount", Message: fmt.Sprintf("router ServiceAccount %s/%s is not controlled by Site UID %s", site.Namespace, current.Name, site.UID)})
+		}
+	}
+	for _, current := range snapshot.Roles {
+		if current.Name == desired.Role.Name && !metav1.IsControlledBy(current, site) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignRole", Message: fmt.Sprintf("router Role %s/%s is not controlled by Site UID %s", site.Namespace, current.Name, site.UID)})
+		}
+	}
+	for _, current := range snapshot.RoleBindings {
+		if current.Name == desired.RoleBinding.Name && !metav1.IsControlledBy(current, site) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignRoleBinding", Message: fmt.Sprintf("router RoleBinding %s/%s is not controlled by Site UID %s", site.Namespace, current.Name, site.UID)})
+		}
+	}
 }
 
 func activeSite(snapshot Snapshot, desired *DesiredNamespace) *skupperv2alpha1.Site {

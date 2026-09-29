@@ -105,6 +105,9 @@ type namespaceInformers struct {
 	configMaps        cache.SharedIndexInformer
 	pods              cache.SharedIndexInformer
 	services          cache.SharedIndexInformer
+	serviceAccounts   cache.SharedIndexInformer
+	roles             cache.SharedIndexInformer
+	roleBindings      cache.SharedIndexInformer
 	ingresses         cache.SharedIndexInformer
 	secrets           cache.SharedIndexInformer
 	sites             cache.SharedIndexInformer
@@ -170,7 +173,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		c.configurationConfigMap = c.configurationFactory.Core().V1().ConfigMaps().Informer()
 	}
 	c.informers = namespaceInformers{
-		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(), ingresses: coreFactory.Networking().V1().Ingresses().Informer(),
+		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), serviceAccounts: coreFactory.Core().V1().ServiceAccounts().Informer(), roles: coreFactory.Rbac().V1().Roles().Informer(), roleBindings: coreFactory.Rbac().V1().RoleBindings().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(), ingresses: coreFactory.Networking().V1().Ingresses().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
 	if routeClient := clients.GetRouteClient(); routeClient != nil {
@@ -337,7 +340,7 @@ func (c *NamespaceController) RunLeader(ctx context.Context) error {
 }
 
 func (c *NamespaceController) registerInvalidations() error {
-	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.services, c.informers.secrets, c.informers.ingresses, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
+	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.services, c.informers.serviceAccounts, c.informers.roles, c.informers.roleBindings, c.informers.secrets, c.informers.ingresses, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
 	if c.informers.routes != nil {
 		local = append(local, c.informers.routes)
 	}
@@ -531,7 +534,7 @@ func eventObject(value interface{}) interface{} {
 }
 
 func (c *NamespaceController) enqueueAll() {
-	informers := []cache.SharedIndexInformer{c.informers.configMaps, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses, c.informers.attached, c.informers.bindings}
+	informers := []cache.SharedIndexInformer{c.informers.configMaps, c.informers.serviceAccounts, c.informers.roles, c.informers.roleBindings, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses, c.informers.attached, c.informers.bindings}
 	if c.informers.routes != nil {
 		informers = append(informers, c.informers.routes)
 	}
@@ -567,7 +570,7 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	bootstrap := c.bootstrap
 	bootstrap.PublicCA = append([]byte(nil), c.bootstrap.PublicCA...)
 	c.bootstrapMu.RUnlock()
-	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), Ingresses: listNamespace[*networkingv1.Ingress](c.informers.ingresses, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Bootstrap: bootstrap}
+	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), ServiceAccounts: listNamespace[*corev1.ServiceAccount](c.informers.serviceAccounts, namespace), Roles: listNamespace[*rbacv1.Role](c.informers.roles, namespace), RoleBindings: listNamespace[*rbacv1.RoleBinding](c.informers.roleBindings, namespace), Ingresses: listNamespace[*networkingv1.Ingress](c.informers.ingresses, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Bootstrap: bootstrap}
 	if c.informers.routes != nil {
 		snapshot.Routes = listNamespace[*routev1.Route](c.informers.routes, namespace)
 	}

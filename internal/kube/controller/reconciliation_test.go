@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -312,6 +313,56 @@ func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t 
 	}
 	if _, err := clients.GetKubeClient().RbacV1().Roles(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("Role was created after foreign ServiceAccount rejection: %v", err)
+	}
+}
+
+func TestRouterPrerequisitesDoNotAdoptForeignRoleOrRoleBinding(t *testing.T) {
+	tests := []struct {
+		name    string
+		foreign runtime.Object
+		owners  func(internalclient.Clients, string) ([]metav1.OwnerReference, error)
+	}{
+		{
+			name:    "Role",
+			foreign: &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site-ns"}},
+			owners: func(clients internalclient.Clients, namespace string) ([]metav1.OwnerReference, error) {
+				value, err := clients.GetKubeClient().RbacV1().Roles(namespace).Get(context.Background(), "skupper-router", metav1.GetOptions{})
+				return value.OwnerReferences, err
+			},
+		},
+		{
+			name:    "RoleBinding",
+			foreign: &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site-ns"}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "foreign"}},
+			owners: func(clients internalclient.Clients, namespace string) ([]metav1.OwnerReference, error) {
+				value, err := clients.GetKubeClient().RbacV1().RoleBindings(namespace).Get(context.Background(), "skupper-router", metav1.GetOptions{})
+				return value.OwnerReferences, err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+			site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: namespace.Name, UID: "site-uid"}}
+			clients, err := fakeclient.NewFakeClient("controller-ns", []runtime.Object{namespace, test.foreign}, []runtime.Object{site}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, newTestIntentPublisher(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := (reconcile.NamespaceDeriver{}).Derive(reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controlled: true}, Sites: []*skupperv2alpha1.Site{site}, Allocations: reconcile.AllocationState{Ports: map[string]int{}}})
+			if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err == nil {
+				t.Fatalf("controller accepted foreign %s", test.name)
+			}
+			owners, err := test.owners(clients, namespace.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(owners) != 0 {
+				t.Fatalf("controller adopted foreign %s: %#v", test.name, owners)
+			}
+		})
 	}
 }
 

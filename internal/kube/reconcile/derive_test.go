@@ -6,6 +6,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -134,6 +135,67 @@ func TestDefaultRouterServiceAccountHasOnlySecretReadPermissions(t *testing.T) {
 	desired = (NamespaceDeriver{}).Derive(snapshot)
 	if desired.ServiceAccount != nil || desired.Role != nil || desired.RoleBinding != nil {
 		t.Fatal("custom service account unexpectedly derived generated RBAC")
+	}
+}
+
+func TestForeignRouterPrerequisitesDiagnoseSiteAndRecover(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		set     func(*Snapshot)
+		clear   func(*Snapshot)
+	}{
+		{
+			name:    "ServiceAccount",
+			message: "router ServiceAccount site/skupper-router is not controlled by Site UID site-uid",
+			set: func(snapshot *Snapshot) {
+				snapshot.ServiceAccounts = []*corev1.ServiceAccount{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+			},
+			clear: func(snapshot *Snapshot) { snapshot.ServiceAccounts = nil },
+		},
+		{
+			name:    "Role",
+			message: "router Role site/skupper-router is not controlled by Site UID site-uid",
+			set: func(snapshot *Snapshot) {
+				snapshot.Roles = []*rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+			},
+			clear: func(snapshot *Snapshot) { snapshot.Roles = nil },
+		},
+		{
+			name:    "RoleBinding",
+			message: "router RoleBinding site/skupper-router is not controlled by Site UID site-uid",
+			set: func(snapshot *Snapshot) {
+				snapshot.RoleBindings = []*rbacv1.RoleBinding{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+			},
+			clear: func(snapshot *Snapshot) { snapshot.RoleBindings = nil },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := baseSnapshot()
+			test.set(&snapshot)
+			desired := (NamespaceDeriver{}).Derive(snapshot)
+			if len(desired.Statuses.Sites) != 1 || desired.Statuses.Sites[0].Status.StatusType != skupperv2alpha1.StatusError || desired.Statuses.Sites[0].Status.Message != test.message {
+				t.Fatalf("foreign %s did not produce actionable Site error: %#v", test.name, desired.Statuses.Sites)
+			}
+			test.clear(&snapshot)
+			desired = (NamespaceDeriver{}).Derive(snapshot)
+			if len(desired.Statuses.Sites) != 1 || conditionStatus(desired.Statuses.Sites[0].Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED) != metav1.ConditionTrue {
+				t.Fatalf("Site ownership error did not recover after %s conflict cleared: %#v", test.name, desired.Statuses.Sites)
+			}
+		})
+	}
+}
+
+func TestCustomServiceAccountIgnoresUnneededDefaultPrerequisites(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Sites[0].Spec.ServiceAccount = "custom-router"
+	snapshot.ServiceAccounts = []*corev1.ServiceAccount{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+	snapshot.Roles = []*rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+	snapshot.RoleBindings = []*rbacv1.RoleBinding{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "site"}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if configured := conditionStatus(desired.Statuses.Sites[0].Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED); configured != metav1.ConditionTrue {
+		t.Fatalf("unneeded default prerequisites blocked custom ServiceAccount Site: %#v", desired.Statuses.Sites[0].Status)
 	}
 }
 
