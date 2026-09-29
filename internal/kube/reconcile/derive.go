@@ -363,17 +363,17 @@ func credentialBindings(listeners []routercontrol.ServiceListener, connectors []
 		ids[id] = requirement
 	}
 	for _, listener := range listeners {
-		add(listener.TLS.CredentialBinding, "credential/", "server-auth")
+		add(listener.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageServerAuth)
 	}
 	for _, connector := range connectors {
-		add(connector.TLS.CredentialBinding, "credential/", "client-auth")
+		add(connector.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageClientAuth)
 	}
 	for _, connection := range connections {
-		add(connection.TLS.CredentialBinding, "credential/", "client-auth")
-		add(connection.ProxyCredentialBinding, "proxy/", "proxy")
+		add(connection.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageClientAuth)
+		add(connection.ProxyCredentialBinding, "proxy/", routercontrol.CredentialUsageProxy)
 	}
 	for _, listener := range access {
-		add(listener.TLS.CredentialBinding, "credential/", "server-auth")
+		add(listener.TLS.CredentialBinding, "credential/", routercontrol.CredentialUsageServerAuth)
 	}
 	ordered := make([]string, 0, len(ids))
 	for id := range ids {
@@ -388,7 +388,7 @@ func credentialBindings(listeners []routercontrol.ServiceListener, connectors []
 			usages = append(usages, usage)
 		}
 		sort.Strings(usages)
-		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: "kubernetes-secret", Reference: requirement.reference, Usages: usages})
+		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: requirement.reference, Usages: usages})
 	}
 	return result
 }
