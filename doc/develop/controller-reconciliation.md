@@ -695,9 +695,9 @@ use an explicit observation condition and freshness/generation identity.
 It is not supported by the reconciled controller. Existing serialized fields are
 retained temporarily so resources and clients can be decoded, but no new value
 may request it and legacy `true` values must be removed before the namespace is
-cut over. Replace the per-pod-name endpoint assumption with a normal Listener or
-Connector pod selector and use `status.selectedPods` to inspect the selected
-workloads. The controller does not reinterpret `true` as `false`, because that
+cut over. Replace the per-pod-name endpoint assumption with a normal Listener and
+a Connector pod selector; use the Connector's `status.selectedPods` to inspect
+the selected workloads. The controller does not reinterpret `true` as `false`, because that
 would hide a behavior change.
 
 Use Kubernetes conditions with True/False/Unknown appropriately. `Configured`
@@ -778,10 +778,28 @@ before each step and abort if no healthy successor exists. Tests and rollout
 health checks expect one Ready leader, not every replica Ready. OnDelete makes
 this upgrade procedure required, not optional operational advice.
 
+The feature branch supplies `go run ./cmd/controller-rollout --namespace <ns>`
+for this procedure after applying an updated StatefulSet template. It checks the
+current Lease against the Ready Pod's UID, replaces the old standby first, waits
+for the upgraded standby's startup probe/cache synchronization, and only then
+replaces the old leader. Pod deletions use UID and resourceVersion preconditions.
+It rechecks leadership before deletion and exits on a changed holder or template;
+these checks reduce races but do not make cross-resource reads transactional.
+Completion requires two updated replicas and one Ready lease holder, not two
+Ready Pods. The holder identity format is `<pod-name>/<pod-uid>/<process-id>`;
+namespace assignment continues using the stable controller namespace/name.
+
+Set `SKUPPER_CONTROLLER_NAMESPACE` when generating manifests for an installation
+outside the default namespace. Namespace-scoped installs also require the included
+cluster-scoped TokenReview grant; a namespaced Role cannot grant this permission.
+Converting an existing Deployment installation to this StatefulSet is a separate
+cutover, not an in-place workload-kind update. Do not leave the legacy Deployment
+running alongside the new controller authority.
+
 Add topology spreading/anti-affinity and a disruption budget protecting the one
 Ready leader. Since PDBs do not orchestrate handoff and direct deletions bypass
 them, upgrades and node maintenance must use the same checked handoff procedure.
-This packaging choice needs agreement; the leader-only serving contract does not.
+The standalone and Helm manifests use this leader-only serving contract.
 
 ## Plans and errors preserve successful work without guessing
 
