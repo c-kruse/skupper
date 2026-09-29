@@ -64,6 +64,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "UnsupportedProtocol", Message: err.Error()})
 			continue
 		}
+		if listener.Spec.Port < 1 || listener.Spec.Port > 65535 {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "InvalidPort", Message: fmt.Sprintf("Listener service port %d is outside 1-65535", listener.Spec.Port)})
+			continue
+		}
 		port, err := allocatePort(desired.Allocations.Ports, reserved, string(listener.UID)+"/listener")
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "PortExhausted", Message: err.Error()})
@@ -93,12 +97,25 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "UnsupportedStrategy", Message: "weighted MultiKeyListener requires weighted routing intent support"})
 			continue
 		}
+		if listener.Spec.Port < 1 || listener.Spec.Port > 65535 {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "InvalidPort", Message: fmt.Sprintf("MultiKeyListener service port %d is outside 1-65535", listener.Spec.Port)})
+			continue
+		}
 		port, err := allocatePort(desired.Allocations.Ports, reserved, string(listener.UID)+"/listener")
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "PortExhausted", Message: err.Error()})
 			continue
 		}
 		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: routingKeys(listener), Host: "0.0.0.0", Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: serverTLSIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert)})
+		if listener.Spec.Host != "" {
+			service := listenerServices[listener.Spec.Host]
+			if service == nil {
+				controller, block := true, true
+				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Selector: map[string]string{"skupper.io/component": "router"}}}
+				listenerServices[listener.Spec.Host] = service
+			}
+			service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: listener.Name, Port: int32(listener.Spec.Port), TargetPort: intstr.FromInt(port), Protocol: corev1.ProtocolTCP})
+		}
 	}
 	connectors := deriveConnectors(snapshot, &desired)
 	connections := make([]routercontrol.RouterConnection, 0, len(snapshot.Links))
