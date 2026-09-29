@@ -22,16 +22,27 @@ import (
 
 type testIntentPublisher struct {
 	published chan routercontrol.RouterIntent
+	real      *routercontrol.Publisher
 }
 
 func (p *testIntentPublisher) Publish(intent routercontrol.RouterIntent) (routercontrol.Digest, error) {
+	digest, err := p.real.Publish(intent)
+	if err != nil {
+		return "", err
+	}
 	select {
 	case p.published <- intent:
 	default:
 	}
-	return "digest", nil
+	return digest, nil
 }
-func (p *testIntentPublisher) SetUnavailable(routercontrol.TargetIdentity) {}
+func (p *testIntentPublisher) SetUnavailable(target routercontrol.TargetIdentity) {
+	p.real.SetUnavailable(target)
+}
+
+func newTestIntentPublisher() *testIntentPublisher {
+	return &testIntentPublisher{published: make(chan routercontrol.RouterIntent, 1), real: routercontrol.NewPublisher()}
+}
 
 func TestNamespaceControllerSeparatesCacheSyncFromLeaderEffects(t *testing.T) {
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
@@ -49,7 +60,7 @@ func TestNamespaceControllerSeparatesCacheSyncFromLeaderEffects(t *testing.T) {
 		object.SetNamespace(action.GetNamespace())
 		return true, object, nil
 	})
-	publisher := &testIntentPublisher{published: make(chan routercontrol.RouterIntent, 1)}
+	publisher := newTestIntentPublisher()
 	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Workers: 1, Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, publisher, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +121,7 @@ func TestAllocationCollectionRejectsCorruptOrUnsafeRecords(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			publisher := &testIntentPublisher{published: make(chan routercontrol.RouterIntent, 1)}
+			publisher := newTestIntentPublisher()
 			controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, publisher, nil)
 			if err != nil {
 				t.Fatal(err)

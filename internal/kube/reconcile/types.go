@@ -116,13 +116,14 @@ type AllocationState struct {
 }
 
 type DesiredNamespace struct {
-	Namespace   NamespaceIdentity
-	SiteUID     types.UID
-	Intents     map[RouterTarget]routercontrol.RouterIntent
-	Allocations AllocationState
-	Diagnostics []Diagnostic
-	Bootstrap   RouterControlBootstrap
-	Site        *skupperv2alpha1.Site
+	Namespace        NamespaceIdentity
+	SiteUID          types.UID
+	Intents          map[RouterTarget]routercontrol.RouterIntent
+	Allocations      AllocationState
+	Diagnostics      []Diagnostic
+	Bootstrap        RouterControlBootstrap
+	Site             *skupperv2alpha1.Site
+	ListenerServices []*corev1.Service
 }
 
 func copyBootstrap(in RouterControlBootstrap) RouterControlBootstrap {

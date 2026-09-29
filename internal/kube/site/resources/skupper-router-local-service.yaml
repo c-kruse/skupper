@@ -19,6 +19,10 @@ metadata:
     kind: Site
     name: {{ .SiteName }}
     uid: {{ .SiteId }}
+{{- if .RouterControl }}
+    controller: true
+    blockOwnerDeletion: true
+{{- end }}
 spec:
   ports:
   - name: amqps

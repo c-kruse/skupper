@@ -115,6 +115,9 @@ func (Executor) Execute(ctx context.Context, plan Plan) ExecutionReport {
 			result := OperationResult{ID: operation.ID}
 			if blocked {
 				result.State = SkippedDependency
+			} else if err := ctx.Err(); err != nil {
+				result.State = Failed
+				result.Error = err
 			} else if err := operation.Run(ctx); err != nil {
 				var superseded SupersededError
 				var ambiguous ambiguousError

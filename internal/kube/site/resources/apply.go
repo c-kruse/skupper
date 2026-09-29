@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"fmt"
+	"path/filepath"
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,6 +89,8 @@ type RouterControlConfig struct {
 	CABundleConfigMap string
 	CABundleKey       string
 	CABundlePath      string
+	TokenDirectory    string
+	CABundleDirectory string
 }
 
 func (p *CoreParams) setLabelsAndAnnotations(labelling Labelling, namespace string, name string, kind string) *CoreParams {
@@ -184,6 +187,12 @@ func configDigest(config *skupperv2alpha1.SiteSpec) string {
 }
 
 func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing, disableSecCtx bool, routerControl *RouterControlConfig) *CoreParams {
+	if routerControl != nil {
+		copy := *routerControl
+		copy.TokenDirectory = filepath.Dir(copy.TokenPath)
+		copy.CABundleDirectory = filepath.Dir(copy.CABundlePath)
+		routerControl = &copy
+	}
 	return &CoreParams{
 		SiteId:             site.GetSiteId(),
 		SiteName:           site.Name,

@@ -198,14 +198,12 @@ spec:
         - mountPath: /etc/skupper-router-proxies
           name: skupper-router-proxies
 {{- if .RouterControl }}
-        - mountPath: {{ .RouterControl.TokenPath }}
+        - mountPath: {{ .RouterControl.TokenDirectory }}
           name: router-control-token
           readOnly: true
-          subPath: enrollment-token
-        - mountPath: {{ .RouterControl.CABundlePath }}
+        - mountPath: {{ .RouterControl.CABundleDirectory }}
           name: router-control-ca
           readOnly: true
-          subPath: {{ .RouterControl.CABundleKey }}
 {{- end }}
 {{- if .Sizing.Adaptor.NotEmpty -}}
         {{- template "resources" .Sizing.Adaptor -}}
@@ -258,14 +256,12 @@ spec:
         - mountPath: /etc/skupper-router-proxies
           name: skupper-router-proxies
 {{- if .RouterControl }}
-        - mountPath: {{ .RouterControl.TokenPath }}
+        - mountPath: {{ .RouterControl.TokenDirectory }}
           name: router-control-token
           readOnly: true
-          subPath: enrollment-token
-        - mountPath: {{ .RouterControl.CABundlePath }}
+        - mountPath: {{ .RouterControl.CABundleDirectory }}
           name: router-control-ca
           readOnly: true
-          subPath: {{ .RouterControl.CABundleKey }}
 {{- end }}
 {{- if .Sizing.Adaptor.NotEmpty -}}
         {{- template "resources" .Sizing.Adaptor -}}

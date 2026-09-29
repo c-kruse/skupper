@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -98,7 +99,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
-	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher}
+	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
 	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.WorkloadPlanner{Next: planner, Ensurer: c}, Executor: reconcile.Executor{}})
 	if err := c.registerInvalidations(); err != nil {
 		return nil, err
@@ -456,13 +457,9 @@ func (c *NamespaceController) allocations(namespace string, namespaceUID types.U
 	return result, nil
 }
 
-func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace reconcile.NamespaceIdentity, allocations reconcile.AllocationState) error {
-	currentNamespace, err := c.clients.GetKubeClient().CoreV1().Namespaces().Get(ctx, namespace.Name, metav1.GetOptions{})
-	if err != nil {
+func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, allocations reconcile.AllocationState) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
-	}
-	if currentNamespace.UID != namespace.UID {
-		return reconcile.SupersededError{Reason: "namespace UID changed"}
 	}
 	encoded, err := json.Marshal(allocations.Ports)
 	if err != nil {
@@ -489,7 +486,11 @@ func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace r
 	if current.Data["namespaceUID"] != string(namespace.UID) {
 		return reconcile.SupersededError{Reason: "allocation record belongs to another namespace UID"}
 	}
-	current.Data = map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": string(allocations.SiteUID), "ports": string(encoded)}
+	desiredData := map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": string(allocations.SiteUID), "ports": string(encoded)}
+	if reflect.DeepEqual(current.Data, desiredData) {
+		return nil
+	}
+	current.Data = desiredData
 	_, err = configMaps.Update(ctx, current, metav1.UpdateOptions{})
 	return classifyWriteError(err)
 }
@@ -515,6 +516,9 @@ func (c *NamespaceController) EnsureRouterControlCA(ctx context.Context, namespa
 	if !metav1.IsControlledBy(current, site) {
 		return fmt.Errorf("router-control CA ConfigMap %s/%s is not controlled by Site UID %s", namespace.Name, desired.Name, site.UID)
 	}
+	if reflect.DeepEqual(current.Data, desired.Data) {
+		return nil
+	}
 	desired.ResourceVersion = current.ResourceVersion
 	_, err = configMaps.Update(ctx, desired, metav1.UpdateOptions{})
 	return classifyWriteError(err)
@@ -524,16 +528,121 @@ func (c *NamespaceController) EnsureSite(ctx context.Context, namespace reconcil
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
 	}
+	if err := c.validateWorkloadOwnership(ctx, site, groups); err != nil {
+		return err
+	}
 	config := siteresources.RouterControlConfig{NamespaceUID: string(namespace.UID), SiteUID: string(site.UID), EnrollmentURL: bootstrap.EnrollmentURL, ControlAddress: bootstrap.ControlAddress, TLSServerName: bootstrap.TLSServerName, TokenAudience: bootstrap.TokenAudience, TokenPath: bootstrap.TokenPath, CABundleConfigMap: bootstrap.CABundleConfigMap, CABundleKey: bootstrap.CABundleKey, CABundlePath: bootstrap.CABundlePath}
 	for _, group := range groups {
 		if err := siteresources.ApplyWithRouterControl(c.clients, ctx, site, group, sizing.Sizing{}, nil, c.disableSecurityContext, config); err != nil {
 			return err
 		}
 	}
+	return c.retireSiteWorkloads(ctx, site, groups)
+}
+
+func (c *NamespaceController) EnsureListenerServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, services []*corev1.Service) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	desiredNames := map[string]bool{}
+	client := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
+	for _, desired := range services {
+		desiredNames[desired.Name] = true
+		current, err := client.Get(ctx, desired.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if _, err := client.Create(ctx, desired, metav1.CreateOptions{}); err != nil {
+				return classifyWriteError(err)
+			}
+			continue
+		}
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if !ownedByUID(current.OwnerReferences, site.UID) || current.Annotations["internal.skupper.io/controlled"] != "true" {
+			return fmt.Errorf("Listener Service %s/%s is not owned by Site UID %s", namespace.Name, desired.Name, site.UID)
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		desired.Spec.ClusterIP = current.Spec.ClusterIP
+		desired.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
+		desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
+		desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
+		if reflect.DeepEqual(current.Labels, desired.Labels) && reflect.DeepEqual(current.Annotations, desired.Annotations) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Spec, desired.Spec) {
+			continue
+		}
+		if _, err := client.Update(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	current, err := client.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/listener=true"})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	for i := range current.Items {
+		service := &current.Items[i]
+		if desiredNames[service.Name] || service.Annotations["internal.skupper.io/controlled"] != "true" || !ownedByUID(service.OwnerReferences, site.UID) {
+			continue
+		}
+		if err := client.Delete(ctx, service.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &service.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
 	return nil
 }
 
+func (c *NamespaceController) validateWorkloadOwnership(ctx context.Context, site *skupperv2alpha1.Site, groups []string) error {
+	for _, group := range groups {
+		deployment, err := c.clients.GetKubeClient().AppsV1().Deployments(site.Namespace).Get(ctx, group, metav1.GetOptions{})
+		if err == nil && !metav1.IsControlledBy(deployment, site) {
+			return fmt.Errorf("router Deployment %s/%s is not controlled by Site UID %s", site.Namespace, group, site.UID)
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
+	service, err := c.clients.GetKubeClient().CoreV1().Services(site.Namespace).Get(ctx, "skupper-router-local", metav1.GetOptions{})
+	if err == nil && !ownedByUID(service.OwnerReferences, site.UID) {
+		return fmt.Errorf("router Service %s/%s is not owned by Site UID %s", site.Namespace, service.Name, site.UID)
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return classifyWriteError(err)
+	}
+	return nil
+}
+
+func (c *NamespaceController) retireSiteWorkloads(ctx context.Context, site *skupperv2alpha1.Site, groups []string) error {
+	desired := map[string]bool{}
+	for _, group := range groups {
+		desired[group] = true
+	}
+	deployments, err := c.clients.GetKubeClient().AppsV1().Deployments(site.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "application=skupper-router"})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if desired[deployment.Name] || !metav1.IsControlledBy(deployment, site) {
+			continue
+		}
+		if err := c.clients.GetKubeClient().AppsV1().Deployments(site.Namespace).Delete(ctx, deployment.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &deployment.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
+	return nil
+}
+
+func ownedByUID(owners []metav1.OwnerReference, uid types.UID) bool {
+	for _, owner := range owners {
+		if owner.UID == uid && owner.Kind == "Site" && owner.APIVersion == skupperv2alpha1.SchemeGroupVersion.String() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *NamespaceController) verifySite(ctx context.Context, namespace reconcile.NamespaceIdentity, expected *skupperv2alpha1.Site) error {
+	if expected == nil {
+		return reconcile.SupersededError{Reason: "no active Site in desired state"}
+	}
 	currentNamespace, err := c.clients.GetKubeClient().CoreV1().Namespaces().Get(ctx, namespace.Name, metav1.GetOptions{})
 	if err != nil {
 		return classifyWriteError(err)
@@ -541,11 +650,20 @@ func (c *NamespaceController) verifySite(ctx context.Context, namespace reconcil
 	if currentNamespace.UID != namespace.UID {
 		return reconcile.SupersededError{Reason: "namespace UID changed"}
 	}
+	config, err := c.clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name).Get(ctx, namespaceConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		config = nil
+	} else if err != nil {
+		return classifyWriteError(err)
+	}
+	if !ControlsNamespace(config, namespace.Name, c.controllerID, c.requireExplicitControl) {
+		return reconcile.SupersededError{Reason: "namespace controller assignment changed"}
+	}
 	current, err := c.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace.Name).Get(ctx, expected.Name, metav1.GetOptions{})
 	if err != nil {
 		return classifyWriteError(err)
 	}
-	if current.UID != expected.UID || current.DeletionTimestamp != nil {
+	if current.UID != expected.UID || current.ResourceVersion != expected.ResourceVersion || current.Generation != expected.Generation || current.DeletionTimestamp != nil {
 		return reconcile.SupersededError{Reason: "active Site changed or is deleting"}
 	}
 	return nil

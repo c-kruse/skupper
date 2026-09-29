@@ -6,25 +6,27 @@ import (
 	"sort"
 
 	"github.com/skupperproject/skupper/internal/routercontrol"
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
 
 type AllocationCommitter interface {
-	CommitAllocations(context.Context, NamespaceIdentity, AllocationState) error
+	CommitAllocations(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, AllocationState) error
 }
 
 type PublicationPlanner struct {
 	Allocations AllocationCommitter
 	Publisher   routercontrol.IntentPublisher
+	Validator   func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site) error
 }
 
 func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 	plan := Plan{Namespace: snapshot.Namespace}
 	allocationID := OperationID("commit-allocations")
-	allocationChanged := !reflect.DeepEqual(snapshot.Allocations, desired.Allocations)
+	allocationChanged := snapshot.Allocations.SiteUID != desired.Allocations.SiteUID || !reflect.DeepEqual(snapshot.Allocations.Ports, desired.Allocations.Ports)
 	if allocationChanged && desired.SiteUID != "" {
 		allocations := copyAllocations(desired.Allocations)
 		plan.Operations = append(plan.Operations, Operation{ID: allocationID, Kind: "CommitAllocations", Run: func(ctx context.Context) error {
-			return p.Allocations.CommitAllocations(ctx, snapshot.Namespace, allocations)
+			return p.Allocations.CommitAllocations(ctx, snapshot.Namespace, desired.Site, allocations)
 		}})
 	}
 	targets := make([]routercontrol.TargetIdentity, 0, len(desired.Intents))
@@ -41,6 +43,11 @@ func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Pl
 		plan.Operations = append(plan.Operations, Operation{ID: OperationID("publish/" + target.RouterGroup), Kind: "PublishRouterIntent", Dependencies: dependencies, Run: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if p.Validator != nil {
+				if err := p.Validator(ctx, snapshot.Namespace, desired.Site); err != nil {
+					return err
+				}
 			}
 			_, err := p.Publisher.Publish(intent)
 			return err

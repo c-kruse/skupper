@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -90,6 +91,18 @@ func (q *Queue) process(ctx context.Context) bool {
 		return true
 	}
 	if err != nil || report.NeedsRetry() {
+		if err != nil {
+			slog.Error("Namespace reconciliation failed", "namespace", namespace, "error", err)
+		} else {
+			for i, result := range report.Results {
+				if i >= 10 {
+					break
+				}
+				if result.State != Succeeded {
+					slog.Warn("Namespace reconciliation operation will retry", "namespace", namespace, "operation", result.ID, "state", result.State, "error", result.Error)
+				}
+			}
+		}
 		if report.RetryAfter > 0 {
 			q.queue.Forget(item)
 			q.queue.AddAfter(namespace, report.RetryAfter)

@@ -62,6 +62,13 @@ func TestRouterControlWorkloadHasAuthenticatedBootstrapAndControllerOwner(t *tes
 	if len(deployment.Spec.Template.Spec.Volumes) != 4 {
 		t.Fatalf("expected traffic, proxy, projected token, and public CA volumes: %#v", deployment.Spec.Template.Spec.Volumes)
 	}
+	for _, container := range []corev1.Container{deployment.Spec.Template.Spec.Containers[1], deployment.Spec.Template.Spec.InitContainers[0]} {
+		for _, mount := range container.VolumeMounts {
+			if (mount.Name == "router-control-token" || mount.Name == "router-control-ca") && mount.SubPath != "" {
+				t.Fatalf("%s mount %s uses subPath and will not refresh: %#v", container.Name, mount.Name, mount)
+			}
+		}
+	}
 }
 
 func findEnv(values []corev1.EnvVar, name string) string {

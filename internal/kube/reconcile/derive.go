@@ -7,8 +7,10 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/routercontrol"
@@ -39,11 +41,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	}
 	desired.SiteUID = active.UID
 	desired.Site = active.DeepCopy()
-	desired.Allocations.SiteUID = active.UID
 	if snapshot.Allocations.SiteUID == active.UID {
-		for key, port := range snapshot.Allocations.Ports {
-			desired.Allocations.Ports[key] = port
-		}
+		desired.Allocations = copyAllocations(snapshot.Allocations)
+	} else {
+		desired.Allocations.SiteUID = active.UID
 	}
 
 	groups := []string{"skupper-router"}
@@ -51,6 +52,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		groups = append(groups, "skupper-router-2")
 	}
 	reserved := reservedPorts(snapshot.RouterAccesses)
+	listenerServices := map[string]*corev1.Service{}
 	listeners := make([]routercontrol.ServiceListener, 0, len(snapshot.Listeners)+len(snapshot.MultiKeyListeners))
 	for _, listener := range sortedListeners(snapshot.Listeners) {
 		if listener.Spec.ExposePodsByName {
@@ -76,6 +78,15 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			Observer:    listener.Spec.Observer,
 			TLS:         serverTLSIntent(listener.Spec.TlsCredentials, false),
 		})
+		if listener.Spec.Host != "" {
+			service := listenerServices[listener.Spec.Host]
+			if service == nil {
+				controller, block := true, true
+				service = &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: listener.Spec.Host, Namespace: snapshot.Namespace.Name, Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: corev1.ServiceSpec{Selector: map[string]string{"skupper.io/component": "router"}}}
+				listenerServices[listener.Spec.Host] = service
+			}
+			service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: listener.Name, Port: int32(listener.Spec.Port), TargetPort: intstr.FromInt(port), Protocol: corev1.Protocol(strings.ToUpper(string(listenerProtocol)))})
+		}
 	}
 	for _, listener := range sortedMultiKeyListeners(snapshot.MultiKeyListeners) {
 		if listener.Spec.Strategy.Weighted != nil {
@@ -108,13 +119,27 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	access := make([]routercontrol.RouterListener, 0)
 	for _, routerAccess := range sortedRouterAccess(snapshot.RouterAccesses) {
 		for _, role := range routerAccess.Spec.Roles {
-			access = append(access, routercontrol.RouterListener{ID: resourceID(routerAccess.UID, "access/"+role.Name), Role: role.Name, Port: uint16(role.GetPort()), Host: routerAccess.Spec.BindHost, TLS: serverTLSIntent(routerAccess.Spec.TlsCredentials, true)})
+			port := int(role.GetPort())
+			if port < 1 || port > 65535 {
+				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: routerAccess.UID, Reason: "InvalidPort", Message: fmt.Sprintf("RouterAccess role %q port %d is outside 1-65535", role.Name, port)})
+				continue
+			}
+			host := routerAccess.Spec.BindHost
+			if host == "" {
+				host = "0.0.0.0"
+			}
+			access = append(access, routercontrol.RouterListener{ID: resourceID(routerAccess.UID, "access/"+role.Name), Role: role.Name, Port: uint16(port), Host: host, TLS: serverTLSIntent(routerAccess.Spec.TlsCredentials, true)})
 		}
 	}
 	for _, group := range groups {
 		target := RouterTarget{NamespaceUID: string(snapshot.Namespace.UID), SiteUID: string(active.UID), RouterGroup: group}
 		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: settings, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: append([]routercontrol.RouterConnection(nil), connections...), RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, connections, access)}
 	}
+	for _, service := range listenerServices {
+		sort.Slice(service.Spec.Ports, func(i, j int) bool { return service.Spec.Ports[i].Name < service.Spec.Ports[j].Name })
+		desired.ListenerServices = append(desired.ListenerServices, service)
+	}
+	sort.Slice(desired.ListenerServices, func(i, j int) bool { return desired.ListenerServices[i].Name < desired.ListenerServices[j].Name })
 	return desired
 }
 
@@ -153,6 +178,9 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: connector.UID, Reason: "InvalidSelector", Message: err.Error()})
 			continue
 		}
+		if len(endpoints) == 0 {
+			continue
+		}
 		result = append(result, routercontrol.ServiceConnector{ID: resourceID(connector.UID, "connector"), RoutingKey: connector.Spec.RoutingKey, Protocol: connectorProtocol, Endpoints: endpoints, TLS: clientTLSIntent(connector.Spec.TlsCredentials, connector.Spec.UseClientCert, connector.Spec.VerifyHostname)})
 	}
 	for _, binding := range sortedBindings(snapshot.Bindings) {
@@ -172,6 +200,9 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 		endpoints, err := connectorEndpoints(definition.Namespace, "", definition.Spec.Selector, definition.Spec.Port, definition.Spec.IncludeNotReadyPods, snapshot.Pods)
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: definition.UID, Reason: "InvalidSelector", Message: err.Error()})
+			continue
+		}
+		if len(endpoints) == 0 {
 			continue
 		}
 		result = append(result, routercontrol.ServiceConnector{ID: resourceID(binding.UID, "attached-connector"), RoutingKey: binding.Spec.RoutingKey, Protocol: connectorProtocol, Endpoints: endpoints, TLS: clientTLSIntent(definition.Spec.TlsCredentials, definition.Spec.UseClientCert, false)})
@@ -314,24 +345,36 @@ func routingKeys(listener *skupperv2alpha1.MultiKeyListener) []string {
 }
 
 func credentialBindings(listeners []routercontrol.ServiceListener, connectors []routercontrol.ServiceConnector, connections []routercontrol.RouterConnection, access []routercontrol.RouterListener) []routercontrol.CredentialBinding {
-	type requirement struct{ reference, usage string }
+	type requirement struct {
+		reference string
+		usages    map[string]bool
+	}
 	ids := map[routercontrol.ResourceID]requirement{}
+	add := func(id routercontrol.ResourceID, prefix, usage string) {
+		if id == "" {
+			return
+		}
+		requirement := ids[id]
+		requirement.reference = strings.TrimPrefix(string(id), prefix)
+		if requirement.usages == nil {
+			requirement.usages = map[string]bool{}
+		}
+		requirement.usages[usage] = true
+		ids[id] = requirement
+	}
 	for _, listener := range listeners {
-		ids[listener.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(listener.TLS.CredentialBinding), "credential/"), usage: "tls"}
+		add(listener.TLS.CredentialBinding, "credential/", "server-auth")
 	}
 	for _, connector := range connectors {
-		ids[connector.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(connector.TLS.CredentialBinding), "credential/"), usage: "tls"}
+		add(connector.TLS.CredentialBinding, "credential/", "client-auth")
 	}
 	for _, connection := range connections {
-		ids[connection.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(connection.TLS.CredentialBinding), "credential/"), usage: "tls"}
-		if connection.ProxyCredentialBinding != "" {
-			ids[connection.ProxyCredentialBinding] = requirement{reference: strings.TrimPrefix(string(connection.ProxyCredentialBinding), "proxy/"), usage: "proxy"}
-		}
+		add(connection.TLS.CredentialBinding, "credential/", "client-auth")
+		add(connection.ProxyCredentialBinding, "proxy/", "proxy")
 	}
 	for _, listener := range access {
-		ids[listener.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(listener.TLS.CredentialBinding), "credential/"), usage: "tls"}
+		add(listener.TLS.CredentialBinding, "credential/", "server-auth")
 	}
-	delete(ids, "")
 	ordered := make([]string, 0, len(ids))
 	for id := range ids {
 		ordered = append(ordered, string(id))
@@ -340,7 +383,12 @@ func credentialBindings(listeners []routercontrol.ServiceListener, connectors []
 	result := make([]routercontrol.CredentialBinding, 0, len(ordered))
 	for _, value := range ordered {
 		requirement := ids[routercontrol.ResourceID(value)]
-		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: "kubernetes", Reference: requirement.reference, Usages: []string{requirement.usage}})
+		usages := make([]string, 0, len(requirement.usages))
+		for usage := range requirement.usages {
+			usages = append(usages, usage)
+		}
+		sort.Strings(usages)
+		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: "kubernetes-secret", Reference: requirement.reference, Usages: usages})
 	}
 	return result
 }
