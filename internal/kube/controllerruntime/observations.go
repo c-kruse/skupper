@@ -94,6 +94,7 @@ func (c *observationCache) Accepted(key protocol.SessionKey, accepted protocol.A
 	}
 	session.accepted = accepted
 	session.application = nil
+	session.invalidateScopes()
 	namespace := c.namespaces[key.Target.NamespaceUID]
 	c.mu.Unlock()
 	c.changed(namespace)
@@ -113,11 +114,23 @@ func (c *observationCache) Application(ctx context.Context, key protocol.Session
 		c.mu.Unlock()
 		return nil // An older, once-accepted application cannot satisfy newer intent.
 	}
+	if session.application == nil || session.application.RealizationID != report.RealizationID || session.application.State != report.State {
+		session.invalidateScopes()
+	}
 	session.application = copyApplication(&report)
 	namespace := c.namespaces[key.Target.NamespaceUID]
 	c.mu.Unlock()
 	c.changed(namespace)
 	return nil
+}
+
+// An old refresh cannot certify facts for newly accepted intent or a new
+// credential realization, even when the transport session has not changed.
+func (s *cachedSession) invalidateScopes() {
+	for _, scope := range s.scopes {
+		sequence := scope.sequence
+		*scope = cachedScope{sequence: sequence}
+	}
 }
 
 func (c *observationCache) Observation(ctx context.Context, key protocol.SessionKey, observation protocol.ObservationSnapshot) error {

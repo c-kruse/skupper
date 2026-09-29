@@ -183,3 +183,70 @@ func TestAcceptedAppliedAndSnapshotsAreIndependent(t *testing.T) {
 		t.Fatal("snapshot exposed the cache's mutable slices")
 	}
 }
+
+func TestRealizationChangesFencePreviouslyRequestedObservations(t *testing.T) {
+	for _, change := range []string{"accept", "credential rotation", "application recovery"} {
+		t.Run(change, func(t *testing.T) {
+			c, key := testObservationCache()
+			now := time.Unix(3000, 0)
+			c.now = func() time.Time { return now }
+			c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "intent", Sequence: 1})
+			report := protocol.ApplicationReport{SessionID: "session-1", RouterIncarnation: "router-1", IntentDigest: "intent", Sequence: 1, RealizationID: "revision-1", State: protocol.ApplicationApplied}
+			if change == "application recovery" {
+				report.State = protocol.ApplicationPending
+			}
+			if err := c.Application(context.Background(), key, report); err != nil {
+				t.Fatal(err)
+			}
+			requests := map[string]string{}
+			sender := refreshFunc(func(_ protocol.SessionKey, _, request, scope string) error {
+				requests[scope] = request
+				return nil
+			})
+			c.refresh(sender)
+			observation := protocol.ObservationSnapshot{SessionID: "session-1", RouterIncarnation: "router-1", Scope: protocol.ObservationScopeAddresses, SampleSequence: 5, Knowledge: protocol.KnowledgeComplete, RefreshRequestID: requests[protocol.ObservationScopeAddresses]}
+			if err := c.Observation(context.Background(), key, observation); err != nil {
+				t.Fatal(err)
+			}
+			if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeAddresses].Fresh {
+				t.Fatal("setup did not create fresh evidence")
+			}
+			now = now.Add(observationRefreshEvery)
+			c.refresh(sender)
+			oldRequest := requests[protocol.ObservationScopeAddresses]
+			switch change {
+			case "accept":
+				c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "next-intent", Sequence: 2})
+			case "credential rotation":
+				report.RealizationID = "revision-2"
+				if err := c.Application(context.Background(), key, report); err != nil {
+					t.Fatal(err)
+				}
+			case "application recovery":
+				report.State = protocol.ApplicationApplied
+				if err := c.Application(context.Background(), key, report); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observation.RefreshRequestID = oldRequest
+			observation.SampleSequence++
+			if err := c.Observation(context.Background(), key, observation); err != nil {
+				t.Fatal(err)
+			}
+			if c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeAddresses].Fresh {
+				t.Fatal("old refresh certified the new realization")
+			}
+			c.refresh(sender)
+			if requests[protocol.ObservationScopeAddresses] == oldRequest {
+				t.Fatal("new realization did not request a fresh observation")
+			}
+			observation.RefreshRequestID = requests[protocol.ObservationScopeAddresses]
+			if err := c.Observation(context.Background(), key, observation); err != nil {
+				t.Fatal(err)
+			}
+			if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeAddresses].Fresh {
+				t.Fatal("fresh response for the new realization was rejected")
+			}
+		})
+	}
+}
