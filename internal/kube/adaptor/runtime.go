@@ -7,8 +7,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -22,9 +24,10 @@ import (
 )
 
 const (
-	controlHandshakeTimeout = 20 * time.Second
-	controlSendTimeout      = 15 * time.Second
-	initialIntentTimeout    = 30 * time.Second
+	controlHandshakeTimeout         = 20 * time.Second
+	controlSendTimeout              = 15 * time.Second
+	controlReceiveInactivityTimeout = 30 * time.Second
+	initialIntentTimeout            = 30 * time.Second
 )
 
 type ControlConfig struct {
@@ -157,16 +160,10 @@ func startControlReceiver(ctx context.Context, session controlEventReceiver) (<-
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for {
-			event, err := session.NextEvent()
-			select {
-			case events <- receivedControlEvent{event: event, err: err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
+		event, err := session.NextEvent()
+		select {
+		case events <- receivedControlEvent{event: event, err: err}:
+		case <-ctx.Done():
 		}
 	}()
 	return events, done
@@ -225,6 +222,37 @@ func renewalJitter() float64 {
 	return float64(value[0])/127.5 - 1
 }
 
+func reconnectBackoffDelay(base time.Duration, jitter float64) time.Duration {
+	if jitter < -1 {
+		jitter = -1
+	} else if jitter > 1 {
+		jitter = 1
+	}
+	return base + time.Duration(float64(base)*0.2*jitter)
+}
+
+func resetInactivityTimer(timer *time.Timer, timeout time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(timeout)
+}
+
+func boundedErrorReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	reason := strings.NewReplacer("\r", " ", "\n", " ").Replace(err.Error())
+	const limit = 512
+	if len(reason) > limit {
+		reason = reason[:limit] + "..."
+	}
+	return reason
+}
+
 func validateSupportedIntent(intent routercontrol.RouterIntent) error {
 	for _, listener := range intent.ServiceListeners {
 		if listener.Protocol != routercontrol.ProtocolTCP {
@@ -251,7 +279,9 @@ func RunConfigInit(ctx context.Context, config ControlConfig, secrets corev1clie
 	events, receiverDone := startControlReceiver(control.ctx, control.session)
 	defer func() {
 		control.cancel()
-		<-receiverDone
+		if receiverDone != nil {
+			<-receiverDone
+		}
 		_ = control.connection.Close()
 	}()
 	timer := time.NewTimer(initialIntentTimeout)
@@ -265,17 +295,21 @@ func RunConfigInit(ctx context.Context, config ControlConfig, secrets corev1clie
 			return fmt.Errorf("initial router intent not received within %s", initialIntentTimeout)
 		case item = <-events:
 		}
+		<-receiverDone
+		receiverDone = nil
 		if item.err != nil {
 			return item.err
 		}
 		event := item.event
 		if event.Refresh != nil || event.Intent == nil || event.Intent.Unavailable {
+			events, receiverDone = startControlReceiver(control.ctx, control.session)
 			continue
 		}
 		if err := validateSupportedIntent(event.Intent.Intent); err != nil {
 			if rejectErr := boundedSessionCall(control.ctx, control.cancel, func() error { return control.session.Reject(*event.Intent, err.Error()) }); rejectErr != nil {
 				return rejectErr
 			}
+			events, receiverDone = startControlReceiver(control.ctx, control.session)
 			continue
 		}
 		if err := boundedSessionCall(control.ctx, control.cancel, func() error { return control.session.Accept(*event.Intent) }); err != nil {
@@ -314,7 +348,9 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 		_, _ = runtime.router.Read()
 		control, err := runtime.connectBounded(ctx)
 		if err != nil {
-			if !sleepContext(ctx, backoff) {
+			delay := reconnectBackoffDelay(backoff, renewalJitter())
+			slog.Warn("router-control reconnect", slog.String("phase", "connect"), slog.String("reason", boundedErrorReason(err)), slog.Duration("retryAfter", delay))
+			if !sleepContext(ctx, delay) {
 				return ctx.Err()
 			}
 			if backoff < 30*time.Second {
@@ -328,7 +364,9 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if !sleepContext(ctx, backoff) {
+		delay := reconnectBackoffDelay(backoff, renewalJitter())
+		slog.Warn("router-control reconnect", slog.String("phase", "session"), slog.String("reason", boundedErrorReason(err)), slog.Duration("retryAfter", delay))
+		if !sleepContext(ctx, delay) {
 			return ctx.Err()
 		}
 	}
@@ -339,7 +377,9 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 	events, receiverDone := startControlReceiver(ctx, session)
 	defer func() {
 		cancel()
-		<-receiverDone
+		if receiverDone != nil {
+			<-receiverDone
+		}
 	}()
 	renew := time.NewTimer(certificateRenewalDelay(time.Now(), expiry, renewalJitter()))
 	defer renew.Stop()
@@ -347,6 +387,8 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 	defer heartbeat.Stop()
 	reconcile := time.NewTicker(10 * time.Second)
 	defer reconcile.Stop()
+	receiveInactivity := time.NewTimer(controlReceiveInactivityTimeout)
+	defer receiveInactivity.Stop()
 	engine := Engine{Router: r.router, Credentials: r.credentials, RouterIncarnation: sessionIncarnation, StartupConfig: r.startup}
 	var accepted *routercontrol.IntentUpdate
 	var compiled CompiledIntent
@@ -358,6 +400,8 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 			return ctx.Err()
 		case <-renew.C:
 			return errors.New("router-control credential renewal due")
+		case <-receiveInactivity.C:
+			return fmt.Errorf("router-control receive inactive for %s", controlReceiveInactivityTimeout)
 		case <-heartbeat.C:
 			if err := boundedSessionCall(ctx, cancel, session.SendHeartbeat); err != nil {
 				return err
@@ -377,6 +421,9 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 				}
 			}
 		case item := <-events:
+			<-receiverDone
+			receiverDone = nil
+			resetInactivityTimer(receiveInactivity, controlReceiveInactivityTimeout)
 			if item.err != nil {
 				return item.err
 			}
@@ -410,6 +457,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 					if rejectErr := boundedSessionCall(ctx, cancel, func() error { return session.Reject(*item.event.Intent, err.Error()) }); rejectErr != nil {
 						return rejectErr
 					}
+					events, receiverDone = startControlReceiver(ctx, session)
 					continue
 				}
 				if err := boundedSessionCall(ctx, cancel, func() error { return session.Accept(*item.event.Intent) }); err != nil {
@@ -430,6 +478,7 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 					return err
 				}
 			}
+			events, receiverDone = startControlReceiver(ctx, session)
 		}
 	}
 }

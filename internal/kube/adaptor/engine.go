@@ -45,7 +45,6 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 	compiled, err := CompileIntent(intent, credentials)
 	if err != nil {
 		report.State = routercontrol.ApplicationFailed
-		report.Resources = []routercontrol.ResourceApplication{{State: routercontrol.ApplicationFailed, Reason: err.Error()}}
 		return report, CompiledIntent{}
 	}
 	result := Reconcile(e.Router, compiled)
@@ -102,9 +101,6 @@ func (e *Engine) RealizeDetailed(ctx context.Context, sessionID string, sequence
 	sort.Strings(ids)
 	for _, id := range ids {
 		report.Resources = append(report.Resources, routercontrol.ResourceApplication{ResourceID: routercontrol.ResourceID(id), RealizationID: compiled.RealizationID, State: state, Reason: reason})
-	}
-	if len(report.Resources) == 0 && reason != "" {
-		report.Resources = append(report.Resources, routercontrol.ResourceApplication{State: state, Reason: fmt.Sprintf("router realization: %s", reason)})
 	}
 	return report, compiled
 }
