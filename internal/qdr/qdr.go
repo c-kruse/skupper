@@ -685,6 +685,8 @@ type TcpEndpoint struct {
 	ProcessID            string `json:"processId,omitempty"`
 	MultiAddressStrategy string `json:"multiAddressStrategy,omitempty"`
 	AuthenticatePeer     bool   `json:"authenticatePeer,omitempty"`
+	OperStatus           string `json:"operStatus,omitempty"`
+	ConnectionMsg        string `json:"connectionMsg,omitempty"`
 }
 
 type ListenerAddress struct {

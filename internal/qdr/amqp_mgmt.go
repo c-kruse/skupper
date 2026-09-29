@@ -24,6 +24,45 @@ type RouterNode struct {
 	Address string `json:"address"`
 }
 
+type LocalAddress struct {
+	Key             string
+	Class           byte
+	Phase           int
+	RoutingKey      string
+	SubscriberCount int
+	InProcess       int
+	RemoteCount     int
+}
+
+func DecodeLocalAddress(record Record) (LocalAddress, error) {
+	key, err := record.String("key")
+	if err != nil {
+		return LocalAddress{}, err
+	}
+	if len(key) < 2 || (key[0] != 'M' && key[0] != 'H') {
+		return LocalAddress{}, fmt.Errorf("router address key %q is not a mobile address", key)
+	}
+	phase := 0
+	start := 1
+	if len(key) > 2 && key[1] >= '0' && key[1] <= '9' {
+		phase = int(key[1] - '0')
+		start = 2
+	}
+	subscriberCount, err := record.Int("subscriberCount")
+	if err != nil {
+		return LocalAddress{}, err
+	}
+	inProcess, err := record.Int("inProcess")
+	if err != nil {
+		return LocalAddress{}, err
+	}
+	remoteCount, err := record.Int("remoteCount")
+	if err != nil {
+		return LocalAddress{}, err
+	}
+	return LocalAddress{Key: key, Class: key[0], Phase: phase, RoutingKey: key[start:], SubscriberCount: subscriberCount, InProcess: inProcess, RemoteCount: remoteCount}, nil
+}
+
 func (r *RouterNode) IsSelf() bool {
 	return r.NextHop == "(self)"
 }
@@ -116,6 +155,30 @@ func (r Record) AsUint64(field string) uint64 {
 	return value
 }
 
+func (r Record) String(field string) (string, error) {
+	value, ok := r[field]
+	if !ok {
+		return "", fmt.Errorf("management response is missing %q", field)
+	}
+	result, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("management attribute %q has type %T, want string", field, value)
+	}
+	return result, nil
+}
+
+func (r Record) Int(field string) (int, error) {
+	value, ok := r[field]
+	if !ok {
+		return 0, fmt.Errorf("management response is missing %q", field)
+	}
+	result, ok := AsInt(value)
+	if !ok {
+		return 0, fmt.Errorf("management attribute %q has type %T, want integer", field, value)
+	}
+	return result, nil
+}
+
 func (r Record) AsRecord(field string) Record {
 	if value, ok := r[field].(map[string]interface{}); ok {
 		return value
@@ -136,6 +199,8 @@ func asTcpEndpoint(record Record) TcpEndpoint {
 		ProcessID:            record.AsString("processId"),
 		MultiAddressStrategy: record.AsString("multiAddressStrategy"),
 		AuthenticatePeer:     record.AsBool("authenticatePeer"),
+		OperStatus:           record.AsString("operStatus"),
+		ConnectionMsg:        record.AsString("connectionMsg"),
 	}
 	if value, ok := record["verifyHostname"]; ok {
 		if verify, ok := value.(bool); ok {
@@ -388,7 +453,7 @@ func (a *Agent) request(operation string, typename string, name string, attribut
 		return fmt.Errorf("Failed to receive response: %s", err)
 	}
 	response.Accept()
-	if status, ok := AsInt(response.ApplicationProperties["statusCode"]); !ok && !isOk(status) {
+	if status, ok := AsInt(response.ApplicationProperties["statusCode"]); !ok || !isOk(status) {
 		return fmt.Errorf("Query failed with: %s", response.ApplicationProperties["statusDescription"])
 	}
 	return nil
@@ -964,6 +1029,27 @@ func (a *Agent) GetLocalListenerAddresses() (map[string]ListenerAddress, error) 
 	for _, record := range results {
 		la := asListenerAddress(record)
 		addresses[la.Name] = la
+	}
+	return addresses, nil
+}
+
+// GetLocalAddresses queries only the local router and returns exact mobile
+// address keys. Callers decide which address class and phase are applicable;
+// counts from different records are deliberately not combined.
+func (a *Agent) GetLocalAddresses(routingKeys map[string]struct{}) ([]LocalAddress, error) {
+	results, err := a.Query("io.skupper.router.router.address", []string{"key", "subscriberCount", "inProcess", "remoteCount"})
+	if err != nil {
+		return nil, err
+	}
+	addresses := make([]LocalAddress, 0, len(results))
+	for _, record := range results {
+		address, err := DecodeLocalAddress(record)
+		if err != nil {
+			return nil, err
+		}
+		if _, wanted := routingKeys[address.RoutingKey]; wanted {
+			addresses = append(addresses, address)
+		}
 	}
 	return addresses, nil
 }
