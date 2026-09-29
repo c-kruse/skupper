@@ -3,6 +3,7 @@ package routercontrol
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -246,7 +247,7 @@ func (s *ClientSession) SendApplication(report ApplicationReport) error {
 	if err := validateApplicationReport(report); err != nil {
 		return err
 	}
-	return s.send(&ClientMessage{ApplicationReport: &report})
+	return s.sendReport(&ClientMessage{ApplicationReport: &report})
 }
 
 func (s *ClientSession) SendObservation(observation ObservationSnapshot) error {
@@ -254,7 +255,7 @@ func (s *ClientSession) SendObservation(observation ObservationSnapshot) error {
 	if err := ValidateObservation(observation); err != nil {
 		return err
 	}
-	return s.send(&ClientMessage{Observation: &observation})
+	return s.sendReport(&ClientMessage{Observation: &observation})
 }
 
 func (s *ClientSession) SendHeartbeat() error {
@@ -271,6 +272,17 @@ func (s *ClientSession) send(message *ClientMessage) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	return s.stream.Send(message)
+}
+
+func (s *ClientSession) sendReport(message *ClientMessage) error {
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > s.limits.MaxReportBytes {
+		return fmt.Errorf("client report is %d bytes, limit is %d", len(encoded), s.limits.MaxReportBytes)
+	}
+	return s.send(message)
 }
 
 func validateServerUnion(message *ServerMessage) error {

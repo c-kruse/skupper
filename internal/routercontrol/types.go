@@ -378,6 +378,8 @@ type ServerMessage struct {
 // ObservationSink receives already session-bound reports. Implementations
 // should copy retained values and must not block the stream indefinitely.
 type ObservationSink interface {
+	Connected(key SessionKey, sessionID string, hello Hello)
+	Accepted(key SessionKey, accepted Accepted)
 	Application(ctx context.Context, key SessionKey, report ApplicationReport) error
 	Observation(ctx context.Context, key SessionKey, observation ObservationSnapshot) error
 	Disconnected(key SessionKey, sessionID string)

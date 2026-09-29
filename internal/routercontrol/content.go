@@ -96,6 +96,11 @@ func NormalizeIntent(intent RouterIntent) (RouterIntent, error) {
 	copy.Settings.Logging = nonNil(copy.Settings.Logging)
 
 	sort.Strings(copy.Settings.OwnedAddressKeys)
+	for i := range copy.Settings.Logging {
+		if copy.Settings.Logging[i].Module == "DEFAULT" {
+			copy.Settings.Logging[i].Module = ""
+		}
+	}
 	sort.Slice(copy.Settings.Logging, func(i, j int) bool {
 		return copy.Settings.Logging[i].Module < copy.Settings.Logging[j].Module
 	})
