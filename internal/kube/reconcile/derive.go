@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -25,12 +27,18 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		Namespace:   snapshot.Namespace,
 		Intents:     map[RouterTarget]routercontrol.RouterIntent{},
 		Allocations: AllocationState{Ports: map[string]int{}},
+		Bootstrap:   copyBootstrap(snapshot.Bootstrap),
 	}
 	active := activeSite(snapshot, &desired)
 	if active == nil || !snapshot.Assignment.Controlled {
 		return desired
 	}
+	settings, validSettings := routerSettings(active, &desired)
+	if !validSettings {
+		return desired
+	}
 	desired.SiteUID = active.UID
+	desired.Site = active.DeepCopy()
 	desired.Allocations.SiteUID = active.UID
 	if snapshot.Allocations.SiteUID == active.UID {
 		for key, port := range snapshot.Allocations.Ports {
@@ -42,13 +50,19 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	if active.Spec.HA {
 		groups = append(groups, "skupper-router-2")
 	}
+	reserved := reservedPorts(snapshot.RouterAccesses)
 	listeners := make([]routercontrol.ServiceListener, 0, len(snapshot.Listeners)+len(snapshot.MultiKeyListeners))
 	for _, listener := range sortedListeners(snapshot.Listeners) {
 		if listener.Spec.ExposePodsByName {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "Unsupported", Message: "exposePodsByName is not supported by namespace reconciliation"})
 			continue
 		}
-		port, err := allocatePort(desired.Allocations.Ports, string(listener.UID)+"/listener")
+		listenerProtocol, err := protocol(listener.Spec.Type)
+		if err != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "UnsupportedProtocol", Message: err.Error()})
+			continue
+		}
+		port, err := allocatePort(desired.Allocations.Ports, reserved, string(listener.UID)+"/listener")
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "PortExhausted", Message: err.Error()})
 			continue
@@ -56,20 +70,24 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		listeners = append(listeners, routercontrol.ServiceListener{
 			ID:          resourceID(listener.UID, "listener"),
 			RoutingKeys: []string{listener.Spec.RoutingKey},
-			Host:        listener.Spec.Host,
+			Host:        "0.0.0.0",
 			Port:        uint16(port),
-			Protocol:    protocol(listener.Spec.Type),
+			Protocol:    listenerProtocol,
 			Observer:    listener.Spec.Observer,
-			TLS:         tlsIntent(listener.Spec.TlsCredentials, false, false),
+			TLS:         serverTLSIntent(listener.Spec.TlsCredentials, false),
 		})
 	}
 	for _, listener := range sortedMultiKeyListeners(snapshot.MultiKeyListeners) {
-		port, err := allocatePort(desired.Allocations.Ports, string(listener.UID)+"/listener")
+		if listener.Spec.Strategy.Weighted != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "UnsupportedStrategy", Message: "weighted MultiKeyListener requires weighted routing intent support"})
+			continue
+		}
+		port, err := allocatePort(desired.Allocations.Ports, reserved, string(listener.UID)+"/listener")
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "PortExhausted", Message: err.Error()})
 			continue
 		}
-		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: routingKeys(listener), Host: listener.Spec.Host, Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: tlsIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert, false)})
+		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: routingKeys(listener), Host: "0.0.0.0", Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: serverTLSIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert)})
 	}
 	connectors := deriveConnectors(snapshot, &desired)
 	connections := make([]routercontrol.RouterConnection, 0, len(snapshot.Links))
@@ -80,18 +98,22 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: link.UID, Reason: "InvalidPort", Message: err.Error()})
 				continue
 			}
-			connections = append(connections, routercontrol.RouterConnection{ID: resourceID(link.UID, "link/"+endpoint.Name), Host: endpoint.Host, Port: uint16(port), Role: endpoint.Name, Cost: uint32(max(link.Spec.Cost, 0)), TLS: tlsIntent(link.Spec.TlsCredentials, true, false)})
+			connection := routercontrol.RouterConnection{ID: resourceID(link.UID, "link/"+endpoint.Name), Host: endpoint.Host, Port: uint16(port), Role: endpoint.Name, Cost: uint32(max(link.Spec.Cost, 0)), TLS: clientTLSIntent(link.Spec.TlsCredentials, true, false)}
+			if proxy := link.Spec.GetProxyConfiguration(); proxy != "" {
+				connection.ProxyCredentialBinding = routercontrol.ResourceID("proxy/" + proxy)
+			}
+			connections = append(connections, connection)
 		}
 	}
 	access := make([]routercontrol.RouterListener, 0)
 	for _, routerAccess := range sortedRouterAccess(snapshot.RouterAccesses) {
 		for _, role := range routerAccess.Spec.Roles {
-			access = append(access, routercontrol.RouterListener{ID: resourceID(routerAccess.UID, "access/"+role.Name), Role: role.Name, Port: uint16(role.GetPort()), Host: routerAccess.Spec.BindHost, TLS: tlsIntent(routerAccess.Spec.TlsCredentials, true, false)})
+			access = append(access, routercontrol.RouterListener{ID: resourceID(routerAccess.UID, "access/"+role.Name), Role: role.Name, Port: uint16(role.GetPort()), Host: routerAccess.Spec.BindHost, TLS: serverTLSIntent(routerAccess.Spec.TlsCredentials, true)})
 		}
 	}
 	for _, group := range groups {
 		target := RouterTarget{NamespaceUID: string(snapshot.Namespace.UID), SiteUID: string(active.UID), RouterGroup: group}
-		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: routercontrol.RouterSettings{Mode: map[bool]routercontrol.RoutingMode{true: routercontrol.RoutingModeEdge, false: routercontrol.RoutingModeInterior}[active.Spec.Edge]}, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: append([]routercontrol.RouterConnection(nil), connections...), RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, connections, access)}
+		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: settings, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: append([]routercontrol.RouterConnection(nil), connections...), RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, connections, access)}
 	}
 	return desired
 }
@@ -121,12 +143,17 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: connector.UID, Reason: "Unsupported", Message: "exposePodsByName is not supported by namespace reconciliation"})
 			continue
 		}
-		endpoints, err := connectorEndpoints(connector.Spec.Host, connector.Spec.Selector, connector.Spec.Port, connector.Spec.IncludeNotReadyPods, snapshot.Pods)
+		connectorProtocol, protocolErr := protocol(connector.Spec.Type)
+		if protocolErr != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: connector.UID, Reason: "UnsupportedProtocol", Message: protocolErr.Error()})
+			continue
+		}
+		endpoints, err := connectorEndpoints(connector.Namespace, connector.Spec.Host, connector.Spec.Selector, connector.Spec.Port, connector.Spec.IncludeNotReadyPods, snapshot.Pods)
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: connector.UID, Reason: "InvalidSelector", Message: err.Error()})
 			continue
 		}
-		result = append(result, routercontrol.ServiceConnector{ID: resourceID(connector.UID, "connector"), RoutingKey: connector.Spec.RoutingKey, Protocol: protocol(connector.Spec.Type), Endpoints: endpoints, TLS: tlsIntent(connector.Spec.TlsCredentials, connector.Spec.UseClientCert, connector.Spec.VerifyHostname)})
+		result = append(result, routercontrol.ServiceConnector{ID: resourceID(connector.UID, "connector"), RoutingKey: connector.Spec.RoutingKey, Protocol: connectorProtocol, Endpoints: endpoints, TLS: clientTLSIntent(connector.Spec.TlsCredentials, connector.Spec.UseClientCert, connector.Spec.VerifyHostname)})
 	}
 	for _, binding := range sortedBindings(snapshot.Bindings) {
 		if binding.Spec.ExposePodsByName {
@@ -137,17 +164,25 @@ func deriveConnectors(snapshot Snapshot, desired *DesiredNamespace) []routercont
 		if definition == nil {
 			continue
 		}
-		endpoints, err := connectorEndpoints("", definition.Spec.Selector, definition.Spec.Port, definition.Spec.IncludeNotReadyPods, snapshot.Pods)
+		connectorProtocol, protocolErr := protocol(definition.Spec.Type)
+		if protocolErr != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: definition.UID, Reason: "UnsupportedProtocol", Message: protocolErr.Error()})
+			continue
+		}
+		endpoints, err := connectorEndpoints(definition.Namespace, "", definition.Spec.Selector, definition.Spec.Port, definition.Spec.IncludeNotReadyPods, snapshot.Pods)
 		if err != nil {
 			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: definition.UID, Reason: "InvalidSelector", Message: err.Error()})
 			continue
 		}
-		result = append(result, routercontrol.ServiceConnector{ID: resourceID(binding.UID, "attached-connector"), RoutingKey: binding.Spec.RoutingKey, Protocol: protocol(definition.Spec.Type), Endpoints: endpoints, TLS: tlsIntent(definition.Spec.TlsCredentials, definition.Spec.UseClientCert, false)})
+		result = append(result, routercontrol.ServiceConnector{ID: resourceID(binding.UID, "attached-connector"), RoutingKey: binding.Spec.RoutingKey, Protocol: connectorProtocol, Endpoints: endpoints, TLS: clientTLSIntent(definition.Spec.TlsCredentials, definition.Spec.UseClientCert, false)})
 	}
 	return result
 }
 
-func connectorEndpoints(host, selector string, port int, includeNotReady bool, pods []*corev1.Pod) ([]routercontrol.Endpoint, error) {
+func connectorEndpoints(namespace, host, selector string, port int, includeNotReady bool, pods []*corev1.Pod) ([]routercontrol.Endpoint, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("port %d is outside 1-65535", port)
+	}
 	if selector == "" {
 		if host == "" {
 			return nil, nil
@@ -160,7 +195,7 @@ func connectorEndpoints(host, selector string, port int, includeNotReady bool, p
 	}
 	var result []routercontrol.Endpoint
 	for _, pod := range pods {
-		if !parsed.Matches(labels.Set(pod.Labels)) || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || (!includeNotReady && !podReady(pod)) {
+		if pod.Namespace != namespace || !parsed.Matches(labels.Set(pod.Labels)) || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || (!includeNotReady && !podReady(pod)) {
 			continue
 		}
 		result = append(result, routercontrol.Endpoint{ID: string(pod.UID), Host: pod.Status.PodIP, Port: uint16(port)})
@@ -191,18 +226,18 @@ func resourceID(uid types.UID, role string) routercontrol.ResourceID {
 	return routercontrol.ResourceID(string(uid) + "/" + role)
 }
 
-func protocol(value string) routercontrol.Protocol {
+func protocol(value string) (routercontrol.Protocol, error) {
 	switch value {
-	case "http":
-		return routercontrol.ProtocolHTTP
-	case "http2":
-		return routercontrol.ProtocolHTTP2
+	case "", "tcp":
+		return routercontrol.ProtocolTCP, nil
+	case "udp":
+		return routercontrol.ProtocolUDP, nil
 	default:
-		return routercontrol.ProtocolTCP
+		return "", fmt.Errorf("protocol %q is not supported", value)
 	}
 }
 
-func tlsIntent(reference string, mutual, verifyHostname bool) routercontrol.TLSIntent {
+func clientTLSIntent(reference string, mutual, verifyHostname bool) routercontrol.TLSIntent {
 	if reference == "" {
 		return routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}
 	}
@@ -213,19 +248,33 @@ func tlsIntent(reference string, mutual, verifyHostname bool) routercontrol.TLSI
 	return routercontrol.TLSIntent{Mode: mode, CredentialBinding: credentialID(reference), VerifyHostname: verifyHostname}
 }
 
+func serverTLSIntent(reference string, requireClientCert bool) routercontrol.TLSIntent {
+	if reference == "" {
+		return routercontrol.TLSIntent{Mode: routercontrol.TLSModeDisabled}
+	}
+	mode := routercontrol.TLSModeServer
+	if requireClientCert {
+		mode = routercontrol.TLSModeMutual
+	}
+	return routercontrol.TLSIntent{Mode: mode, CredentialBinding: credentialID(reference)}
+}
+
 func credentialID(reference string) routercontrol.ResourceID {
 	return routercontrol.ResourceID("credential/" + reference)
 }
 
-func allocatePort(allocated map[string]int, key string) (int, error) {
+func allocatePort(allocated map[string]int, reserved map[int]bool, key string) (int, error) {
 	if port, ok := allocated[key]; ok {
 		if port < firstDynamicPort || port > lastDynamicPort {
 			return 0, fmt.Errorf("persisted port %d for %s is outside the valid range", port, key)
 		}
 		return port, nil
 	}
-	inUse := make(map[int]bool, len(allocated)+4)
+	inUse := make(map[int]bool, len(allocated)+len(reserved)+4)
 	for _, port := range allocated {
+		inUse[port] = true
+	}
+	for port := range reserved {
 		inUse[port] = true
 	}
 	for _, port := range []int{45671, 55671, 5671, 5672, 9090} {
@@ -238,6 +287,16 @@ func allocatePort(allocated map[string]int, key string) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no ports available for %s", key)
+}
+
+func reservedPorts(accesses []*skupperv2alpha1.RouterAccess) map[int]bool {
+	result := map[int]bool{45671: true, 55671: true, 5671: true, 5672: true, 9090: true}
+	for _, access := range accesses {
+		for _, role := range access.Spec.Roles {
+			result[int(role.GetPort())] = true
+		}
+	}
+	return result
 }
 
 func routingKeys(listener *skupperv2alpha1.MultiKeyListener) []string {
@@ -255,18 +314,22 @@ func routingKeys(listener *skupperv2alpha1.MultiKeyListener) []string {
 }
 
 func credentialBindings(listeners []routercontrol.ServiceListener, connectors []routercontrol.ServiceConnector, connections []routercontrol.RouterConnection, access []routercontrol.RouterListener) []routercontrol.CredentialBinding {
-	ids := map[routercontrol.ResourceID]bool{}
+	type requirement struct{ reference, usage string }
+	ids := map[routercontrol.ResourceID]requirement{}
 	for _, listener := range listeners {
-		ids[listener.TLS.CredentialBinding] = true
+		ids[listener.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(listener.TLS.CredentialBinding), "credential/"), usage: "tls"}
 	}
 	for _, connector := range connectors {
-		ids[connector.TLS.CredentialBinding] = true
+		ids[connector.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(connector.TLS.CredentialBinding), "credential/"), usage: "tls"}
 	}
 	for _, connection := range connections {
-		ids[connection.TLS.CredentialBinding] = true
+		ids[connection.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(connection.TLS.CredentialBinding), "credential/"), usage: "tls"}
+		if connection.ProxyCredentialBinding != "" {
+			ids[connection.ProxyCredentialBinding] = requirement{reference: strings.TrimPrefix(string(connection.ProxyCredentialBinding), "proxy/"), usage: "proxy"}
+		}
 	}
 	for _, listener := range access {
-		ids[listener.TLS.CredentialBinding] = true
+		ids[listener.TLS.CredentialBinding] = requirement{reference: strings.TrimPrefix(string(listener.TLS.CredentialBinding), "credential/"), usage: "tls"}
 	}
 	delete(ids, "")
 	ordered := make([]string, 0, len(ids))
@@ -276,9 +339,33 @@ func credentialBindings(listeners []routercontrol.ServiceListener, connectors []
 	sort.Strings(ordered)
 	result := make([]routercontrol.CredentialBinding, 0, len(ordered))
 	for _, value := range ordered {
-		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: "kubernetes", Reference: value[len("credential/"):], Usages: []string{"tls"}})
+		requirement := ids[routercontrol.ResourceID(value)]
+		result = append(result, routercontrol.CredentialBinding{ID: routercontrol.ResourceID(value), Provider: "kubernetes", Reference: requirement.reference, Usages: []string{requirement.usage}})
 	}
 	return result
+}
+
+func routerSettings(site *skupperv2alpha1.Site, desired *DesiredNamespace) (routercontrol.RouterSettings, bool) {
+	settings := routercontrol.RouterSettings{Mode: map[bool]routercontrol.RoutingMode{true: routercontrol.RoutingModeEdge, false: routercontrol.RoutingModeInterior}[site.Spec.Edge]}
+	if value := site.Spec.GetRouterDataConnectionCount(); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "InvalidSetting", Message: fmt.Sprintf("invalid router-data-connection-count: %v", err)})
+			return settings, false
+		}
+		settings.DataConnectionCount = uint32(parsed)
+	}
+	if value := site.Spec.GetRouterLogging(); value != "" {
+		parsed, err := qdr.ParseRouterLogConfig(value)
+		if err != nil {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "InvalidSetting", Message: err.Error()})
+			return settings, false
+		}
+		for _, entry := range parsed {
+			settings.Logging = append(settings.Logging, routercontrol.RouterLogSetting{Module: entry.Module, Level: entry.Level})
+		}
+	}
+	return settings, true
 }
 
 func copyListeners(in []routercontrol.ServiceListener) []routercontrol.ServiceListener {

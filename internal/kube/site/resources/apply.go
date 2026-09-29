@@ -32,12 +32,12 @@ type Labelling interface {
 	SetPodObjectMetadata(namespace string, name string, kind string, meta *metav1.ObjectMeta) bool
 }
 
-func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool) []resource.Template {
+func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl *RouterControlConfig) []resource.Template {
 	templates := []resource.Template{
 		{
 			Name:       "deployment",
 			Template:   routerDeploymentTemplate,
-			Parameters: getCoreParams(site, group, size, disableSecCtx).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router", "Deployment"),
+			Parameters: getCoreParams(site, group, size, disableSecCtx, routerControl).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router", "Deployment"),
 			Resource: schema.GroupVersionResource{
 				Group:    "apps",
 				Version:  "v1",
@@ -47,7 +47,7 @@ func resourceTemplates(site *skupperv2alpha1.Site, group string, size sizing.Siz
 		{
 			Name:       "localService",
 			Template:   routerLocalServiceTemplate,
-			Parameters: getCoreParams(site, group, size, disableSecCtx).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router-local", "Service"),
+			Parameters: getCoreParams(site, group, size, disableSecCtx, routerControl).setLabelsAndAnnotations(labelling, site.Namespace, "skupper-router-local", "Service"),
 			Resource: schema.GroupVersionResource{
 				Group:    "",
 				Version:  "v1",
@@ -74,6 +74,20 @@ type CoreParams struct {
 	PodAnnotations     map[string]string
 	EnableAntiAffinity bool
 	DisableSecCtx      bool
+	RouterControl      *RouterControlConfig
+}
+
+type RouterControlConfig struct {
+	NamespaceUID      string
+	SiteUID           string
+	EnrollmentURL     string
+	ControlAddress    string
+	TLSServerName     string
+	TokenAudience     string
+	TokenPath         string
+	CABundleConfigMap string
+	CABundleKey       string
+	CABundlePath      string
 }
 
 func (p *CoreParams) setLabelsAndAnnotations(labelling Labelling, namespace string, name string, kind string) *CoreParams {
@@ -169,7 +183,7 @@ func configDigest(config *skupperv2alpha1.SiteSpec) string {
 	return ""
 }
 
-func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing, disableSecCtx bool) *CoreParams {
+func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing, disableSecCtx bool, routerControl *RouterControlConfig) *CoreParams {
 	return &CoreParams{
 		SiteId:             site.GetSiteId(),
 		SiteName:           site.Name,
@@ -183,11 +197,22 @@ func getCoreParams(site *skupperv2alpha1.Site, group string, size sizing.Sizing,
 		Labels:             map[string]string{},
 		EnableAntiAffinity: enableAntiAffinity(site),
 		DisableSecCtx:      disableSecCtx,
+		RouterControl:      routerControl,
 	}
 }
 
 func Apply(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool) error {
-	for _, t := range resourceTemplates(site, group, size, labelling, disableSecCtx) {
+	return apply(clients, ctx, site, group, size, labelling, disableSecCtx, nil)
+}
+
+// ApplyWithRouterControl renders the single-authority router-control bootstrap.
+// It does not mount or reference a router-config ConfigMap.
+func ApplyWithRouterControl(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl RouterControlConfig) error {
+	return apply(clients, ctx, site, group, size, labelling, disableSecCtx, &routerControl)
+}
+
+func apply(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl *RouterControlConfig) error {
+	for _, t := range resourceTemplates(site, group, size, labelling, disableSecCtx, routerControl) {
 		_, err := t.Apply(clients.GetDynamicClient(), ctx, site.Namespace)
 		if err != nil {
 			return err

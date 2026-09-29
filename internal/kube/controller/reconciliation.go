@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
+	siteresources "github.com/skupperproject/skupper/internal/kube/site/resources"
+	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	skupperinformers "github.com/skupperproject/skupper/pkg/generated/client/informers/externalversions"
@@ -29,7 +32,7 @@ const allocationConfigMapName = "skupper-controller-allocations"
 // ObservationSource returns an immutable observation view. A missing target is
 // unknown, not a complete empty report.
 type ObservationSource interface {
-	Snapshot(namespace string, evaluationTime time.Time) map[routercontrol.TargetIdentity]reconcile.Observation
+	Snapshot(namespace string, evaluationTime time.Time) map[routercontrol.TargetIdentity][]reconcile.Observation
 }
 
 // NamespaceController owns shared caches and the leader-only namespace queue.
@@ -43,6 +46,10 @@ type NamespaceController struct {
 	queue                  *reconcile.Queue
 	observations           ObservationSource
 	requireExplicitControl bool
+	bootstrap              reconcile.RouterControlBootstrap
+	disableSecurityContext bool
+	bootstrapMu            sync.RWMutex
+	leaderRunning          bool
 	synced                 atomic.Bool
 }
 
@@ -51,6 +58,8 @@ type NamespaceControllerOptions struct {
 	ControllerID           string
 	RequireExplicitControl bool
 	Workers                int
+	Bootstrap              reconcile.RouterControlBootstrap
+	DisableSecurityContext bool
 }
 
 type namespaceInformers struct {
@@ -78,16 +87,19 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	if options.ControllerID == "" {
 		return nil, fmt.Errorf("stable controller ID is required")
 	}
+	if err := options.Bootstrap.Validate(); err != nil {
+		return nil, err
+	}
 	coreFactory := informers.NewSharedInformerFactoryWithOptions(clients.GetKubeClient(), 5*time.Minute, informers.WithNamespace(options.WatchNamespace))
 	skupperFactory := skupperinformers.NewSharedInformerFactoryWithOptions(clients.GetSkupperClient(), 5*time.Minute, skupperinformers.WithNamespace(options.WatchNamespace))
 	crs := skupperFactory.Skupper().V2alpha1()
-	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl}
+	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext}
 	c.informers = namespaceInformers{
 		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
 	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher}
-	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: planner, Executor: reconcile.Executor{}})
+	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.WorkloadPlanner{Next: planner, Ensurer: c}, Executor: reconcile.Executor{}})
 	if err := c.registerInvalidations(); err != nil {
 		return nil, err
 	}
@@ -116,10 +128,87 @@ func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
 
 func (c *NamespaceController) CachesSynced() bool { return c.synced.Load() }
 
+// SetRouterControlCA installs the public server trust used by router workloads.
+// Prepare must call it after cache synchronization and before RunLeader. The
+// bytes are copied and are never exposed back to callers.
+func (c *NamespaceController) SetRouterControlCA(publicPEM []byte) error {
+	if len(publicPEM) == 0 {
+		return fmt.Errorf("router-control public CA must not be empty")
+	}
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	if c.leaderRunning {
+		return fmt.Errorf("cannot change router-control public CA while leader reconciliation is running")
+	}
+	c.bootstrap.PublicCA = append(c.bootstrap.PublicCA[:0], publicPEM...)
+	return nil
+}
+
+// IsControlled reads only the synchronized assignment cache. It is suitable for
+// enrollment/session authorization callbacks and never performs an API request.
+func (c *NamespaceController) IsControlled(namespace string) bool {
+	return c.CachesSynced() && c.assignment(namespace).Controlled
+}
+
+// ActiveSite exposes the cache-owned active Site for enrollment authorization
+// and the separate UID-keyed AccessGrant workflow. It never performs effects.
+func (c *NamespaceController) ActiveSite(namespace string) (*skupperv2alpha1.Site, bool) {
+	if !c.CachesSynced() || !c.assignment(namespace).Controlled {
+		return nil, false
+	}
+	sites := listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace)
+	allocation, err := c.allocations(namespace, c.namespaceUID(namespace), listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace))
+	if err == nil && allocation.SiteUID != "" {
+		for _, site := range sites {
+			if site.UID == allocation.SiteUID {
+				return site, true
+			}
+		}
+		return nil, false
+	}
+	if len(sites) == 1 {
+		return sites[0], true
+	}
+	return nil, false
+}
+
+func (c *NamespaceController) namespaceUID(namespace string) types.UID {
+	value, exists, _ := c.informers.namespaces.GetStore().GetByKey(namespace)
+	if !exists {
+		return ""
+	}
+	return value.(*corev1.Namespace).UID
+}
+
+// InvalidateNamespaces is the sink for authenticated observation, session,
+// authorization, and expiry changes. Repeated namespaces are deduplicated by the
+// queue; source namespaces affected by attached definitions should be included.
+func (c *NamespaceController) InvalidateNamespaces(namespaces ...string) {
+	for _, namespace := range namespaces {
+		c.queue.Add(namespace)
+	}
+}
+
 func (c *NamespaceController) RunLeader(ctx context.Context) error {
 	if !c.CachesSynced() {
 		return fmt.Errorf("cannot run namespace reconciliation before caches synchronize")
 	}
+	c.bootstrapMu.Lock()
+	if len(c.bootstrap.PublicCA) == 0 {
+		c.bootstrapMu.Unlock()
+		return fmt.Errorf("cannot run namespace reconciliation without router-control public CA")
+	}
+	if c.leaderRunning {
+		c.bootstrapMu.Unlock()
+		return fmt.Errorf("namespace reconciliation is already running")
+	}
+	c.leaderRunning = true
+	c.bootstrapMu.Unlock()
+	defer func() {
+		c.bootstrapMu.Lock()
+		c.leaderRunning = false
+		c.bootstrapMu.Unlock()
+	}()
 	c.enqueueAll()
 	c.queue.RunLeader(ctx)
 	return ctx.Err()
@@ -154,7 +243,24 @@ func objectFromEvent(value interface{}) metav1.Object {
 
 func (c *NamespaceController) invalidateObject(value interface{}) {
 	if object := objectFromEvent(value); object != nil {
-		c.queue.Add(object.GetNamespace())
+		namespace := object.GetNamespace()
+		if namespace == "" {
+			if _, ok := eventObject(value).(*corev1.Namespace); ok {
+				namespace = object.GetName()
+			}
+		}
+		c.queue.Add(namespace)
+		if config, ok := eventObject(value).(*corev1.ConfigMap); ok && config.Name == namespaceConfigName {
+			for _, candidate := range c.informers.attached.GetStore().List() {
+				definition := candidate.(*skupperv2alpha1.AttachedConnector)
+				if definition.Namespace == namespace {
+					c.queue.Add(definition.Spec.SiteNamespace)
+				}
+				if definition.Spec.SiteNamespace == namespace {
+					c.queue.Add(definition.Namespace)
+				}
+			}
+		}
 	}
 }
 
@@ -221,7 +327,15 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	}
 	ns := namespaceObject.(*corev1.Namespace)
 	evaluationTime := time.Now()
-	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Allocations: c.allocations(namespace)}
+	c.bootstrapMu.RLock()
+	bootstrap := c.bootstrap
+	bootstrap.PublicCA = append([]byte(nil), c.bootstrap.PublicCA...)
+	c.bootstrapMu.RUnlock()
+	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Bootstrap: bootstrap}
+	snapshot.Allocations, err = c.allocations(namespace, ns.UID, snapshot.RouterAccesses)
+	if err != nil {
+		return reconcile.Snapshot{}, fmt.Errorf("collect allocations: %w", err)
+	}
 	sources := map[string]bool{namespace: true}
 	for _, value := range c.informers.attached.GetStore().List() {
 		definition := value.(*skupperv2alpha1.AttachedConnector)
@@ -238,7 +352,7 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	if c.observations != nil {
 		snapshot.Observations = c.observations.Snapshot(namespace, evaluationTime)
 	} else {
-		snapshot.Observations = map[routercontrol.TargetIdentity]reconcile.Observation{}
+		snapshot.Observations = map[routercontrol.TargetIdentity][]reconcile.Observation{}
 	}
 	return snapshot, nil
 }
@@ -263,23 +377,83 @@ func (c *NamespaceController) assignment(namespace string) reconcile.Assignment 
 	if !exists {
 		return reconcile.Assignment{Controller: c.controllerID, Controlled: !c.requireExplicitControl}
 	}
-	controller := value.(*corev1.ConfigMap).Data[controllerSettingKey]
-	if !strings.Contains(controller, "/") && controller != "" {
-		controller = namespace + "/" + controller
-	}
-	return reconcile.Assignment{Controller: controller, Controlled: controller == c.controllerID}
+	config := value.(*corev1.ConfigMap)
+	controller := assignedController(config, namespace, c.controllerID, c.requireExplicitControl)
+	return reconcile.Assignment{Controller: controller, Controlled: ControlsNamespace(config, namespace, c.controllerID, c.requireExplicitControl)}
 }
 
-func (c *NamespaceController) allocations(namespace string) reconcile.AllocationState {
+// ControlsNamespace is the shared cached/live authorization rule. A missing
+// ConfigMap or controller key is automatic only when explicit control is not
+// required; an explicitly empty controller value is unassigned.
+func ControlsNamespace(config *corev1.ConfigMap, namespace, controllerID string, requireExplicit bool) bool {
+	return assignedController(config, namespace, controllerID, requireExplicit) == controllerID
+}
+
+func assignedController(config *corev1.ConfigMap, namespace, controllerID string, requireExplicit bool) string {
+	if config == nil {
+		if requireExplicit {
+			return ""
+		}
+		return controllerID
+	}
+	controller, assigned := config.Data[controllerSettingKey]
+	if !assigned {
+		if requireExplicit {
+			return ""
+		}
+		return controllerID
+	}
+	if !strings.Contains(controller, "/") {
+		controller = namespace + "/" + controller
+	}
+	return controller
+}
+
+func (c *NamespaceController) allocations(namespace string, namespaceUID types.UID, accesses []*skupperv2alpha1.RouterAccess) (reconcile.AllocationState, error) {
 	result := reconcile.AllocationState{Ports: map[string]int{}}
 	value, exists, _ := c.informers.configMaps.GetStore().GetByKey(namespace + "/" + allocationConfigMapName)
 	if !exists {
-		return result
+		return result, nil
 	}
 	config := value.(*corev1.ConfigMap)
+	if config.Data["version"] != "1" {
+		return result, fmt.Errorf("unsupported allocation record version %q", config.Data["version"])
+	}
+	if config.Data["namespaceUID"] != string(namespaceUID) {
+		return result, fmt.Errorf("allocation record namespace UID %q does not match %q", config.Data["namespaceUID"], namespaceUID)
+	}
+	if config.Data["siteUID"] == "" {
+		return result, fmt.Errorf("allocation record has no Site UID")
+	}
 	result.SiteUID = types.UID(config.Data["siteUID"])
-	_ = json.Unmarshal([]byte(config.Data["ports"]), &result.Ports)
-	return result
+	result.ResourceVersion = config.ResourceVersion
+	if err := json.Unmarshal([]byte(config.Data["ports"]), &result.Ports); err != nil {
+		return result, fmt.Errorf("invalid allocation ports: %w", err)
+	}
+	reserved := map[int]bool{45671: true, 55671: true, 5671: true, 5672: true, 9090: true}
+	for _, access := range accesses {
+		for _, role := range access.Spec.Roles {
+			port := int(role.GetPort())
+			if port < 1 || port > 65535 {
+				return result, fmt.Errorf("RouterAccess %s/%s role %s has invalid port %d", access.Namespace, access.Name, role.Name, port)
+			}
+			reserved[port] = true
+		}
+	}
+	used := map[int]string{}
+	for key, port := range result.Ports {
+		if port < 1024 || port > 65535 {
+			return result, fmt.Errorf("allocation %q has invalid port %d", key, port)
+		}
+		if reserved[port] {
+			return result, fmt.Errorf("allocation %q uses reserved port %d", key, port)
+		}
+		if previous := used[port]; previous != "" {
+			return result, fmt.Errorf("allocations %q and %q both use port %d", previous, key, port)
+		}
+		used[port] = key
+	}
+	return result, nil
 }
 
 func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace reconcile.NamespaceIdentity, allocations reconcile.AllocationState) error {
@@ -297,7 +471,10 @@ func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace r
 	configMaps := c.clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name)
 	current, err := configMaps.Get(ctx, allocationConfigMapName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = configMaps.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: allocationConfigMapName, Labels: map[string]string{"internal.skupper.io/allocation-state": "true"}}, Data: map[string]string{"version": "1", "siteUID": string(allocations.SiteUID), "ports": string(encoded)}}, metav1.CreateOptions{})
+		if allocations.ResourceVersion != "" {
+			return reconcile.SupersededError{Reason: "allocation record disappeared"}
+		}
+		_, err = configMaps.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: allocationConfigMapName, Labels: map[string]string{"internal.skupper.io/allocation-state": "true"}}, Data: map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": string(allocations.SiteUID), "ports": string(encoded)}}, metav1.CreateOptions{})
 		return classifyWriteError(err)
 	}
 	if err != nil {
@@ -306,9 +483,72 @@ func (c *NamespaceController) CommitAllocations(ctx context.Context, namespace r
 	if current.Data["siteUID"] != "" && current.Data["siteUID"] != string(allocations.SiteUID) {
 		return reconcile.SupersededError{Reason: "allocation record belongs to another Site UID"}
 	}
-	current.Data = map[string]string{"version": "1", "siteUID": string(allocations.SiteUID), "ports": string(encoded)}
+	if allocations.ResourceVersion == "" || current.ResourceVersion != allocations.ResourceVersion {
+		return reconcile.SupersededError{Reason: "allocation record changed after snapshot"}
+	}
+	if current.Data["namespaceUID"] != string(namespace.UID) {
+		return reconcile.SupersededError{Reason: "allocation record belongs to another namespace UID"}
+	}
+	current.Data = map[string]string{"version": "1", "namespaceUID": string(namespace.UID), "siteUID": string(allocations.SiteUID), "ports": string(encoded)}
 	_, err = configMaps.Update(ctx, current, metav1.UpdateOptions{})
 	return classifyWriteError(err)
+}
+
+func (c *NamespaceController) EnsureRouterControlCA(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, bootstrap reconcile.RouterControlBootstrap) error {
+	if len(bootstrap.PublicCA) == 0 {
+		return fmt.Errorf("router-control public CA must not be empty")
+	}
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	controller, block := true, true
+	desired := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: bootstrap.CABundleConfigMap, Namespace: namespace.Name, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: site.Name, UID: site.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Data: map[string]string{bootstrap.CABundleKey: string(bootstrap.PublicCA)}}
+	configMaps := c.clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name)
+	current, err := configMaps.Get(ctx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = configMaps.Create(ctx, desired, metav1.CreateOptions{})
+		return classifyWriteError(err)
+	}
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if !metav1.IsControlledBy(current, site) {
+		return fmt.Errorf("router-control CA ConfigMap %s/%s is not controlled by Site UID %s", namespace.Name, desired.Name, site.UID)
+	}
+	desired.ResourceVersion = current.ResourceVersion
+	_, err = configMaps.Update(ctx, desired, metav1.UpdateOptions{})
+	return classifyWriteError(err)
+}
+
+func (c *NamespaceController) EnsureSite(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, groups []string, bootstrap reconcile.RouterControlBootstrap) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	config := siteresources.RouterControlConfig{NamespaceUID: string(namespace.UID), SiteUID: string(site.UID), EnrollmentURL: bootstrap.EnrollmentURL, ControlAddress: bootstrap.ControlAddress, TLSServerName: bootstrap.TLSServerName, TokenAudience: bootstrap.TokenAudience, TokenPath: bootstrap.TokenPath, CABundleConfigMap: bootstrap.CABundleConfigMap, CABundleKey: bootstrap.CABundleKey, CABundlePath: bootstrap.CABundlePath}
+	for _, group := range groups {
+		if err := siteresources.ApplyWithRouterControl(c.clients, ctx, site, group, sizing.Sizing{}, nil, c.disableSecurityContext, config); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) verifySite(ctx context.Context, namespace reconcile.NamespaceIdentity, expected *skupperv2alpha1.Site) error {
+	currentNamespace, err := c.clients.GetKubeClient().CoreV1().Namespaces().Get(ctx, namespace.Name, metav1.GetOptions{})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if currentNamespace.UID != namespace.UID {
+		return reconcile.SupersededError{Reason: "namespace UID changed"}
+	}
+	current, err := c.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace.Name).Get(ctx, expected.Name, metav1.GetOptions{})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if current.UID != expected.UID || current.DeletionTimestamp != nil {
+		return reconcile.SupersededError{Reason: "active Site changed or is deleting"}
+	}
+	return nil
 }
 
 func classifyWriteError(err error) error {

@@ -39,6 +39,10 @@ metadata:
     kind: Site
     name: {{ .SiteName }}
     uid: {{ .SiteId }}
+{{- if .RouterControl }}
+    controller: true
+    blockOwnerDeletion: true
+{{- end }}
 spec:
   replicas: {{ .Replicas }}
   selector:
@@ -129,17 +133,38 @@ spec:
         {{- template "resources" .Sizing.Router -}}
 {{- end }}
       - env:
-        - name: SKUPPER_NAMESPACE
+        - name: NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+{{- if .RouterControl }}
+        - name: SKUPPER_NAMESPACE_UID
+          value: {{ .RouterControl.NamespaceUID }}
+        - name: SKUPPER_SITE_UID
+          value: {{ .RouterControl.SiteUID }}
+        - name: SKUPPER_ROUTER_GROUP
+          value: {{ .Group }}
+        - name: SKUPPER_CONFIG_DIR
+          value: /etc/skupper-router-certs
+        - name: SKUPPER_CONTROLLER_ENROLLMENT_URL
+          value: {{ .RouterControl.EnrollmentURL }}
+        - name: SKUPPER_CONTROLLER_CONTROL_ADDRESS
+          value: {{ .RouterControl.ControlAddress }}
+        - name: SKUPPER_CONTROLLER_SERVER_NAME
+          value: {{ .RouterControl.TLSServerName }}
+        - name: SKUPPER_CONTROLLER_ENROLLMENT_TOKEN
+          value: {{ .RouterControl.TokenPath }}
+        - name: SKUPPER_CONTROLLER_CA
+          value: {{ .RouterControl.CABundlePath }}
+{{- else }}
         - name: SKUPPER_SITE_ID
           value: {{ .SiteId }}
         - name: SKUPPER_SITE_NAME
           value: {{ .SiteName }}
         - name: SKUPPER_ROUTER_CONFIG
           value: {{ .Group }}
+{{- end }}
         - name: SKUPPER_ROUTER_DEPLOYMENT
           value: {{ .Group }}
         image: {{ .AdaptorImage.Name }}
@@ -172,13 +197,49 @@ spec:
           name: skupper-router-certs
         - mountPath: /etc/skupper-router-proxies
           name: skupper-router-proxies
+{{- if .RouterControl }}
+        - mountPath: {{ .RouterControl.TokenPath }}
+          name: router-control-token
+          readOnly: true
+          subPath: enrollment-token
+        - mountPath: {{ .RouterControl.CABundlePath }}
+          name: router-control-ca
+          readOnly: true
+          subPath: {{ .RouterControl.CABundleKey }}
+{{- end }}
 {{- if .Sizing.Adaptor.NotEmpty -}}
         {{- template "resources" .Sizing.Adaptor -}}
 {{- end }}
       initContainers:
       - env:
+{{- if .RouterControl }}
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: SKUPPER_NAMESPACE_UID
+          value: {{ .RouterControl.NamespaceUID }}
+        - name: SKUPPER_SITE_UID
+          value: {{ .RouterControl.SiteUID }}
+        - name: SKUPPER_ROUTER_GROUP
+          value: {{ .Group }}
+        - name: SKUPPER_CONFIG_DIR
+          value: /etc/skupper-router-certs
+        - name: SKUPPER_CONTROLLER_ENROLLMENT_URL
+          value: {{ .RouterControl.EnrollmentURL }}
+        - name: SKUPPER_CONTROLLER_CONTROL_ADDRESS
+          value: {{ .RouterControl.ControlAddress }}
+        - name: SKUPPER_CONTROLLER_SERVER_NAME
+          value: {{ .RouterControl.TLSServerName }}
+        - name: SKUPPER_CONTROLLER_ENROLLMENT_TOKEN
+          value: {{ .RouterControl.TokenPath }}
+        - name: SKUPPER_CONTROLLER_CA
+          value: {{ .RouterControl.CABundlePath }}
+{{- else }}
         - name: SKUPPER_ROUTER_CONFIG
           value: {{ .Group }}
+{{- end }}
         image: {{ .AdaptorImage.Name }}
         imagePullPolicy: {{ .AdaptorImage.PullPolicy }}
         name: config-init
@@ -196,15 +257,44 @@ spec:
           name: skupper-router-certs
         - mountPath: /etc/skupper-router-proxies
           name: skupper-router-proxies
+{{- if .RouterControl }}
+        - mountPath: {{ .RouterControl.TokenPath }}
+          name: router-control-token
+          readOnly: true
+          subPath: enrollment-token
+        - mountPath: {{ .RouterControl.CABundlePath }}
+          name: router-control-ca
+          readOnly: true
+          subPath: {{ .RouterControl.CABundleKey }}
+{{- end }}
 {{- if .Sizing.Adaptor.NotEmpty -}}
         {{- template "resources" .Sizing.Adaptor -}}
 {{- end }}
+{{- if .RouterControl }}
+      serviceAccountName: {{ .ServiceAccount }}
+{{- else }}
       serviceAccount: {{ .ServiceAccount }}
+{{- end }}
       volumes:
       - emptyDir: {}
         name: skupper-router-certs
       - emptyDir: {}
         name: skupper-router-proxies
+{{- if .RouterControl }}
+      - name: router-control-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: {{ .RouterControl.TokenAudience }}
+              expirationSeconds: 600
+              path: enrollment-token
+      - configMap:
+          items:
+          - key: {{ .RouterControl.CABundleKey }}
+            path: {{ .RouterControl.CABundleKey }}
+          name: {{ .RouterControl.CABundleConfigMap }}
+        name: router-control-ca
+{{- end }}
 {{- if not .DisableSecCtx }}
       securityContext:
         runAsNonRoot: true

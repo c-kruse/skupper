@@ -29,3 +29,10 @@ func TestExecutorRetainsIndependentSuccessAndBlocksDependents(t *testing.T) {
 		t.Fatalf("unexpected result states: %#v", states)
 	}
 }
+
+func TestSupersededPlanIsRetried(t *testing.T) {
+	report := (Executor{}).Execute(context.Background(), Plan{Operations: []Operation{{ID: "write", Run: func(context.Context) error { return SupersededError{Reason: "UID changed"} }}}})
+	if !report.NeedsRetry() || report.Results[0].State != Superseded {
+		t.Fatalf("superseded report was not retryable: %#v", report)
+	}
+}

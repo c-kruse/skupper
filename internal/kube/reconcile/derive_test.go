@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/skupperproject/skupper/internal/routercontrol"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -70,11 +71,79 @@ func TestExposePodsByNameIsRejected(t *testing.T) {
 }
 
 func TestUnknownIsNotKnownEmpty(t *testing.T) {
-	unknown := Observation{Completeness: Unknown, Fresh: true}
-	stale := Observation{Completeness: Complete, Fresh: false}
-	empty := Observation{Completeness: Complete, Fresh: true}
-	if unknown.KnownEmpty() || stale.KnownEmpty() || !empty.KnownEmpty() {
-		t.Fatalf("knowledge semantics are wrong: unknown=%v stale=%v empty=%v", unknown.KnownEmpty(), stale.KnownEmpty(), empty.KnownEmpty())
+	unknown := Observation{Scopes: map[string]ObservationScope{"resources": {Fresh: true, Snapshot: routercontrol.ObservationSnapshot{Knowledge: routercontrol.KnowledgeUnknown}}}}
+	stale := Observation{Scopes: map[string]ObservationScope{"resources": {Fresh: false, Snapshot: routercontrol.ObservationSnapshot{Knowledge: routercontrol.KnowledgeComplete}}}}
+	empty := Observation{Scopes: map[string]ObservationScope{"resources": {Fresh: true, Snapshot: routercontrol.ObservationSnapshot{Knowledge: routercontrol.KnowledgeComplete}}}}
+	if unknown.KnownEmpty("resources") || stale.KnownEmpty("resources") || !empty.KnownEmpty("resources") {
+		t.Fatalf("knowledge semantics are wrong: unknown=%v stale=%v empty=%v", unknown.KnownEmpty("resources"), stale.KnownEmpty("resources"), empty.KnownEmpty("resources"))
+	}
+}
+
+func TestDerivationDoesNotAliasBootstrapTrust(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Bootstrap.PublicCA = []byte("public-ca")
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	desired.Bootstrap.PublicCA[0] = 'X'
+	if string(snapshot.Bootstrap.PublicCA) != "public-ca" {
+		t.Fatal("derived bootstrap mutated snapshot trust bytes")
+	}
+}
+
+func TestConnectorSelectorsAreRestrictedToTheirSourceNamespace(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Connectors = []*skupperv2alpha1.Connector{{ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: "site", UID: "local-uid"}, Spec: skupperv2alpha1.ConnectorSpec{RoutingKey: "local", Selector: "app=same", Port: 8080}}}
+	snapshot.Bindings = []*skupperv2alpha1.AttachedConnectorBinding{{ObjectMeta: metav1.ObjectMeta{Name: "remote", Namespace: "site", UID: "binding-uid"}, Spec: skupperv2alpha1.AttachedConnectorBindingSpec{ConnectorNamespace: "source-a", RoutingKey: "remote"}}}
+	snapshot.Attached = []*skupperv2alpha1.AttachedConnector{{ObjectMeta: metav1.ObjectMeta{Name: "remote", Namespace: "source-a", UID: "attached-uid"}, Spec: skupperv2alpha1.AttachedConnectorSpec{SiteNamespace: "site", Selector: "app=same", Port: 9090}}}
+	snapshot.Pods = []*corev1.Pod{readyPod("site", "local", "local-pod", map[string]string{"app": "same"}), readyPod("source-a", "allowed", "allowed-pod", map[string]string{"app": "same"}), readyPod("source-b", "wrong-source", "wrong-source-pod", map[string]string{"app": "same"}), readyPod("unrelated", "unrelated", "unrelated-pod", map[string]string{"app": "same"})}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	var connectors []routercontrol.ServiceConnector
+	for _, intent := range desired.Intents {
+		connectors = intent.ServiceConnectors
+		break
+	}
+	if len(connectors) != 2 {
+		t.Fatalf("expected two connectors, got %#v", connectors)
+	}
+	byKey := map[string]routercontrol.ServiceConnector{}
+	for _, connector := range connectors {
+		byKey[connector.RoutingKey] = connector
+	}
+	if diff := cmp.Diff([]routercontrol.Endpoint{{ID: "local-pod", Host: "10.0.0.1", Port: 8080}}, byKey["local"].Endpoints); diff != "" {
+		t.Fatalf("local endpoint mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]routercontrol.Endpoint{{ID: "allowed-pod", Host: "10.0.0.1", Port: 9090}}, byKey["remote"].Endpoints); diff != "" {
+		t.Fatalf("attached endpoint mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestListenerUsesRouterBindHostAndServerTLS(t *testing.T) {
+	snapshot := baseSnapshot()
+	value := listener("orders", "listener-uid", "orders")
+	value.Spec.Host = "orders.example"
+	value.Spec.TlsCredentials = "orders-tls"
+	snapshot.Listeners = []*skupperv2alpha1.Listener{value}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	for _, intent := range desired.Intents {
+		got := intent.ServiceListeners[0]
+		if got.Host != "0.0.0.0" || got.TLS.Mode != routercontrol.TLSModeServer {
+			t.Fatalf("unexpected listener intent: %#v", got)
+		}
+		return
+	}
+	t.Fatal("no intent derived")
+}
+
+func TestWeightedMultiKeyListenerIsNotFlattened(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "weighted", Namespace: "site", UID: "weighted-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"a": 1, "b": 5}}}}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Diagnostics) != 1 || desired.Diagnostics[0].Reason != "UnsupportedStrategy" {
+		t.Fatalf("expected weighted strategy diagnostic, got %#v", desired.Diagnostics)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.ServiceListeners) != 0 {
+			t.Fatal("weighted listener was flattened into an unweighted intent")
+		}
 	}
 }
 

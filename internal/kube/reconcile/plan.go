@@ -46,7 +46,7 @@ type ExecutionReport struct {
 
 func (r ExecutionReport) NeedsRetry() bool {
 	for _, result := range r.Results {
-		if result.State == Failed || result.State == UnknownOutcome || result.State == SkippedDependency {
+		if result.State == Failed || result.State == UnknownOutcome || result.State == SkippedDependency || result.State == Superseded {
 			return true
 		}
 	}
