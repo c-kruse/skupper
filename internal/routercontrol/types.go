@@ -35,6 +35,7 @@ type Protocol string
 
 const (
 	ProtocolTCP   Protocol = "tcp"
+	ProtocolUDP   Protocol = "udp"
 	ProtocolHTTP  Protocol = "http"
 	ProtocolHTTP2 Protocol = "http2"
 )
@@ -55,17 +56,26 @@ type TLSIntent struct {
 }
 
 type RouterSettings struct {
-	Mode             RoutingMode `json:"mode"`
-	OwnedAddressKeys []string    `json:"ownedAddressKeys,omitempty"`
+	Mode                RoutingMode        `json:"mode"`
+	DataConnectionCount uint32             `json:"dataConnectionCount,omitempty"`
+	Logging             []RouterLogSetting `json:"logging,omitempty"`
+	OwnedAddressKeys    []string           `json:"ownedAddressKeys,omitempty"`
+}
+
+type RouterLogSetting struct {
+	// Empty Module denotes the QDR default module.
+	Module string `json:"module,omitempty"`
+	Level  string `json:"level"`
 }
 
 type RouterConnection struct {
-	ID   ResourceID `json:"id"`
-	Host string     `json:"host"`
-	Port uint16     `json:"port"`
-	Role string     `json:"role"`
-	Cost uint32     `json:"cost,omitempty"`
-	TLS  TLSIntent  `json:"tls"`
+	ID                     ResourceID `json:"id"`
+	Host                   string     `json:"host"`
+	Port                   uint16     `json:"port"`
+	Role                   string     `json:"role"`
+	Cost                   uint32     `json:"cost,omitempty"`
+	TLS                    TLSIntent  `json:"tls"`
+	ProxyCredentialBinding ResourceID `json:"proxyCredentialBinding,omitempty"`
 }
 
 type RouterListener struct {
@@ -140,10 +150,24 @@ type IntentPublisher interface {
 	SetUnavailable(target TargetIdentity)
 }
 
+// SessionIdentity is established by authentication, never by Hello claims. A
+// Pod rollout may have multiple identities concurrently realizing one target.
+type SessionIdentity struct {
+	PodUID            string
+	ServiceAccountUID string
+}
+
+// SessionKey identifies one authenticated Pod realization of a target.
+type SessionKey struct {
+	Target   TargetIdentity
+	Identity SessionIdentity
+}
+
 // AuthorizeFunc is supplied by the authentication layer. The context contains
 // the TLS-authenticated peer identity; successful return authorizes exactly the
-// target from the stream Hello. Router control never installs an auth bypass.
-type AuthorizeFunc func(ctx context.Context, target TargetIdentity) error
+// target from Hello and returns the authenticated Pod identity. Router control
+// never installs an auth bypass.
+type AuthorizeFunc func(ctx context.Context, target TargetIdentity) (SessionIdentity, error)
 
 type Hello struct {
 	ProtocolVersions  []string       `json:"protocolVersions"`
@@ -252,8 +276,18 @@ type ApplicationReport struct {
 	Sequence          uint64                `json:"sequence"`
 	IntentDigest      Digest                `json:"intentDigest"`
 	RouterIncarnation string                `json:"routerIncarnation"`
+	RealizationID     string                `json:"realizationId"`
+	Credentials       []CredentialRevision  `json:"credentials,omitempty"`
 	State             ApplicationState      `json:"state"`
 	Resources         []ResourceApplication `json:"resources,omitempty"`
+}
+
+// CredentialRevision identifies the non-secret provider material used by one
+// realization. Rotation changes Revision and therefore requires new Applied
+// evidence even when the intent digest is unchanged.
+type CredentialRevision struct {
+	BindingID ResourceID `json:"bindingId"`
+	Revision  string     `json:"revision"`
 }
 
 type Knowledge string
@@ -262,6 +296,11 @@ const (
 	KnowledgeComplete Knowledge = "complete"
 	KnowledgePartial  Knowledge = "partial"
 	KnowledgeUnknown  Knowledge = "unknown"
+)
+
+const (
+	ObservationScopeResources = "resources"
+	ObservationScopeAddresses = "addresses"
 )
 
 type OperationalState string
@@ -279,15 +318,29 @@ type LocalResourceObservation struct {
 	Message       string           `json:"message,omitempty"`
 }
 
+// LocalAddressObservation reports the local router's exact routing-address
+// facts independently of listener socket state. Counts are never inferred from
+// absent records; they are meaningful only in a successful complete/partial
+// addresses scope.
+type LocalAddressObservation struct {
+	RoutingKey      string `json:"routingKey"`
+	Reachable       bool   `json:"reachable"`
+	SubscriberCount uint64 `json:"subscriberCount"`
+	InProcessCount  uint64 `json:"inProcessCount"`
+	RemoteCount     uint64 `json:"remoteCount"`
+}
+
 // ObservationSnapshot is complete, partial, or unknown for one named local
 // scope. Complete with zero Resources is known empty. Unknown is not empty.
 type ObservationSnapshot struct {
 	SessionID         string                     `json:"sessionId"`
 	Scope             string                     `json:"scope"`
 	SampleSequence    uint64                     `json:"sampleSequence"`
+	RefreshRequestID  string                     `json:"refreshRequestId,omitempty"`
 	Knowledge         Knowledge                  `json:"knowledge"`
 	RouterIncarnation string                     `json:"routerIncarnation"`
 	Resources         []LocalResourceObservation `json:"resources,omitempty"`
+	Addresses         []LocalAddressObservation  `json:"addresses,omitempty"`
 	Reason            string                     `json:"reason,omitempty"`
 }
 
@@ -325,7 +378,7 @@ type ServerMessage struct {
 // ObservationSink receives already session-bound reports. Implementations
 // should copy retained values and must not block the stream indefinitely.
 type ObservationSink interface {
-	Application(ctx context.Context, target TargetIdentity, report ApplicationReport) error
-	Observation(ctx context.Context, target TargetIdentity, observation ObservationSnapshot) error
-	Disconnected(target TargetIdentity, sessionID string)
+	Application(ctx context.Context, key SessionKey, report ApplicationReport) error
+	Observation(ctx context.Context, key SessionKey, observation ObservationSnapshot) error
+	Disconnected(key SessionKey, sessionID string)
 }
