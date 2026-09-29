@@ -3,88 +3,79 @@ package adaptor
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
-	paths "path"
-	"time"
+	"path/filepath"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
-
-	"github.com/cenkalti/backoff/v4"
-	internalclient "github.com/skupperproject/skupper/internal/kube/client"
-	kubeqdr "github.com/skupperproject/skupper/internal/kube/qdr"
-	"github.com/skupperproject/skupper/internal/kube/secrets"
-	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/routercontrol"
 )
 
-func InitialiseConfig(cli internalclient.Clients, namespace string, path string, routerConfigMap string) error {
-	ctxt := context.Background()
-	controller := watchers.NewEventProcessor("config-init", cli)
-	secretsSync := secrets.NewSync(
-		sslSecretsWatcher(namespace, controller),
-		nil,
-		slog.New(slog.Default().Handler()).With(slog.String("component", "kube.secrets")),
-	)
-	stop := make(chan struct{})
-	defer close(stop)
-	slog.Info("Starting secret watcher")
-	controller.StartWatchers(stop)
-	configMaps := cli.GetKubeClient().CoreV1().ConfigMaps(namespace)
-	slog.Info("Waiting for secret watcher cache")
-	controller.WaitForCacheSync(stop)
-	secretsSync.Recover()
-	controller.Start(stop)
-	var (
-		routerConfiguration *qdr.RouterConfig
-		err                 error
-	)
-	retryErr := backoff.Retry(func() error {
-		slog.Info("Synchroninzing Secrets with router configuration")
-		routerConfiguration, err = getRouterConfig(ctxt, configMaps, routerConfigMap)
-		if err != nil {
-			return err
-		}
-		if routerConfiguration == nil {
-			return fmt.Errorf("empty router configuration in ConfigMap %q", routerConfigMap)
-		}
-		delta := secretsSync.ExpectSslProfiles(routerConfiguration.SslProfiles)
-		if len(delta.Missing) > 0 {
-			slog.Info("Waiting for Secrets to be created for SslProfiles", slog.Any("sslProfiles", delta.Missing))
-		}
-		for name, diff := range delta.PendingOrdinals {
-			slog.Info("Secret has outdated ordinal", slog.String("secret", diff.SecretName), slog.Uint64("ordinal", diff.Current), slog.String("profile", name), slog.Uint64("expected", diff.Expect))
-		}
-		deltaProxy := secretsSync.ExpectProxyProfiles(namespace+"/"+routerConfigMap, routerConfiguration.ProxyProfiles)
-		if len(deltaProxy.Missing) > 0 {
-			slog.Info("Waiting for Secrets to be created for ProxyProfiles", slog.Any("proxProfiles", deltaProxy.Missing))
-		}
-		for _, err := range deltaProxy.Errors {
-			delta.Errors = append(delta.Errors, err)
-		}
-		return delta.Error()
-	}, backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(time.Second*60)))
-	if retryErr != nil {
-		return retryErr
-	}
-	slog.Info("Finished synchronizing Secrets with router configuration")
-	value, err := qdr.MarshalRouterConfig(*routerConfiguration)
-	if err != nil {
-		return err
-	}
-	configFile := paths.Join(path, "skrouterd.json")
-	if err := os.WriteFile(configFile, []byte(value), 0777); err != nil {
-		return err
-	}
-	slog.Info("Router configuration has been written", slog.String("configFile", configFile))
-	return nil
+type InitialIntentSource interface {
+	FetchInitialIntent(context.Context) (routercontrol.RouterIntent, routercontrol.Digest, error)
 }
 
-func getRouterConfig(ctx context.Context, configMaps v1.ConfigMapInterface, name string) (*qdr.RouterConfig, error) {
-	current, err := configMaps.Get(ctx, name, metav1.GetOptions{})
+type TrafficCredentialResolver interface {
+	Resolve(context.Context, routercontrol.CredentialBinding) (CredentialRealization, error)
+}
+
+// InitialiseFromIntent is the config-init path. It fetches a complete intent,
+// materializes traffic credentials, and atomically writes the normal router
+// startup file. It cannot and does not report Applied before router startup.
+func InitialiseFromIntent(ctx context.Context, source InitialIntentSource, credentials TrafficCredentialResolver, path string) error {
+	intent, expectedDigest, err := source.FetchInitialIntent(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return kubeqdr.GetRouterConfigFromConfigMap(current)
+	digest, err := DigestIntent(intent)
+	if err != nil {
+		return err
+	}
+	if digest != expectedDigest {
+		return fmt.Errorf("initial intent digest %q, computed %q", expectedDigest, digest)
+	}
+	realizations := map[routercontrol.ResourceID]CredentialRealization{}
+	for _, binding := range intent.CredentialBindings {
+		realization, err := credentials.Resolve(ctx, binding)
+		if err != nil {
+			return fmt.Errorf("resolve credential %q: %w", binding.ID, err)
+		}
+		realizations[binding.ID] = realization
+	}
+	compiled, err := CompileIntent(intent, realizations)
+	if err != nil {
+		return err
+	}
+	value, err := qdr.MarshalRouterConfig(compiled.Config)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(path, "skrouterd.json"), []byte(value), 0600)
+}
+
+func atomicWrite(name string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(name), ".skrouterd-")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(mode); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryName, name)
 }

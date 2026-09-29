@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -8,135 +10,79 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/cenkalti/backoff/v4"
-	"github.com/prometheus/client_golang/prometheus"
 	iflag "github.com/skupperproject/skupper/internal/flag"
 	"github.com/skupperproject/skupper/internal/kube/adaptor"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
-	"github.com/skupperproject/skupper/internal/kube/metrics"
-	"github.com/skupperproject/skupper/internal/kube/watchers"
-	"github.com/skupperproject/skupper/internal/qdr"
+	"github.com/skupperproject/skupper/internal/routercontrol"
 	"github.com/skupperproject/skupper/internal/version"
 )
 
-var onlyOneSignalHandler = make(chan struct{})
-var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
-
-func SetupSignalHandler() (stopCh <-chan struct{}) {
-	close(onlyOneSignalHandler) // panics when called twice
-
-	stop := make(chan struct{})
-	c := make(chan os.Signal, 2)
-	signal.Notify(c, shutdownSignals...)
-	go func() {
-		<-c
-		close(stop)
-		<-c
-		os.Exit(1) // second signal. Exit directly.
-	}()
-
-	return stop
-}
-
 func main() {
 	flags := flag.NewFlagSet("", flag.ExitOnError)
-
-	var namespace string
-	var kubeconfig string
-	iflag.StringVar(flags, &namespace, "namespace", "NAMESPACE", "", "The Kubernetes namespace scope for the controller")
-	iflag.StringVar(flags, &kubeconfig, "kubeconfig", "KUBECONFIG", "", "A path to the kubeconfig file to use")
-
-	var configDir string
-	var configMapName string
-	iflag.StringVar(flags, &configDir, "config-dir", "SKUPPER_CONFIG_DIR", "/etc/skupper-router-certs", "The directory to which configuration should be saved")
-	iflag.StringVar(flags, &configMapName, "router-config", "SKUPPER_ROUTER_CONFIG", "skupper-router", "The name of the ConfigMap containing the router config")
-
-	// if -version used, report and exit
-	isVersion := flags.Bool("version", false, "Report the version of Config Sync")
-	isInit := flags.Bool("init", false, "Downloads configuration and ssl profile artefacts")
-
-	metricsConfig, err := metrics.BoundConfig(flags)
-	if err != nil {
-		slog.Error("Error reading metrics configuration", slog.Any("error", err))
-		os.Exit(1)
-	}
+	var namespace, namespaceUID, siteUID, routerGroup, kubeconfig, configDir string
+	var enrollmentURL, controlAddress, serverName, tokenPath, caPath string
+	iflag.StringVar(flags, &namespace, "namespace", "NAMESPACE", "", "The router namespace")
+	iflag.StringVar(flags, &namespaceUID, "namespace-uid", "SKUPPER_NAMESPACE_UID", "", "The router namespace UID")
+	iflag.StringVar(flags, &siteUID, "site-uid", "SKUPPER_SITE_UID", "", "The active Site UID")
+	iflag.StringVar(flags, &routerGroup, "router-group", "SKUPPER_ROUTER_GROUP", "", "The logical router group")
+	iflag.StringVar(flags, &kubeconfig, "kubeconfig", "KUBECONFIG", "", "A path to kubeconfig")
+	iflag.StringVar(flags, &configDir, "config-dir", "SKUPPER_CONFIG_DIR", "/etc/skupper-router-certs", "Router configuration and traffic credential directory")
+	iflag.StringVar(flags, &enrollmentURL, "enrollment-url", "SKUPPER_CONTROLLER_ENROLLMENT_URL", "", "Controller enrollment URL (defaults to namespace-qualified service DNS)")
+	iflag.StringVar(flags, &controlAddress, "control-address", "SKUPPER_CONTROLLER_CONTROL_ADDRESS", "", "Controller mTLS gRPC address (defaults to namespace-qualified service DNS)")
+	iflag.StringVar(flags, &serverName, "control-server-name", "SKUPPER_CONTROLLER_SERVER_NAME", "", "Expected controller TLS DNS name (defaults to namespace-qualified service DNS)")
+	iflag.StringVar(flags, &tokenPath, "enrollment-token", "SKUPPER_CONTROLLER_ENROLLMENT_TOKEN", "/var/run/secrets/skupper-controller/enrollment-token", "Projected bound-token path")
+	iflag.StringVar(flags, &caPath, "control-ca", "SKUPPER_CONTROLLER_CA", "/etc/skupper-controller/ca.crt", "Controller public server CA bundle")
+	isVersion := flags.Bool("version", false, "Report the version")
+	isInit := flags.Bool("init", false, "Fetch initial intent and write router startup configuration")
 	flags.Parse(os.Args[1:])
 	if *isVersion {
 		fmt.Println(version.Version)
-		os.Exit(0)
+		return
 	}
 
-	// Startup message
-	slog.Info("Version info", slog.Any("version", version.Version))
-
-	// set up signals so we handle the first shutdown signal gracefully
-	stopCh := SetupSignalHandler()
-
-	cli, err := internalclient.NewClient(namespace, "", kubeconfig)
+	client, err := internalclient.NewClient(namespace, "", kubeconfig)
 	if err != nil {
-		slog.Error("Error getting van client", slog.Any("error", err))
+		slog.Error("create Kubernetes client", slog.Any("error", err))
 		os.Exit(1)
 	}
-
+	controllerHost := "skupper-controller." + client.GetNamespace() + ".svc"
+	if enrollmentURL == "" {
+		enrollmentURL = "https://" + controllerHost + ":8443"
+	}
+	if controlAddress == "" {
+		controlAddress = controllerHost + ":8444"
+	}
+	if serverName == "" {
+		serverName = controllerHost
+	}
+	config := adaptor.ControlConfig{
+		EnrollmentURL: enrollmentURL, ControlAddress: controlAddress, ServerName: serverName,
+		TokenPath: tokenPath, PublicCAPath: caPath, ConfigDir: configDir,
+		Target: routercontrol.TargetIdentity{NamespaceUID: namespaceUID, SiteUID: siteUID, RouterGroup: routerGroup},
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	secrets := client.GetKubeClient().CoreV1().Secrets(client.GetNamespace())
 	if *isInit {
-		if err := adaptor.InitialiseConfig(cli, cli.GetNamespace(), configDir, configMapName); err != nil {
-			slog.Error("Error initialising config", slog.Any("error", err))
-			os.Exit(1)
-		}
-		os.Exit(0)
+		err = adaptor.RunConfigInit(ctx, config, secrets)
+	} else {
+		go serveHealth(ctx)
+		err = adaptor.RunSidecar(ctx, config, secrets)
 	}
-
-	var eventProcessorMetrics watchers.MetricsProvider
-	if !metricsConfig.Disabled {
-		reg := prometheus.NewRegistry()
-		metrics.MustRegisterClientGoMetrics(reg)
-		eventProcessorMetrics = metrics.MustRegisterEventProcessorMetrics(reg)
-		srv := metrics.NewServer(metricsConfig, reg)
-		if err := srv.Start(stopCh); err != nil {
-			slog.Error("Error starting metrics server", slog.Any("error", err))
-			os.Exit(1)
-		}
-	}
-
-	slog.Info("Waiting for Skupper router to be ready")
-	if err := waitForAMQPConnection("amqp://localhost:5672", time.Second*180, time.Second*5); err != nil {
-		slog.Error("Error waiting for router", slog.Any("error", err))
+	if err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("router adaptor stopped", slog.Any("error", err))
 		os.Exit(1)
 	}
-
-	slog.Info("Starting collector...")
-	go adaptor.StartCollector(cli)
-
-	//start health check
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("ok"))
-	})
-	go http.ListenAndServe(":9191", nil)
-
-	configSync := adaptor.NewConfigSync(cli, cli.GetNamespace(), configDir, configMapName, eventProcessorMetrics)
-	slog.Info("Starting controller loop...")
-	configSync.Start(stopCh)
-
-	<-stopCh
-	slog.Info("Shutting down...")
-	configSync.Stop()
 }
 
-func waitForAMQPConnection(address string, timeout, interval time.Duration) error {
-	b := backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(timeout), backoff.WithMaxInterval(interval))
-	pool := qdr.NewAgentPool(address, nil)
-	pool.SetConnectionTimeout(interval)
-	return backoff.Retry(
-		func() error {
-			agent, err := pool.Get()
-			if err != nil {
-				return err
-			}
-			agent.Close()
-			slog.Info("Connected to router", slog.Any("address", address))
-			return nil
-		}, b)
+func serveHealth(ctx context.Context) {
+	server := &http.Server{Addr: ":9191", Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})}
+	go func() { <-ctx.Done(); _ = server.Close() }()
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("health server", slog.Any("error", err))
+	}
 }
