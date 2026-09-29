@@ -1,11 +1,13 @@
 package adaptor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -119,6 +121,16 @@ func validateTrafficCredential(binding routercontrol.CredentialBinding, ca, cert
 }
 
 func materializeCredential(directory string, ca, cert, key []byte) error {
+	files := []struct {
+		name string
+		data []byte
+		mode os.FileMode
+	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}}
+	if err := verifyCredentialDirectory(directory, files); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	parent := filepath.Dir(directory)
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
@@ -133,25 +145,64 @@ func materializeCredential(directory string, ca, cert, key []byte) error {
 			_ = os.RemoveAll(temporary)
 		}
 	}()
-	for _, file := range []struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}{{"ca.crt", ca, 0644}, {"tls.crt", cert, 0644}, {"tls.key", key, 0600}} {
+	for _, file := range files {
 		if len(file.data) == 0 {
 			continue
 		}
-		if err := os.WriteFile(filepath.Join(temporary, file.name), file.data, file.mode); err != nil {
+		name := filepath.Join(temporary, file.name)
+		if err := os.WriteFile(name, file.data, file.mode); err != nil {
+			return err
+		}
+		if err := os.Chmod(name, file.mode); err != nil {
 			return err
 		}
 	}
 	if err := os.Rename(temporary, directory); err != nil {
-		if os.IsExist(err) {
+		if verifyErr := verifyCredentialDirectory(directory, files); verifyErr == nil {
 			return nil
 		}
 		return err
 	}
 	ok = true
+	return nil
+}
+
+func verifyCredentialDirectory(directory string, files []struct {
+	name string
+	data []byte
+	mode os.FileMode
+}) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	expected := map[string]struct{}{}
+	for _, file := range files {
+		if len(file.data) == 0 {
+			continue
+		}
+		expected[file.name] = struct{}{}
+		name := filepath.Join(directory, file.name)
+		info, err := os.Lstat(name)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != file.mode.Perm() {
+			return fmt.Errorf("credential file %q has unsafe type or mode %o", name, info.Mode())
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(data, file.data) {
+			return fmt.Errorf("credential file %q does not match its content revision", name)
+		}
+	}
+	for _, entry := range entries {
+		if _, found := expected[entry.Name()]; !found {
+			return fmt.Errorf("credential directory %q contains unexpected file %q", directory, entry.Name())
+		}
+	}
 	return nil
 }
 

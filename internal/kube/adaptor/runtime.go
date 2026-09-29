@@ -2,6 +2,7 @@ package adaptor
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -18,6 +19,12 @@ import (
 	kuberoutercontrol "github.com/skupperproject/skupper/internal/kube/routercontrol"
 	"github.com/skupperproject/skupper/internal/qdr"
 	"github.com/skupperproject/skupper/internal/routercontrol"
+)
+
+const (
+	controlHandshakeTimeout = 20 * time.Second
+	controlSendTimeout      = 15 * time.Second
+	initialIntentTimeout    = 30 * time.Second
 )
 
 type ControlConfig struct {
@@ -38,6 +45,24 @@ type controlRuntime struct {
 	startup     *qdr.RouterConfig
 	incarnation string
 	instance    string
+}
+
+type connectedControlSession struct {
+	session     *routercontrol.ClientSession
+	connection  *grpc.ClientConn
+	expiry      time.Time
+	incarnation string
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+type receivedControlEvent struct {
+	event routercontrol.ServerEvent
+	err   error
+}
+
+type controlEventReceiver interface {
+	NextEvent() (routercontrol.ServerEvent, error)
 }
 
 func newControlRuntime(config ControlConfig, secrets corev1client.SecretInterface) (*controlRuntime, error) {
@@ -82,6 +107,124 @@ func (r *controlRuntime) connect(ctx context.Context) (*routercontrol.ClientSess
 	return session, connection, credential.Leaf.NotAfter, incarnation, nil
 }
 
+func (r *controlRuntime) connectBounded(parent context.Context) (*connectedControlSession, error) {
+	ctx, cancel := context.WithCancel(parent)
+	result := make(chan struct {
+		session     *routercontrol.ClientSession
+		connection  *grpc.ClientConn
+		expiry      time.Time
+		incarnation string
+		err         error
+	}, 1)
+	go func() {
+		session, connection, expiry, incarnation, err := r.connect(ctx)
+		result <- struct {
+			session     *routercontrol.ClientSession
+			connection  *grpc.ClientConn
+			expiry      time.Time
+			incarnation string
+			err         error
+		}{session, connection, expiry, incarnation, err}
+	}()
+	timer := time.NewTimer(controlHandshakeTimeout)
+	defer timer.Stop()
+	select {
+	case outcome := <-result:
+		if outcome.err != nil {
+			cancel()
+			return nil, outcome.err
+		}
+		return &connectedControlSession{session: outcome.session, connection: outcome.connection, expiry: outcome.expiry, incarnation: outcome.incarnation, ctx: ctx, cancel: cancel}, nil
+	case <-timer.C:
+		cancel()
+		outcome := <-result
+		if outcome.connection != nil {
+			_ = outcome.connection.Close()
+		}
+		return nil, fmt.Errorf("router-control handshake exceeded %s", controlHandshakeTimeout)
+	case <-parent.Done():
+		cancel()
+		outcome := <-result
+		if outcome.connection != nil {
+			_ = outcome.connection.Close()
+		}
+		return nil, parent.Err()
+	}
+}
+
+func startControlReceiver(ctx context.Context, session controlEventReceiver) (<-chan receivedControlEvent, <-chan struct{}) {
+	events := make(chan receivedControlEvent, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			event, err := session.NextEvent()
+			select {
+			case events <- receivedControlEvent{event: event, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return events, done
+}
+
+func boundedSessionCall(ctx context.Context, cancel context.CancelFunc, operation func() error) error {
+	return boundedCall(ctx, cancel, controlSendTimeout, operation)
+}
+
+func boundedCall(ctx context.Context, cancel context.CancelFunc, timeout time.Duration, operation func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- operation() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return err
+	case <-timer.C:
+		cancel()
+		<-result
+		return fmt.Errorf("router-control operation exceeded %s", timeout)
+	case <-ctx.Done():
+		cancel()
+		<-result
+		return ctx.Err()
+	}
+}
+
+func certificateRenewalDelay(now, expiry time.Time, jitter float64) time.Duration {
+	remaining := expiry.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	if jitter < -1 {
+		jitter = -1
+	} else if jitter > 1 {
+		jitter = 1
+	}
+	margin := remaining / 3
+	margin += time.Duration(float64(margin) * 0.1 * jitter)
+	if margin > 15*time.Minute {
+		margin = 15 * time.Minute
+	}
+	delay := remaining - margin
+	if delay <= 0 {
+		return remaining / 2
+	}
+	return delay
+}
+
+func renewalJitter() float64 {
+	var value [1]byte
+	if _, err := cryptorand.Read(value[:]); err != nil {
+		return 0
+	}
+	return float64(value[0])/127.5 - 1
+}
+
 func validateSupportedIntent(intent routercontrol.RouterIntent) error {
 	for _, listener := range intent.ServiceListeners {
 		if listener.Protocol != routercontrol.ProtocolTCP {
@@ -101,24 +244,41 @@ func RunConfigInit(ctx context.Context, config ControlConfig, secrets corev1clie
 	if err != nil {
 		return err
 	}
-	session, connection, _, _, err := runtime.connect(ctx)
+	control, err := runtime.connectBounded(ctx)
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	events, receiverDone := startControlReceiver(control.ctx, control.session)
+	defer func() {
+		control.cancel()
+		<-receiverDone
+		_ = control.connection.Close()
+	}()
+	timer := time.NewTimer(initialIntentTimeout)
+	defer timer.Stop()
 	for {
-		event, err := session.NextEvent()
-		if err != nil {
-			return err
+		var item receivedControlEvent
+		select {
+		case <-control.ctx.Done():
+			return control.ctx.Err()
+		case <-timer.C:
+			return fmt.Errorf("initial router intent not received within %s", initialIntentTimeout)
+		case item = <-events:
 		}
+		if item.err != nil {
+			return item.err
+		}
+		event := item.event
 		if event.Refresh != nil || event.Intent == nil || event.Intent.Unavailable {
 			continue
 		}
 		if err := validateSupportedIntent(event.Intent.Intent); err != nil {
-			_ = session.Reject(*event.Intent, err.Error())
+			if rejectErr := boundedSessionCall(control.ctx, control.cancel, func() error { return control.session.Reject(*event.Intent, err.Error()) }); rejectErr != nil {
+				return rejectErr
+			}
 			continue
 		}
-		if err := session.Accept(*event.Intent); err != nil {
+		if err := boundedSessionCall(control.ctx, control.cancel, func() error { return control.session.Accept(*event.Intent) }); err != nil {
 			return err
 		}
 		source := staticInitialIntent{intent: event.Intent.Intent, digest: event.Intent.Digest}
@@ -152,7 +312,7 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 	backoff := time.Second
 	for ctx.Err() == nil {
 		_, _ = runtime.router.Read()
-		session, connection, expiry, sessionIncarnation, err := runtime.connect(ctx)
+		control, err := runtime.connectBounded(ctx)
 		if err != nil {
 			if !sleepContext(ctx, backoff) {
 				return ctx.Err()
@@ -163,8 +323,8 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 			continue
 		}
 		backoff = time.Second
-		err = runtime.runSession(ctx, session, expiry, sessionIncarnation)
-		_ = connection.Close()
+		err = runtime.runSession(control.ctx, control.cancel, control.session, control.expiry, control.incarnation)
+		_ = control.connection.Close()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -175,26 +335,13 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 	return ctx.Err()
 }
 
-func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.ClientSession, expiry time.Time, sessionIncarnation string) error {
-	type received struct {
-		event routercontrol.ServerEvent
-		err   error
-	}
-	events := make(chan received)
-	go func() {
-		for {
-			event, err := session.NextEvent()
-			select {
-			case events <- received{event, err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
+func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFunc, session *routercontrol.ClientSession, expiry time.Time, sessionIncarnation string) error {
+	events, receiverDone := startControlReceiver(ctx, session)
+	defer func() {
+		cancel()
+		<-receiverDone
 	}()
-	renew := time.NewTimer(max(time.Until(expiry.Add(-15*time.Minute)), time.Second))
+	renew := time.NewTimer(certificateRenewalDelay(time.Now(), expiry, renewalJitter()))
 	defer renew.Stop()
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
@@ -208,13 +355,11 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 	for {
 		select {
 		case <-ctx.Done():
-			_ = session.CloseSend()
 			return ctx.Err()
 		case <-renew.C:
-			_ = session.CloseSend()
 			return errors.New("router-control credential renewal due")
 		case <-heartbeat.C:
-			if err := session.SendHeartbeat(); err != nil {
+			if err := boundedSessionCall(ctx, cancel, session.SendHeartbeat); err != nil {
 				return err
 			}
 		case <-reconcile.C:
@@ -227,7 +372,7 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 				if report.RouterIncarnation != sessionIncarnation {
 					return errors.New("local router management reconnected; start a fresh control session")
 				}
-				if err := session.SendApplication(report); err != nil {
+				if err := boundedSessionCall(ctx, cancel, func() error { return session.SendApplication(report) }); err != nil {
 					return err
 				}
 			}
@@ -257,17 +402,17 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 				if observation.RouterIncarnation != sessionIncarnation {
 					return errors.New("local router management reconnected; start a fresh control session")
 				}
-				if err := session.SendObservation(observation); err != nil {
+				if err := boundedSessionCall(ctx, cancel, func() error { return session.SendObservation(observation) }); err != nil {
 					return err
 				}
 			} else if item.event.Intent != nil && !item.event.Intent.Unavailable {
 				if err := validateSupportedIntent(item.event.Intent.Intent); err != nil {
-					if rejectErr := session.Reject(*item.event.Intent, err.Error()); rejectErr != nil {
+					if rejectErr := boundedSessionCall(ctx, cancel, func() error { return session.Reject(*item.event.Intent, err.Error()) }); rejectErr != nil {
 						return rejectErr
 					}
 					continue
 				}
-				if err := session.Accept(*item.event.Intent); err != nil {
+				if err := boundedSessionCall(ctx, cancel, func() error { return session.Accept(*item.event.Intent) }); err != nil {
 					return err
 				}
 				accepted = item.event.Intent
@@ -281,7 +426,7 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 				if report.RouterIncarnation != sessionIncarnation {
 					return errors.New("local router management reconnected; start a fresh control session")
 				}
-				if err := session.SendApplication(report); err != nil {
+				if err := boundedSessionCall(ctx, cancel, func() error { return session.SendApplication(report) }); err != nil {
 					return err
 				}
 			}

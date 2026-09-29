@@ -129,3 +129,38 @@ func TestTrustOnlyCredentialRequiresCAWithoutClientKeypair(t *testing.T) {
 		t.Fatalf("trust-only credential required or emitted a client keypair: %#v", got.Profile)
 	}
 }
+
+func TestCredentialMaterializationIsIdempotentAcrossProviders(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "traffic", Namespace: "test"}, Data: credentialData(t, 5)}
+	client := fake.NewSimpleClientset(secret)
+	root := t.TempDir()
+	binding := routercontrol.CredentialBinding{ID: "credential", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageClientAuth}}
+	initRealization, err := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), root).Resolve(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecarRealization, err := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), root).Resolve(context.Background(), binding)
+	if err != nil {
+		t.Fatalf("fresh sidecar provider could not reuse init material: %v", err)
+	}
+	if sidecarRealization.RealizationID != initRealization.RealizationID || sidecarRealization.Profile.PrivateKeyFile != initRealization.Profile.PrivateKeyFile {
+		t.Fatalf("providers disagreed on materialized revision: init=%#v sidecar=%#v", initRealization, sidecarRealization)
+	}
+}
+
+func TestCredentialMaterializationRejectsCorruptExistingRevision(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "traffic", Namespace: "test"}, Data: credentialData(t, 6)}
+	client := fake.NewSimpleClientset(secret)
+	root := t.TempDir()
+	binding := routercontrol.CredentialBinding{ID: "credential", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageClientAuth}}
+	first, err := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), root).Resolve(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first.Profile.PrivateKeyFile, []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), root).Resolve(context.Background(), binding); err == nil {
+		t.Fatal("fresh provider accepted corrupt existing credential revision")
+	}
+}
