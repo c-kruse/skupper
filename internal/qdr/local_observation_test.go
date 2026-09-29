@@ -39,3 +39,16 @@ func TestManagementLogAttributesRedactsProxyPasswordWithoutChangingRequest(t *te
 		t.Fatal("redaction changed management request")
 	}
 }
+
+func TestDecodeConnectorIncludesLocalOperationalState(t *testing.T) {
+	connector := asConnector(Record{
+		"name":             "site-link",
+		"host":             "peer.example",
+		"port":             "55671",
+		"connectionStatus": "SUCCESS",
+		"connectionMsg":    "Connection Opened: dir=out",
+	})
+	if connector.ConnectionStatus != "SUCCESS" || connector.ConnectionMsg != "Connection Opened: dir=out" {
+		t.Fatalf("connector operational fields not decoded: %#v", connector)
+	}
+}

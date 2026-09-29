@@ -21,25 +21,43 @@ func TestAddressObservationDistinguishesKnownEmptyFromFailedQuery(t *testing.T) 
 	}
 }
 
-func TestResourceObservationUsesListenerOperStatusOnly(t *testing.T) {
+func TestResourceObservationUsesOnlyApplicableLocalOperationalState(t *testing.T) {
 	listenerName := ownedNamePrefix + "listener"
-	connectorName := ownedNamePrefix + "connector"
+	tcpConnectorName := ownedNamePrefix + "tcp-connector"
+	routerConnectorUp := ownedNamePrefix + "router-connector-up"
+	routerConnectorDown := ownedNamePrefix + "router-connector-down"
+	routerConnectorUnknown := ownedNamePrefix + "router-connector-unknown"
 	actual := basicConfig()
 	actual.Bridges.TcpListeners[listenerName] = qdr.TcpEndpoint{Name: listenerName, OperStatus: "up", ConnectionMsg: "listening"}
-	actual.Bridges.TcpConnectors[connectorName] = qdr.TcpEndpoint{Name: connectorName, OperStatus: "down", ConnectionMsg: "not connected"}
+	actual.Bridges.TcpConnectors[tcpConnectorName] = qdr.TcpEndpoint{Name: tcpConnectorName, OperStatus: "down", ConnectionMsg: "not connected"}
+	actual.Connectors[routerConnectorUp] = qdr.Connector{Name: routerConnectorUp, ConnectionStatus: "SUCCESS", ConnectionMsg: "Connection Opened: dir=out"}
+	actual.Connectors[routerConnectorDown] = qdr.Connector{Name: routerConnectorDown, ConnectionStatus: "CONNECTING", ConnectionMsg: "Connection failed: refused"}
+	actual.Connectors[routerConnectorUnknown] = qdr.Connector{Name: routerConnectorUnknown, ConnectionStatus: "unexpected", ConnectionMsg: "future router state"}
 	compiled := CompiledIntent{RealizationID: "realization", ResourceNames: map[routercontrol.ResourceID][]string{
-		"listener":  {listenerName},
-		"connector": {connectorName},
+		"listener":                 {listenerName},
+		"tcp-connector":            {tcpConnectorName},
+		"router-connector-up":      {routerConnectorUp},
+		"router-connector-down":    {routerConnectorDown},
+		"router-connector-unknown": {routerConnectorUnknown},
 	}}
 	observation := buildResourceObservation(routercontrol.ObservationSnapshot{Knowledge: routercontrol.KnowledgeComplete}, actual, compiled)
-	states := map[routercontrol.ResourceID]routercontrol.OperationalState{}
+	resources := map[routercontrol.ResourceID]routercontrol.LocalResourceObservation{}
 	for _, resource := range observation.Resources {
-		states[resource.ResourceID] = resource.Operational
+		resources[resource.ResourceID] = resource
 	}
-	if states["listener"] != routercontrol.OperationalUp {
-		t.Fatalf("listener status not read from local tcpListener: %#v", states)
+	if resources["listener"].Operational != routercontrol.OperationalUp {
+		t.Fatalf("listener status not read from local tcpListener: %#v", resources)
 	}
-	if states["connector"] != routercontrol.OperationalUnknown {
-		t.Fatalf("connector connectivity was incorrectly treated as matching: %#v", states)
+	if resources["tcp-connector"].Operational != routercontrol.OperationalUnknown {
+		t.Fatalf("TCP connector connectivity was incorrectly treated as matching: %#v", resources)
+	}
+	if resources["router-connector-up"].Operational != routercontrol.OperationalUp || resources["router-connector-up"].Message != "Connection Opened: dir=out" {
+		t.Fatalf("successful router connector not reported up: %#v", resources)
+	}
+	if resources["router-connector-down"].Operational != routercontrol.OperationalDown || resources["router-connector-down"].Message != "Connection failed: refused" {
+		t.Fatalf("connecting router connector not reported down: %#v", resources)
+	}
+	if resources["router-connector-unknown"].Operational != routercontrol.OperationalUnknown {
+		t.Fatalf("unknown router connector state was guessed: %#v", resources)
 	}
 }

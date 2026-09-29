@@ -80,7 +80,9 @@ func TestFailedReadIsUnknownNotEmpty(t *testing.T) {
 func TestReconcileIgnoresOperationalReadbackAndRouterDefaults(t *testing.T) {
 	desired := basicConfig()
 	name := ownedNamePrefix + "listener"
+	connectorName := ownedNamePrefix + "connector"
 	desired.Bridges.TcpListeners[name] = qdr.TcpEndpoint{Name: name, Port: "8080", Address: "orders"}
+	desired.Connectors[connectorName] = qdr.Connector{Name: connectorName, Host: "peer.example", Port: "55671"}
 	fake := &fakeLocalRouter{current: basicConfig()}
 	// Capture the QDR-like readback after Apply without deriving expectations
 	// from the verifier under test.
@@ -92,6 +94,10 @@ func TestReconcileIgnoresOperationalReadbackAndRouterDefaults(t *testing.T) {
 		listener.OperStatus = "up"
 		listener.ConnectionMsg = "listening"
 		applied.Bridges.TcpListeners[name] = listener
+		connector := applied.Connectors[connectorName]
+		connector.ConnectionStatus = "SUCCESS"
+		connector.ConnectionMsg = "Connection Opened: dir=out"
+		applied.Connectors[connectorName] = connector
 		fake.current = &applied
 	}
 	result := Reconcile(fake, CompiledIntent{Config: *desired})

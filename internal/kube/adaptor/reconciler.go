@@ -200,6 +200,8 @@ func normalizeManagedReadback(config, desired *qdr.RouterConfig) {
 	}
 	for name, connector := range config.Connectors {
 		wanted := desired.Connectors[name]
+		connector.ConnectionStatus = ""
+		connector.ConnectionMsg = ""
 		if wanted.Cost == 0 && connector.Cost == 1 {
 			connector.Cost = 0
 		}

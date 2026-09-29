@@ -626,6 +626,8 @@ type Connector struct {
 	LinkCapacity     int32  `json:"linkCapacity,omitempty"`
 	MaxFrameSize     int    `json:"maxFrameSize,omitempty"`
 	MaxSessionFrames int    `json:"maxSessionFrames,omitempty"`
+	ConnectionStatus string `json:"connectionStatus,omitempty"`
+	ConnectionMsg    string `json:"connectionMsg,omitempty"`
 }
 
 func (connector Connector) toRecord() Record {

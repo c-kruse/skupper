@@ -38,6 +38,17 @@ func buildResourceObservation(observation routercontrol.ObservationSnapshot, act
 	for _, id := range ids {
 		resource := routercontrol.LocalResourceObservation{ResourceID: routercontrol.ResourceID(id), RealizationID: compiled.RealizationID, Operational: routercontrol.OperationalUnknown}
 		for _, name := range compiled.ResourceNames[routercontrol.ResourceID(id)] {
+			if connector, found := actual.Connectors[name]; found {
+				switch strings.ToUpper(connector.ConnectionStatus) {
+				case "SUCCESS":
+					resource.Operational = routercontrol.OperationalUp
+				case "CONNECTING", "FAILED", "INITIALIZING", "CLOSING":
+					resource.Operational = routercontrol.OperationalDown
+				default:
+					resource.Operational = routercontrol.OperationalUnknown
+				}
+				resource.Message = connector.ConnectionMsg
+			}
 			if listener, found := actual.Bridges.TcpListeners[name]; found {
 				switch strings.ToLower(listener.OperStatus) {
 				case "up":

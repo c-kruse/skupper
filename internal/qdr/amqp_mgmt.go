@@ -1314,15 +1314,17 @@ func asConnectorStatus(record Record) ConnectorStatus {
 
 func asConnector(record Record) Connector {
 	return Connector{
-		Name:           record.AsString("name"),
-		Host:           record.AsString("host"),
-		Port:           record.AsString("port"),
-		RouteContainer: record.AsBool("routeContainer"),
-		VerifyHostname: record.AsBool("verifyHostname"),
-		SslProfile:     record.AsString("sslProfile"),
-		ProxyProfile:   record.AsString("proxyProfile"),
-		Cost:           int32(record.AsInt("cost")),
-		Role:           Role(record.AsString("role")),
+		Name:             record.AsString("name"),
+		Host:             record.AsString("host"),
+		Port:             record.AsString("port"),
+		RouteContainer:   record.AsBool("routeContainer"),
+		VerifyHostname:   record.AsBool("verifyHostname"),
+		SslProfile:       record.AsString("sslProfile"),
+		ProxyProfile:     record.AsString("proxyProfile"),
+		Cost:             int32(record.AsInt("cost")),
+		Role:             Role(record.AsString("role")),
+		ConnectionStatus: record.AsString("connectionStatus"),
+		ConnectionMsg:    record.AsString("connectionMsg"),
 	}
 }
 
