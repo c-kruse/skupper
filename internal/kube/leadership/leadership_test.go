@@ -58,6 +58,64 @@ func TestLeadershipLossFencesCancelsAndReturns(t *testing.T) {
 	}
 }
 
+func TestLeadershipLossDuringPrepareCannotReviveReadiness(t *testing.T) {
+	diagnostics := &Diagnostics{}
+	prepareStarted := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	serveCalled := make(chan struct{}, 1)
+	runner := func(_ context.Context, config leaderelection.LeaderElectionConfig) {
+		leaderCtx, cancel := context.WithCancel(context.Background())
+		callbackDone := make(chan struct{})
+		go func() {
+			defer close(callbackDone)
+			config.Callbacks.OnStartedLeading(leaderCtx)
+		}()
+		<-prepareStarted
+		cancel()
+		config.Callbacks.OnStoppedLeading()
+		close(releasePrepare)
+		<-callbackDone
+	}
+	err := Run(context.Background(), Config{
+		Lock:           unusedLock{},
+		CacheSync:      func(context.Context) bool { return true },
+		Diagnostics:    diagnostics,
+		ElectionRunner: runner,
+		Prepare: func(context.Context) error {
+			close(prepareStarted)
+			<-releasePrepare
+			return nil
+		},
+		Serve: func(context.Context, *Fence) error {
+			serveCalled <- struct{}{}
+			return nil
+		},
+	})
+	if !errors.Is(err, ErrLeadershipLost) {
+		t.Fatalf("Run error = %v, want leadership lost", err)
+	}
+	select {
+	case <-serveCalled:
+		t.Fatal("Serve started after leadership was lost during Prepare")
+	default:
+	}
+	state := diagnostics.State()
+	if state.Ready || state.Leader || !state.FormerLeader {
+		t.Fatalf("readiness revived after leadership loss: %#v", state)
+	}
+}
+
+func TestFenceCannotReopenAfterRevocation(t *testing.T) {
+	fence := NewFence()
+	if !fence.Open() {
+		t.Fatal("new fence did not open")
+	}
+	fence.Close()
+	if fence.Open() || !errors.Is(fence.Check(), ErrNotLeader) {
+		t.Fatal("revoked fence reopened")
+	}
+}
+
 func TestDiagnosticsSeparateLivenessStartupAndReadiness(t *testing.T) {
 	diagnostics := &Diagnostics{}
 	assertStatus(t, diagnostics.Handler(), "/livez", http.StatusOK)

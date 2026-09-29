@@ -13,11 +13,16 @@ import (
 	"golang.org/x/time/rate"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
-const maxEnrollmentBody = 24 * 1024
+const (
+	maxEnrollmentBody               = 24 * 1024
+	DefaultEnrollmentRequestTimeout = 15 * time.Second
+)
 
 type EnrollRequest struct {
 	CSR []byte `json:"csr"`
@@ -48,9 +53,7 @@ func EnrollmentHandler(enroller *Enroller) http.Handler {
 			return
 		}
 		var request EnrollRequest
-		decoder := json.NewDecoder(io.LimitReader(r.Body, maxEnrollmentBody+1))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil || len(request.CSR) > 16*1024 {
+		if r.ContentLength > maxEnrollmentBody || decodeJSONBody(r.Body, maxEnrollmentBody, &request) != nil || len(request.CSR) > 16*1024 {
 			http.Error(w, "invalid enrollment request", http.StatusBadRequest)
 			return
 		}
@@ -67,12 +70,16 @@ func EnrollmentHandler(enroller *Enroller) http.Handler {
 }
 
 type EnrollmentClient struct {
-	URL       string
-	TokenPath string
-	HTTP      *http.Client
+	URL            string
+	TokenPath      string
+	HTTP           *http.Client
+	RequestTimeout time.Duration
 }
 
 func NewEnrollmentClient(enrollmentURL, tokenPath, publicCAPath, serverName string) (*EnrollmentClient, error) {
+	if err := validateEnrollmentURL(enrollmentURL); err != nil {
+		return nil, err
+	}
 	if serverName == "" {
 		return nil, fmt.Errorf("router-control TLS server name is required")
 	}
@@ -86,12 +93,15 @@ func NewEnrollmentClient(enrollmentURL, tokenPath, publicCAPath, serverName stri
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: serverName}
-	return &EnrollmentClient{URL: enrollmentURL, TokenPath: tokenPath, HTTP: &http.Client{Transport: transport}}, nil
+	return &EnrollmentClient{URL: enrollmentURL, TokenPath: tokenPath, HTTP: &http.Client{Transport: transport}, RequestTimeout: DefaultEnrollmentRequestTimeout}, nil
 }
 
 // Enroll generates a fresh private key and keeps it in the returned in-memory
 // credential. Only the CSR is sent to the controller.
 func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error) {
+	if err := validateEnrollmentURL(c.URL); err != nil {
+		return nil, err
+	}
 	token, err := os.ReadFile(c.TokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("read projected enrollment token: %w", err)
@@ -114,9 +124,16 @@ func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	request.Header.Set("Content-Type", "application/json")
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
+	client := *http.DefaultClient
+	if c.HTTP != nil {
+		client = *c.HTTP
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return fmt.Errorf("enrollment redirects are not allowed")
+	}
+	client.Timeout = c.RequestTimeout
+	if client.Timeout <= 0 {
+		client.Timeout = DefaultEnrollmentRequestTimeout
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -128,9 +145,10 @@ func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error
 		return nil, fmt.Errorf("enrollment denied with HTTP status %d", response.StatusCode)
 	}
 	var enrolled EnrollResponse
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxEnrollmentBody+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&enrolled); err != nil {
+	if response.ContentLength > maxEnrollmentBody {
+		return nil, fmt.Errorf("enrollment response exceeds size limit")
+	}
+	if err := decodeJSONBody(response.Body, maxEnrollmentBody, &enrolled); err != nil {
 		return nil, fmt.Errorf("decode enrollment response: %w", err)
 	}
 	if len(enrolled.Certificate) < 2 {
@@ -161,4 +179,35 @@ func (c *EnrollmentClient) Enroll(ctx context.Context) (*ClientCredential, error
 
 func (c *ClientCredential) TLSCertificate() tls.Certificate {
 	return tls.Certificate{Certificate: c.Certificate, PrivateKey: c.PrivateKey, Leaf: c.Leaf}
+}
+
+func validateEnrollmentURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("enrollment URL must be an HTTPS URL without user information")
+	}
+	return nil
+}
+
+func decodeJSONBody(reader io.Reader, maximum int64, destination any) error {
+	data, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > maximum {
+		return fmt.Errorf("body exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("body contains trailing JSON value")
+		}
+		return fmt.Errorf("body contains trailing data: %w", err)
+	}
+	return nil
 }

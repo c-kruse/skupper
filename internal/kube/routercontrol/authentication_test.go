@@ -73,6 +73,107 @@ func TestSessionClosesAtCertificateExpiryAndLeadershipLoss(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsExpiredCertificateBeforeAuthorization(t *testing.T) {
+	fixture := newSessionFixture(t)
+	leaf := *fixture.leaf
+	leaf.NotAfter = testNow
+	called := false
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error {
+		called = true
+		return nil
+	}}
+	if _, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{&leaf, fixture.install.ClientCA}}}); err == nil || !strings.Contains(err.Error(), "not currently valid") {
+		t.Fatalf("expired certificate error = %v", err)
+	}
+	if called {
+		t.Fatal("authorization ran for an already-expired certificate")
+	}
+}
+
+func TestInitialAuthorizationHasHardDeadline(t *testing.T) {
+	fixture := newSessionFixture(t)
+	release := make(chan struct{})
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, AuthorizationTimeout: 20 * time.Millisecond, Authorize: func(context.Context, Identity) error {
+		<-release // Deliberately ignore context to model a stuck dependency.
+		return nil
+	}}
+	started := time.Now()
+	_, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}})
+	close(release)
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("hung initial authorization error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("hung initial authorization blocked for %v", elapsed)
+	}
+}
+
+func TestHungRecheckCannotSuppressExpiryOrLeadershipRevocation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		revoke func(*sessionFixture)
+	}{
+		{name: "certificate expiry", revoke: func(*sessionFixture) {}},
+		{name: "leadership loss", revoke: func(fixture *sessionFixture) {
+			fixture.gate.err = ErrNotLeader
+			close(fixture.gate.done)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSessionFixture(t)
+			var calls atomic.Int32
+			recheckStarted := make(chan struct{})
+			release := make(chan struct{})
+			leaf := *fixture.leaf
+			leaf.NotAfter = testNow.Add(40 * time.Millisecond)
+			authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, RecheckEvery: 5 * time.Millisecond, AuthorizationTimeout: time.Hour, Authorize: func(context.Context, Identity) error {
+				if calls.Add(1) > 1 {
+					close(recheckStarted)
+					<-release // Deliberately ignore context.
+				}
+				return nil
+			}}
+			session, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{&leaf, fixture.install.ClientCA}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-recheckStarted
+			test.revoke(fixture)
+			select {
+			case <-session.Context().Done():
+			case <-time.After(time.Second):
+				t.Fatal("hung authorization suppressed independent revocation")
+			}
+			close(release)
+		})
+	}
+}
+
+func TestHungRecheckRevokesSessionAtAuthorizationDeadline(t *testing.T) {
+	fixture := newSessionFixture(t)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, RecheckEvery: 5 * time.Millisecond, AuthorizationTimeout: 20 * time.Millisecond, Authorize: func(context.Context, Identity) error {
+		if calls.Add(1) > 1 {
+			<-release // Deliberately ignore context.
+		}
+		return nil
+	}}
+	session, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-session.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("session remained active after authorization deadline")
+	}
+	close(release)
+	if err := session.Check(); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("authorization deadline error = %v", err)
+	}
+}
+
 type sessionFixture struct {
 	client     *fake.Clientset
 	install    *Installation
@@ -101,8 +202,8 @@ func newSessionFixture(t *testing.T) *sessionFixture {
 func (f *sessionFixture) session(t *testing.T, lifetime time.Duration) *Session {
 	t.Helper()
 	leaf := *f.leaf
-	leaf.NotAfter = time.Now().Add(lifetime)
-	authenticator := &Authenticator{Kube: f.client, Installation: f.install, Gate: f.gate, RecheckEvery: 5 * time.Millisecond, Authorize: func(context.Context, Identity) error {
+	leaf.NotAfter = testNow.Add(lifetime)
+	authenticator := &Authenticator{Kube: f.client, Installation: f.install, Gate: f.gate, Now: func() time.Time { return testNow }, RecheckEvery: 5 * time.Millisecond, Authorize: func(context.Context, Identity) error {
 		if !f.authorized.Load() {
 			return ErrUnauthorized
 		}

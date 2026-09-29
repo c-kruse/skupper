@@ -93,6 +93,47 @@ func TestEnrollFailsClosedOnIdentityAPIError(t *testing.T) {
 	}
 }
 
+func TestEnrollRechecksLeadershipAfterSlowAuthorization(t *testing.T) {
+	_, _, enroller := enrollmentFixture(t)
+	gate := &testGate{done: make(chan struct{})}
+	authorizationStarted := make(chan struct{})
+	releaseAuthorization := make(chan struct{})
+	enroller.Gate = gate
+	enroller.Authorize = func(context.Context, Identity) error {
+		close(authorizationStarted)
+		<-releaseAuthorization
+		return nil
+	}
+	csr := testCSR(t, pkix.Name{}, nil)
+	result := make(chan error, 1)
+	go func() {
+		_, err := enroller.Enroll(context.Background(), testToken(testNow.Add(time.Hour)), csr)
+		result <- err
+	}()
+	<-authorizationStarted
+	gate.err = ErrNotLeader
+	close(gate.done)
+	close(releaseAuthorization)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "active leader") {
+		t.Fatalf("leadership-loss enrollment error = %v", err)
+	}
+}
+
+func TestEnrollRejectsDeploymentWithoutSiteControllerOwner(t *testing.T) {
+	client, _, enroller := enrollmentFixture(t)
+	deployment, err := client.AppsV1().Deployments("site-ns").Get(context.Background(), "skupper-router", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment.OwnerReferences[0].Controller = nil
+	if _, err := client.AppsV1().Deployments("site-ns").Update(context.Background(), deployment, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enroller.Enroll(context.Background(), testToken(testNow.Add(time.Hour)), testCSR(t, pkix.Name{}, nil)); err == nil || !strings.Contains(err.Error(), "Site controller owner") {
+		t.Fatalf("non-controller Site owner error = %v", err)
+	}
+}
+
 func TestInstallationCAContinuity(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	first, err := EnsureInstallation(context.Background(), client, "controller", "router-control", "controller/id", []string{"skupper-controller.controller.svc"}, testNow)

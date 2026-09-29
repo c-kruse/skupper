@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	protocol "github.com/skupperproject/skupper/internal/routercontrol"
@@ -14,12 +15,13 @@ import (
 )
 
 type Authenticator struct {
-	Kube         kubernetes.Interface
-	Installation *Installation
-	Authorize    AssignmentAuthorizer
-	Gate         LeaderGate
-	Now          func() time.Time
-	RecheckEvery time.Duration
+	Kube                 kubernetes.Interface
+	Installation         *Installation
+	Authorize            AssignmentAuthorizer
+	Gate                 LeaderGate
+	Now                  func() time.Time
+	RecheckEvery         time.Duration
+	AuthorizationTimeout time.Duration
 }
 
 // ServerTLSConfig rejects bearer-only clients and validates client-auth chains.
@@ -36,12 +38,13 @@ func (a *Authenticator) ServerTLSConfig() *tls.Config {
 }
 
 type Session struct {
-	Identity Identity
-	ctx      context.Context
-	cancel   context.CancelFunc
-	gate     LeaderGate
-	mu       sync.RWMutex
-	err      error
+	Identity   Identity
+	ctx        context.Context
+	cancel     context.CancelFunc
+	gate       LeaderGate
+	mu         sync.RWMutex
+	err        error
+	rechecking atomic.Bool
 }
 
 func (a *Authenticator) Session(parent context.Context, state tls.ConnectionState) (*Session, error) {
@@ -61,8 +64,21 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 	if identity.Installation != a.Installation.Name {
 		return nil, fmt.Errorf("%w: certificate belongs to another installation", ErrUnauthenticated)
 	}
-	if err := a.authorize(parent, identity); err != nil {
+	now := a.now()
+	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
+		return nil, fmt.Errorf("%w: client certificate is not currently valid", ErrUnauthenticated)
+	}
+	if err := a.authorizeWithin(parent, identity); err != nil {
 		return nil, err
+	}
+	if a.Gate != nil {
+		if err := a.Gate.Check(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrNotLeader, err)
+		}
+	}
+	now = a.now()
+	if !now.Before(leaf.NotAfter) {
+		return nil, fmt.Errorf("%w: client certificate expired during authorization", ErrUnauthenticated)
 	}
 	ctx, cancel := context.WithCancel(parent)
 	session := &Session{Identity: identity, ctx: ctx, cancel: cancel, gate: a.Gate}
@@ -70,12 +86,34 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 	if every <= 0 {
 		every = 5 * time.Second
 	}
-	now := time.Now()
-	if a.Now != nil {
-		now = a.Now()
-	}
 	go session.monitor(a, leaf.NotAfter.Sub(now), every)
 	return session, nil
+}
+
+func (a *Authenticator) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+func (a *Authenticator) authorizeWithin(ctx context.Context, identity Identity) error {
+	timeout := a.AuthorizationTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	authCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- a.authorize(authCtx, identity) }()
+	select {
+	case err := <-result:
+		return err
+	case <-authCtx.Done():
+		return fmt.Errorf("%w: live authorization was not confirmed: %v", ErrUnauthorized, authCtx.Err())
+	case <-gateDone(a.Gate):
+		return ErrNotLeader
+	}
 }
 
 func (a *Authenticator) authorize(ctx context.Context, expected Identity) error {
@@ -115,9 +153,13 @@ func (s *Session) monitor(a *Authenticator, untilExpiry, every time.Duration) {
 			s.fail(ErrNotLeader)
 			return
 		case <-ticker.C:
-			if err := a.authorize(s.ctx, s.Identity); err != nil {
-				s.fail(err)
-				return
+			if s.rechecking.CompareAndSwap(false, true) {
+				go func() {
+					defer s.rechecking.Store(false)
+					if err := a.authorizeWithin(s.ctx, s.Identity); err != nil {
+						s.fail(err)
+					}
+				}()
 			}
 		}
 	}

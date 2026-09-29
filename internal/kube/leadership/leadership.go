@@ -114,8 +114,15 @@ func Run(ctx context.Context, config Config) error {
 	defer stopElection()
 	fence := NewFence()
 	var mu sync.Mutex
+	var authorityMu sync.Mutex
 	var runErr error
 	becameLeader := false
+	revoke := func() {
+		authorityMu.Lock()
+		defer authorityMu.Unlock()
+		fence.Close()
+		diagnostics.update(func(state *State) { state.Ready = false })
+	}
 
 	runElection := config.ElectionRunner
 	if runElection == nil {
@@ -148,8 +155,7 @@ func Run(ctx context.Context, config Config) error {
 				diagnostics.update(func(state *State) { state.Leader = true })
 				go func() {
 					<-leaderCtx.Done()
-					fence.Close()
-					diagnostics.update(func(state *State) { state.Ready = false })
+					revoke()
 				}()
 				if config.Prepare != nil {
 					if err := config.Prepare(leaderCtx); err != nil {
@@ -164,8 +170,13 @@ func Run(ctx context.Context, config Config) error {
 						return
 					}
 				}
-				fence.Open()
+				authorityMu.Lock()
+				if leaderCtx.Err() != nil || !fence.Open() {
+					authorityMu.Unlock()
+					return
+				}
 				diagnostics.update(func(state *State) { state.Ready = true })
+				authorityMu.Unlock()
 				if err := config.Serve(leaderCtx, fence); leaderCtx.Err() == nil {
 					if err == nil {
 						err = fmt.Errorf("leader serving stopped unexpectedly")
@@ -174,13 +185,12 @@ func Run(ctx context.Context, config Config) error {
 					runErr = fmt.Errorf("leader serving failed: %w", err)
 					mu.Unlock()
 					diagnostics.update(func(state *State) { state.LastError = err.Error() })
-					fence.Close()
-					diagnostics.update(func(state *State) { state.Ready = false })
+					revoke()
 					stopElection()
 				}
 			},
 			OnStoppedLeading: func() {
-				fence.Close()
+				revoke()
 				mu.Lock()
 				led := becameLeader
 				mu.Unlock()
@@ -192,7 +202,7 @@ func Run(ctx context.Context, config Config) error {
 			},
 		},
 	})
-	fence.Close()
+	revoke()
 	diagnostics.update(func(state *State) { state.Leader = false; state.Ready = false })
 	mu.Lock()
 	err := runErr

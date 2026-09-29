@@ -38,10 +38,8 @@ type Enroller struct {
 }
 
 func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*Enrollment, error) {
-	if e.Gate != nil {
-		if err := e.Gate.Check(); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrNotLeader, err)
-		}
+	if err := e.checkGate(); err != nil {
+		return nil, err
 	}
 	if e.Kube == nil || e.Installation == nil || e.Authorize == nil {
 		return nil, fmt.Errorf("router-control enroller is not configured")
@@ -76,6 +74,9 @@ func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*En
 	if err := e.Authorize(ctx, identity); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
 	}
+	if err := e.checkGate(); err != nil {
+		return nil, err
+	}
 	csr, err := validateCSR(csrDER)
 	if err != nil {
 		return nil, err
@@ -109,7 +110,19 @@ func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*En
 	if err != nil {
 		return nil, fmt.Errorf("issue router-control client certificate: %w", err)
 	}
+	if err := e.checkGate(); err != nil {
+		return nil, err
+	}
 	return &Enrollment{Identity: identity, Certificate: [][]byte{der, e.Installation.ClientCA.Raw}, NotAfter: notAfter}, nil
+}
+
+func (e *Enroller) checkGate() error {
+	if e.Gate != nil {
+		if err := e.Gate.Check(); err != nil {
+			return fmt.Errorf("%w: %v", ErrNotLeader, err)
+		}
+	}
+	return nil
 }
 
 func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount string, serviceAccountUID types.UID, podName string, podUID types.UID) (Identity, error) {
