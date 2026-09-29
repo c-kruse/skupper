@@ -32,7 +32,7 @@ func (p StatusPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 }
 
 func statusProjectionEmpty(value StatusProjection) bool {
-	return len(value.Sites)+len(value.Listeners)+len(value.MultiKey)+len(value.Connectors)+len(value.Links)+len(value.Accesses)+len(value.Bindings)+len(value.Attached) == 0
+	return len(value.Sites)+len(value.Listeners)+len(value.MultiKey)+len(value.Connectors)+len(value.Links)+len(value.Accesses)+len(value.SecuredAccesses)+len(value.Certificates)+len(value.Bindings)+len(value.Attached) == 0
 }
 
 func copyStatusProjection(in StatusProjection) StatusProjection {
@@ -61,6 +61,12 @@ func copyStatusProjection(in StatusProjection) StatusProjection {
 	}
 	for _, value := range in.Accesses {
 		out.Accesses = append(out.Accesses, value.DeepCopy())
+	}
+	for _, value := range in.SecuredAccesses {
+		out.SecuredAccesses = append(out.SecuredAccesses, value.DeepCopy())
+	}
+	for _, value := range in.Certificates {
+		out.Certificates = append(out.Certificates, value.DeepCopy())
 	}
 	for _, value := range in.Bindings {
 		out.Bindings = append(out.Bindings, value.DeepCopy())

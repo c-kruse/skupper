@@ -195,6 +195,28 @@ func TestListenerServicePortsHaveValidDistinctNamesAndConflictsStayOutOfService(
 	}
 }
 
+func TestForeignListenerServiceIsDiagnosedWithoutBlockingOtherIntent(t *testing.T) {
+	snapshot := baseSnapshot()
+	foreign := listener("foreign", "foreign-listener", "foreign-key")
+	foreign.Spec.Host = "claimed"
+	valid := listener("valid", "valid-listener", "valid-key")
+	valid.Spec.Host = "available"
+	snapshot.Listeners = []*skupperv2alpha1.Listener{foreign, valid}
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: "claimed", Namespace: "site", UID: "foreign-service"}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.ListenerServices) != 1 || desired.ListenerServices[0].Name != "available" {
+		t.Fatalf("foreign Service blocked or was included with valid exposure: %#v", desired.ListenerServices)
+	}
+	if len(desired.Diagnostics) != 1 || desired.Diagnostics[0].Resource != foreign.UID || desired.Diagnostics[0].Reason != "ForeignService" {
+		t.Fatalf("foreign ownership was not isolated to affected Listener: %#v", desired.Diagnostics)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.ServiceListeners) != 2 {
+			t.Fatalf("foreign exposure prevented unrelated router intent: %#v", intent.ServiceListeners)
+		}
+	}
+}
+
 func TestWeightedMultiKeyListenerIsNotFlattened(t *testing.T) {
 	snapshot := baseSnapshot()
 	snapshot.MultiKeyListeners = []*skupperv2alpha1.MultiKeyListener{{ObjectMeta: metav1.ObjectMeta{Name: "weighted", Namespace: "site", UID: "weighted-uid"}, Spec: skupperv2alpha1.MultiKeyListenerSpec{Strategy: skupperv2alpha1.MultiKeyListenerStrategy{Weighted: &skupperv2alpha1.WeightedStrategySpec{RoutingKeys: map[string]uint{"a": 1, "b": 5}}}}}}

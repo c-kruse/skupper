@@ -1,0 +1,125 @@
+package reconcile
+
+import (
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	routev1 "github.com/openshift/api/route/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+)
+
+func TestAccessCompositionWaitsForRealParentUIDAndThenCreatesHAChildren(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Sites[0].Spec.LinkAccess = "loadbalancer"
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.GeneratedAccess == nil || desired.GeneratedAccess.Name != "skupper-router" {
+		t.Fatalf("default RouterAccess was not derived: %#v", desired.GeneratedAccess)
+	}
+	if len(desired.SecuredAccesses) != 0 {
+		t.Fatalf("children were derived with a fabricated parent UID: %#v", desired.SecuredAccesses)
+	}
+
+	access := desired.GeneratedAccess.DeepCopy()
+	access.UID = "access-uid"
+	snapshot.RouterAccesses = []*skupperv2alpha1.RouterAccess{access}
+	snapshot.Sites[0].Spec.HA = true
+	desired = (NamespaceDeriver{}).Derive(snapshot)
+	if got := []string{desired.SecuredAccesses[0].Name, desired.SecuredAccesses[1].Name}; !cmp.Equal(got, []string{"skupper-router", "skupper-router-2"}) {
+		t.Fatalf("unexpected HA SecuredAccess names: %v", got)
+	}
+	if desired.SecuredAccesses[0].Spec.Selector["skupper.io/group"] != "skupper-router" || desired.SecuredAccesses[1].Spec.Selector["skupper.io/group"] != "skupper-router-2" {
+		t.Fatalf("HA selectors do not isolate router groups: %#v", desired.SecuredAccesses)
+	}
+	for _, secured := range desired.SecuredAccesses {
+		if len(secured.OwnerReferences) != 1 || secured.OwnerReferences[0].UID != access.UID || secured.OwnerReferences[0].Controller == nil || !*secured.OwnerReferences[0].Controller {
+			t.Fatalf("generated SecuredAccess is not controller-owned by RouterAccess: %#v", secured.OwnerReferences)
+		}
+	}
+}
+
+func TestStandaloneSecuredAccessGetsServiceAndSharedCertificateUnion(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.DefaultAccessType = "loadbalancer"
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{
+		{ObjectMeta: metav1.ObjectMeta{Name: "one", Namespace: "site", UID: "one-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{Selector: map[string]string{"app": "one"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 443, TargetPort: 8443, Protocol: "TCP"}}, Certificate: "shared", Issuer: "skupper-site-ca"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "two", Namespace: "site", UID: "two-uid"}, Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "two"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "tls", Port: 444, TargetPort: 8444, Protocol: "TCP"}}, Certificate: "shared", Issuer: "skupper-site-ca"}},
+	}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.AccessServices) != 2 || desired.AccessServices[0].Spec.Type != "LoadBalancer" || desired.AccessServices[1].Spec.Type != "ClusterIP" {
+		t.Fatalf("standalone access Services were not derived using explicit/default types: %#v", desired.AccessServices)
+	}
+	var shared *skupperv2alpha1.Certificate
+	for _, certificate := range desired.Certificates {
+		if certificate.Name == "shared" {
+			shared = certificate
+		}
+	}
+	if shared == nil || len(shared.OwnerReferences) != 2 || !cmp.Equal(shared.Spec.Hosts, []string{"one", "one.site", "two", "two.site"}) {
+		t.Fatalf("shared certificate did not merge owners and hosts: %#v", shared)
+	}
+}
+
+func TestDisabledLinkAccessRetiresControlledDefaultFromEffectiveIntent(t *testing.T) {
+	snapshot := baseSnapshot()
+	access := defaultRouterAccess(snapshot.Sites[0], nil)
+	access.UID = "old-access"
+	snapshot.RouterAccesses = []*skupperv2alpha1.RouterAccess{access}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if desired.GeneratedAccess != nil {
+		t.Fatalf("disabled link access retained generated RouterAccess: %#v", desired.GeneratedAccess)
+	}
+	for _, intent := range desired.Intents {
+		if len(intent.RouterListeners) != 0 {
+			t.Fatalf("retiring default RouterAccess remained in published intent: %#v", intent.RouterListeners)
+		}
+	}
+}
+
+func TestHASecondaryConnectsToPrimaryThroughGeneratedInterRouterAccess(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.Sites[0].Spec.HA = true
+	snapshot.Sites[0].Spec.LinkAccess = "loadbalancer"
+	access := defaultRouterAccess(snapshot.Sites[0], nil)
+	access.UID = "access-uid"
+	snapshot.RouterAccesses = []*skupperv2alpha1.RouterAccess{access}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	primary := desired.Intents[RouterTarget{NamespaceUID: "namespace-uid", SiteUID: "site-uid", RouterGroup: "skupper-router"}]
+	secondary := desired.Intents[RouterTarget{NamespaceUID: "namespace-uid", SiteUID: "site-uid", RouterGroup: "skupper-router-2"}]
+	if len(primary.RouterConnections) != 0 {
+		t.Fatalf("primary unexpectedly connects back to itself: %#v", primary.RouterConnections)
+	}
+	if len(secondary.RouterConnections) != 1 {
+		t.Fatalf("secondary has no local inter-router connection: %#v", secondary.RouterConnections)
+	}
+	connection := secondary.RouterConnections[0]
+	if connection.Host != "skupper-router" || connection.Port != 55671 || connection.Role != "inter-router" || connection.TLS.Mode != "mutual" {
+		t.Fatalf("unexpected local inter-router connection: %#v", connection)
+	}
+	if len(secondary.CredentialBindings) != 1 || !cmp.Equal(secondary.CredentialBindings[0].Usages, []string{"client-auth", "server-auth", "trust"}) {
+		t.Fatalf("local listener/connector credentials were not merged: %#v", secondary.CredentialBindings)
+	}
+}
+
+func TestRouteEndpointProjectsToStandaloneSecuredAccessStatus(t *testing.T) {
+	snapshot := baseSnapshot()
+	snapshot.DefaultAccessType = "route"
+	secured := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: "site", UID: "secured-uid", Generation: 3}, Spec: skupperv2alpha1.SecuredAccessSpec{Selector: map[string]string{"app": "router"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "inter-router", Port: 55671, TargetPort: 55671, Protocol: "TCP"}}}}
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{secured}
+	controller, block := true, true
+	snapshot.Services = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: secured.Name, Namespace: "site", OwnerReferences: []metav1.OwnerReference{{UID: secured.UID, Controller: &controller, BlockOwnerDeletion: &block}}}}}
+	snapshot.Routes = []*routev1.Route{{ObjectMeta: metav1.ObjectMeta{Name: "external-inter-router", Namespace: "site"}, Status: routev1.RouteStatus{Ingress: []routev1.RouteIngress{{Host: "external.apps.example"}}}}}
+	desired := (NamespaceDeriver{}).Derive(snapshot)
+	if len(desired.Statuses.SecuredAccesses) != 1 {
+		t.Fatalf("SecuredAccess status was not projected: %#v", desired.Statuses.SecuredAccesses)
+	}
+	status := desired.Statuses.SecuredAccesses[0].Status
+	if diff := cmp.Diff([]skupperv2alpha1.Endpoint{{Name: "inter-router", Host: "external.apps.example", Port: "443"}}, status.Endpoints); diff != "" {
+		t.Fatalf("route endpoint mismatch (-want +got):\n%s", diff)
+	}
+	if !desired.Statuses.SecuredAccesses[0].IsReady() {
+		t.Fatalf("resolved standalone SecuredAccess is not Ready: %#v", status.Conditions)
+	}
+}

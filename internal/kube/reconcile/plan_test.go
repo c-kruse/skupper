@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -14,6 +15,12 @@ import (
 type emptyPlanner struct{}
 
 func (emptyPlanner) Plan(Snapshot, DesiredNamespace) Plan { return Plan{} }
+
+type publishPlanner struct{}
+
+func (publishPlanner) Plan(Snapshot, DesiredNamespace) Plan {
+	return Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return nil }}}}
+}
 
 func TestExecutorRetainsIndependentSuccessAndBlocksDependents(t *testing.T) {
 	var ran []string
@@ -51,6 +58,30 @@ func TestRouterPrerequisitesPrecedeCAAndWorkload(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dependencies["ensure-site-workloads"], []OperationID{"ensure-router-control-ca"}) {
 		t.Fatalf("workload does not wait for CA prerequisite: %#v", dependencies)
+	}
+}
+
+func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+	desired := DesiredNamespace{
+		Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"},
+		SiteUID:   site.UID,
+		Site:      site,
+		ListenerServices: []*corev1.Service{
+			{ObjectMeta: metav1.ObjectMeta{Name: "one"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "two"}},
+		},
+	}
+	plan := (WorkloadPlanner{Next: publishPlanner{}}).Plan(Snapshot{}, desired)
+	dependencies := map[OperationID][]OperationID{}
+	for _, operation := range plan.Operations {
+		dependencies[operation.ID] = operation.Dependencies
+	}
+	if !reflect.DeepEqual(dependencies["publish/skupper-router"], []OperationID{"ensure-site-workloads"}) {
+		t.Fatalf("publication is coupled to listener Service effects: %#v", dependencies["publish/skupper-router"])
+	}
+	if !reflect.DeepEqual(dependencies["ensure-listener-service/one"], []OperationID{"ensure-site-workloads"}) || !reflect.DeepEqual(dependencies["ensure-listener-service/two"], []OperationID{"ensure-site-workloads"}) {
+		t.Fatalf("listener Service operations are not independently planned: %#v", dependencies)
 	}
 }
 

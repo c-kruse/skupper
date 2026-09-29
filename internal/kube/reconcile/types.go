@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -77,10 +78,13 @@ type Snapshot struct {
 	Bindings          []*skupperv2alpha1.AttachedConnectorBinding
 	Pods              []*corev1.Pod
 	Services          []*corev1.Service
+	Routes            []*routev1.Route
 	Secrets           []*corev1.Secret
 	Observations      map[RouterTarget][]Observation
 	Allocations       AllocationState
 	Bootstrap         RouterControlBootstrap
+	DefaultAccessType string
+	ClusterHost       string
 	SourceNamespaces  map[string]types.UID
 }
 
@@ -129,6 +133,11 @@ type DesiredNamespace struct {
 	ServiceAccount   *corev1.ServiceAccount
 	Role             *rbacv1.Role
 	RoleBinding      *rbacv1.RoleBinding
+	GeneratedAccess  *skupperv2alpha1.RouterAccess
+	SecuredAccesses  []*skupperv2alpha1.SecuredAccess
+	Certificates     []*skupperv2alpha1.Certificate
+	AccessServices   []*corev1.Service
+	AccessRoutes     []*routev1.Route
 	Statuses         StatusProjection
 }
 
@@ -141,6 +150,8 @@ type StatusProjection struct {
 	Connectors       []*skupperv2alpha1.Connector
 	Links            []*skupperv2alpha1.Link
 	Accesses         []*skupperv2alpha1.RouterAccess
+	SecuredAccesses  []*skupperv2alpha1.SecuredAccess
+	Certificates     []*skupperv2alpha1.Certificate
 	Bindings         []*skupperv2alpha1.AttachedConnectorBinding
 	Attached         []*skupperv2alpha1.AttachedConnector
 }

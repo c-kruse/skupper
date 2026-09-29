@@ -13,7 +13,8 @@ type SiteEnsurer interface {
 	EnsureRouterPrerequisites(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding) error
 	EnsureRouterControlCA(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, RouterControlBootstrap) error
 	EnsureSite(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string, RouterControlBootstrap) error
-	EnsureListenerServices(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []*corev1.Service) error
+	EnsureListenerService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service) error
+	RetireListenerServices(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string) error
 }
 
 type WorkloadPlanner struct {
@@ -38,7 +39,6 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 	const prerequisitesID OperationID = "ensure-router-prerequisites"
 	const caID OperationID = "ensure-router-control-ca"
 	const ensureID OperationID = "ensure-site-workloads"
-	const listenersID OperationID = "ensure-listener-services"
 	caDependencies := []OperationID(nil)
 	for _, operation := range plan.Operations {
 		if operation.ID == allocationID {
@@ -67,16 +67,20 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 	plan.Operations = append(plan.Operations, Operation{ID: ensureID, Kind: "EnsureSiteWorkloads", Dependencies: []OperationID{caID}, Run: func(ctx context.Context) error {
 		return p.Ensurer.EnsureSite(ctx, namespace, site, groups, bootstrap)
 	}})
-	services := make([]*corev1.Service, 0, len(desired.ListenerServices))
+	serviceNames := make([]string, 0, len(desired.ListenerServices))
 	for _, service := range desired.ListenerServices {
-		services = append(services, service.DeepCopy())
+		service := service.DeepCopy()
+		serviceNames = append(serviceNames, service.Name)
+		plan.Operations = append(plan.Operations, Operation{ID: OperationID("ensure-listener-service/" + service.Name), Kind: "EnsureListenerService", Dependencies: []OperationID{ensureID}, Run: func(ctx context.Context) error {
+			return p.Ensurer.EnsureListenerService(ctx, namespace, site, service)
+		}})
 	}
-	plan.Operations = append(plan.Operations, Operation{ID: listenersID, Kind: "EnsureListenerServices", Dependencies: []OperationID{ensureID}, Run: func(ctx context.Context) error {
-		return p.Ensurer.EnsureListenerServices(ctx, namespace, site, services)
+	plan.Operations = append(plan.Operations, Operation{ID: "retire-listener-services", Kind: "RetireListenerServices", Dependencies: []OperationID{ensureID}, Run: func(ctx context.Context) error {
+		return p.Ensurer.RetireListenerServices(ctx, namespace, site, serviceNames)
 	}})
 	for i := range plan.Operations {
 		if plan.Operations[i].Kind == "PublishRouterIntent" {
-			plan.Operations[i].Dependencies = append(plan.Operations[i].Dependencies, listenersID)
+			plan.Operations[i].Dependencies = append(plan.Operations[i].Dependencies, ensureID)
 		}
 	}
 	return plan

@@ -53,7 +53,12 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	if active.Spec.HA {
 		groups = append(groups, "skupper-router-2")
 	}
-	reserved := reservedPorts(snapshot.RouterAccesses)
+	routerAccesses := deriveAccessComposition(snapshot, &desired, active, groups)
+	reserved := reservedPorts(routerAccesses)
+	existingServices := map[string]*corev1.Service{}
+	for _, service := range snapshot.Services {
+		existingServices[service.Name] = service
+	}
 	listenerServices := map[string]*corev1.Service{}
 	servicePortOwners := map[string]types.UID{}
 	servicePortConflicts := map[string]bool{}
@@ -88,6 +93,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			TLS:         serverTLSIntent(listener.Spec.TlsCredentials, false),
 		})
 		if listener.Spec.Host != "" {
+			if current := existingServices[listener.Spec.Host]; current != nil && (current.Annotations[controlledAnnotation] != "true" || !ownedBy(current.OwnerReferences, active.UID)) {
+				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "ForeignService", Message: fmt.Sprintf("Service %s/%s is not owned by the active Site", snapshot.Namespace.Name, listener.Spec.Host)})
+				continue
+			}
 			service := listenerServices[listener.Spec.Host]
 			if service == nil {
 				controller, block := true, true
@@ -113,6 +122,10 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		}
 		listeners = append(listeners, routercontrol.ServiceListener{ID: resourceID(listener.UID, "listener"), RoutingKeys: routingKeys(listener), Host: "0.0.0.0", Port: uint16(port), Protocol: routercontrol.ProtocolTCP, Observer: listener.Spec.Observer, TLS: serverTLSIntent(listener.Spec.TlsCredentials, listener.Spec.RequireClientCert)})
 		if listener.Spec.Host != "" {
+			if current := existingServices[listener.Spec.Host]; current != nil && (current.Annotations[controlledAnnotation] != "true" || !ownedBy(current.OwnerReferences, active.UID)) {
+				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: listener.UID, Reason: "ForeignService", Message: fmt.Sprintf("Service %s/%s is not owned by the active Site", snapshot.Namespace.Name, listener.Spec.Host)})
+				continue
+			}
 			service := listenerServices[listener.Spec.Host]
 			if service == nil {
 				controller, block := true, true
@@ -139,7 +152,7 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 		}
 	}
 	access := make([]routercontrol.RouterListener, 0)
-	for _, routerAccess := range sortedRouterAccess(snapshot.RouterAccesses) {
+	for _, routerAccess := range sortedRouterAccess(routerAccesses) {
 		for _, role := range routerAccess.Spec.Roles {
 			port := int(role.GetPort())
 			if port < 1 || port > 65535 {
@@ -153,9 +166,26 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 			access = append(access, routercontrol.RouterListener{ID: resourceID(routerAccess.UID, "access/"+role.Name), Role: role.Name, Port: uint16(port), Host: host, TLS: serverTLSIntent(routerAccess.Spec.TlsCredentials, true)})
 		}
 	}
-	for _, group := range groups {
+	for groupIndex, group := range groups {
 		target := RouterTarget{NamespaceUID: string(snapshot.Namespace.UID), SiteUID: string(active.UID), RouterGroup: group}
-		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: settings, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: append([]routercontrol.RouterConnection(nil), connections...), RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, connections, access)}
+		groupConnections := append([]routercontrol.RouterConnection(nil), connections...)
+		if groupIndex > 0 {
+			for _, routerAccess := range sortedRouterAccess(routerAccesses) {
+				role := routerAccess.FindRole("inter-router")
+				if role == nil {
+					continue
+				}
+				port := int(role.GetPort())
+				if port < 1 || port > 65535 {
+					break
+				}
+				for _, previousGroup := range groups[:groupIndex] {
+					groupConnections = append(groupConnections, routercontrol.RouterConnection{ID: resourceID(routerAccess.UID, "local/"+previousGroup+"/inter-router"), Host: previousGroup, Port: uint16(port), Role: "inter-router", Cost: 1, TLS: clientTLSIntent(routerAccess.Spec.TlsCredentials, true, false)})
+				}
+				break
+			}
+		}
+		desired.Intents[target] = routercontrol.RouterIntent{SchemaVersion: routercontrol.SchemaVersion, Target: target, Settings: settings, ServiceListeners: copyListeners(listeners), ServiceConnectors: copyConnectors(connectors, target), RouterConnections: groupConnections, RouterListeners: append([]routercontrol.RouterListener(nil), access...), CredentialBindings: credentialBindings(listeners, connectors, groupConnections, access)}
 	}
 	for _, service := range listenerServices {
 		if len(service.Spec.Ports) == 0 {

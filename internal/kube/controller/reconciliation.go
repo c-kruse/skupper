@@ -11,15 +11,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/skupperproject/skupper/internal/kube/certificates"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
 	sitelabels "github.com/skupperproject/skupper/internal/kube/site/labels"
@@ -55,9 +58,12 @@ type NamespaceController struct {
 	sizing                 SiteSizing
 	labelling              siteresources.Labelling
 	controllerNamespace    string
+	defaultAccessType      string
+	clusterHost            string
 	sizingUpdater          func(string, *corev1.ConfigMap) error
 	labellingUpdater       func(string, *corev1.ConfigMap) error
 	configurationConfigMap cache.SharedIndexInformer
+	configurationHandlers  []cache.ResourceEventHandlerRegistration
 	bootstrapMu            sync.RWMutex
 	leaderRunning          bool
 	synced                 atomic.Bool
@@ -76,6 +82,8 @@ type NamespaceControllerOptions struct {
 	DisableSecurityContext bool
 	Sizing                 SiteSizing
 	Labelling              siteresources.Labelling
+	DefaultAccessType      string
+	ClusterHost            string
 }
 
 type namespaceInformers struct {
@@ -92,6 +100,7 @@ type namespaceInformers struct {
 	routerAccesses    cache.SharedIndexInformer
 	certificates      cache.SharedIndexInformer
 	securedAccesses   cache.SharedIndexInformer
+	routes            cache.SharedIndexInformer
 	attached          cache.SharedIndexInformer
 	bindings          cache.SharedIndexInformer
 }
@@ -115,7 +124,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	} else if options.WatchNamespace != "" {
 		controllerNamespace = options.WatchNamespace
 	}
-	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace}
+	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace, defaultAccessType: options.DefaultAccessType, clusterHost: options.ClusterHost}
 	if c.sizing == nil {
 		registry := sizing.NewRegistry()
 		c.sizing = registry
@@ -134,8 +143,16 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
+	if routeClient := clients.GetRouteClient(); routeClient != nil {
+		c.informers.routes = cache.NewSharedIndexInformer(&cache.ListWatch{ListFunc: func(listOptions metav1.ListOptions) (runtime.Object, error) {
+			return routeClient.Routes(options.WatchNamespace).List(context.Background(), listOptions)
+		}, WatchFunc: func(listOptions metav1.ListOptions) (watch.Interface, error) {
+			return routeClient.Routes(options.WatchNamespace).Watch(context.Background(), listOptions)
+		}}, &routev1.Route{}, 5*time.Minute, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	}
 	planner := reconcile.PublicationPlanner{Allocations: c, Publisher: publisher, Validator: c.verifySite}
-	workloads := reconcile.WorkloadPlanner{Next: planner, Ensurer: c}
+	accesses := reconcile.AccessPlanner{Next: planner, Ensurer: c}
+	workloads := reconcile.WorkloadPlanner{Next: accesses, Ensurer: c}
 	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}})
 	if err := c.registerInvalidations(); err != nil {
 		return nil, err
@@ -149,6 +166,9 @@ func (c *NamespaceController) StartCaches(ctx context.Context) {
 		c.configurationFactory.Start(ctx.Done())
 	}
 	c.skupperFactory.Start(ctx.Done())
+	if c.informers.routes != nil {
+		go c.informers.routes.Run(ctx.Done())
+	}
 }
 
 func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
@@ -169,12 +189,12 @@ func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
 			return fmt.Errorf("Skupper informer %v did not synchronize", kind)
 		}
 	}
-	for _, value := range c.informers.configMaps.GetStore().List() {
-		c.updateConfiguration(value.(*corev1.ConfigMap), false)
+	if c.informers.routes != nil && !cache.WaitForCacheSync(ctx.Done(), c.informers.routes.HasSynced) {
+		return fmt.Errorf("Route informer did not synchronize")
 	}
-	if c.configurationConfigMap != nil {
-		for _, value := range c.configurationConfigMap.GetStore().List() {
-			c.updateConfiguration(value.(*corev1.ConfigMap), false)
+	for _, handler := range c.configurationHandlers {
+		if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
+			return fmt.Errorf("configuration event handler did not synchronize")
 		}
 	}
 	c.synced.Store(true)
@@ -271,18 +291,25 @@ func (c *NamespaceController) RunLeader(ctx context.Context) error {
 
 func (c *NamespaceController) registerInvalidations() error {
 	local := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.services, c.informers.secrets, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses}
+	if c.informers.routes != nil {
+		local = append(local, c.informers.routes)
+	}
 	for _, informer := range local {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.invalidateObject, UpdateFunc: func(old, current interface{}) { c.invalidateObject(old); c.invalidateObject(current) }, DeleteFunc: c.invalidateObject}); err != nil {
 			return err
 		}
 	}
-	if _, err := c.informers.configMaps.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted}); err != nil {
+	handler, err := c.informers.configMaps.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted})
+	if err != nil {
 		return err
 	}
+	c.configurationHandlers = append(c.configurationHandlers, handler)
 	if c.configurationConfigMap != nil {
-		if _, err := c.configurationConfigMap.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted}); err != nil {
+		handler, err := c.configurationConfigMap.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.configurationAdded, UpdateFunc: c.configurationUpdated, DeleteFunc: c.configurationDeleted})
+		if err != nil {
 			return err
 		}
+		c.configurationHandlers = append(c.configurationHandlers, handler)
 	}
 	if _, err := c.informers.attached.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: c.invalidateAttached, UpdateFunc: func(old, current interface{}) { c.invalidateAttached(old); c.invalidateAttached(current) }, DeleteFunc: c.invalidateAttached}); err != nil {
 		return err
@@ -432,7 +459,11 @@ func eventObject(value interface{}) interface{} {
 }
 
 func (c *NamespaceController) enqueueAll() {
-	for _, informer := range []cache.SharedIndexInformer{c.informers.configMaps, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses, c.informers.attached, c.informers.bindings} {
+	informers := []cache.SharedIndexInformer{c.informers.configMaps, c.informers.sites, c.informers.listeners, c.informers.multiKeyListeners, c.informers.connectors, c.informers.links, c.informers.routerAccesses, c.informers.certificates, c.informers.securedAccesses, c.informers.attached, c.informers.bindings}
+	if c.informers.routes != nil {
+		informers = append(informers, c.informers.routes)
+	}
+	for _, informer := range informers {
 		for _, value := range informer.GetStore().List() {
 			c.invalidateObject(value)
 		}
@@ -460,6 +491,17 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	bootstrap.PublicCA = append([]byte(nil), c.bootstrap.PublicCA...)
 	c.bootstrapMu.RUnlock()
 	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Bootstrap: bootstrap}
+	if c.informers.routes != nil {
+		snapshot.Routes = listNamespace[*routev1.Route](c.informers.routes, namespace)
+	}
+	snapshot.ClusterHost = c.clusterHost
+	if c.defaultAccessType != "" {
+		snapshot.DefaultAccessType = c.defaultAccessType
+	} else if c.clients.GetRouteClient() != nil {
+		snapshot.DefaultAccessType = "route"
+	} else {
+		snapshot.DefaultAccessType = "loadbalancer"
+	}
 	snapshot.Allocations, err = c.allocations(namespace, ns.UID, snapshot.RouterAccesses)
 	if err != nil {
 		return reconcile.Snapshot{}, fmt.Errorf("collect allocations: %w", err)
@@ -795,38 +837,55 @@ func (c *NamespaceController) EnsureSite(ctx context.Context, namespace reconcil
 }
 
 func (c *NamespaceController) EnsureListenerServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, services []*corev1.Service) error {
+	names := make([]string, 0, len(services))
+	for _, service := range services {
+		names = append(names, service.Name)
+		if err := c.EnsureListenerService(ctx, namespace, site, service); err != nil {
+			return err
+		}
+	}
+	return c.RetireListenerServices(ctx, namespace, site, names)
+}
+
+func (c *NamespaceController) EnsureListenerService(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired *corev1.Service) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	client := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
+	current, err := client.Get(ctx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if _, err := client.Create(ctx, desired, metav1.CreateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+		return nil
+	}
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if !ownedByUID(current.OwnerReferences, site.UID) || current.Annotations["internal.skupper.io/controlled"] != "true" {
+		return fmt.Errorf("Listener Service %s/%s is not owned by Site UID %s", namespace.Name, desired.Name, site.UID)
+	}
+	desired.ResourceVersion = current.ResourceVersion
+	desired.Spec.ClusterIP = current.Spec.ClusterIP
+	desired.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
+	desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
+	desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
+	if reflect.DeepEqual(current.Labels, desired.Labels) && reflect.DeepEqual(current.Annotations, desired.Annotations) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Spec, desired.Spec) {
+		return nil
+	}
+	_, err = client.Update(ctx, desired, metav1.UpdateOptions{})
+	return classifyWriteError(err)
+}
+
+func (c *NamespaceController) RetireListenerServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, names []string) error {
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
 	}
 	desiredNames := map[string]bool{}
-	client := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
-	for _, desired := range services {
-		desiredNames[desired.Name] = true
-		current, err := client.Get(ctx, desired.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			if _, err := client.Create(ctx, desired, metav1.CreateOptions{}); err != nil {
-				return classifyWriteError(err)
-			}
-			continue
-		}
-		if err != nil {
-			return classifyWriteError(err)
-		}
-		if !ownedByUID(current.OwnerReferences, site.UID) || current.Annotations["internal.skupper.io/controlled"] != "true" {
-			return fmt.Errorf("Listener Service %s/%s is not owned by Site UID %s", namespace.Name, desired.Name, site.UID)
-		}
-		desired.ResourceVersion = current.ResourceVersion
-		desired.Spec.ClusterIP = current.Spec.ClusterIP
-		desired.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
-		desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
-		desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
-		if reflect.DeepEqual(current.Labels, desired.Labels) && reflect.DeepEqual(current.Annotations, desired.Annotations) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Spec, desired.Spec) {
-			continue
-		}
-		if _, err := client.Update(ctx, desired, metav1.UpdateOptions{}); err != nil {
-			return classifyWriteError(err)
-		}
+	for _, name := range names {
+		desiredNames[name] = true
 	}
+	client := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
 	current, err := client.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/listener=true"})
 	if err != nil {
 		return classifyWriteError(err)
@@ -841,6 +900,361 @@ func (c *NamespaceController) EnsureListenerServices(ctx context.Context, namesp
 		}
 	}
 	return nil
+}
+
+func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, generated *skupperv2alpha1.RouterAccess, secured []*skupperv2alpha1.SecuredAccess, desiredCertificates []*skupperv2alpha1.Certificate, services []*corev1.Service, routes []*routev1.Route, snapshotCertificates []*skupperv2alpha1.Certificate, _ []*corev1.Secret, evaluationTime time.Time) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	if err := c.ensureGeneratedRouterAccess(ctx, namespace, site, generated); err != nil {
+		return fmt.Errorf("ensure generated RouterAccess: %w", err)
+	}
+	if err := c.ensureSecuredAccesses(ctx, namespace, site, secured); err != nil {
+		return fmt.Errorf("ensure generated SecuredAccess resources: %w", err)
+	}
+	if err := c.ensureAccessServices(ctx, namespace, site, services); err != nil {
+		return fmt.Errorf("ensure SecuredAccess Services: %w", err)
+	}
+	if err := c.ensureAccessRoutes(ctx, namespace, site, routes); err != nil {
+		return fmt.Errorf("ensure SecuredAccess Routes: %w", err)
+	}
+	applied, err := c.ensureCertificates(ctx, namespace, site, desiredCertificates)
+	if err != nil {
+		return fmt.Errorf("ensure generated Certificates: %w", err)
+	}
+	byName := map[string]*skupperv2alpha1.Certificate{}
+	for _, certificate := range snapshotCertificates {
+		byName[certificate.Name] = certificate
+	}
+	for _, certificate := range applied {
+		byName[certificate.Name] = certificate
+	}
+	availableSecrets := map[string]*corev1.Secret{}
+	for _, signing := range []bool{true, false} {
+		names := make([]string, 0, len(byName))
+		for name, certificate := range byName {
+			if certificate.Spec.Signing == signing {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			secret, err := c.ensureCertificateSecret(ctx, namespace, site, byName[name], availableSecrets[byName[name].Spec.Ca], evaluationTime)
+			if err != nil {
+				return fmt.Errorf("ensure Certificate Secret %s: %w", name, err)
+			}
+			availableSecrets[name] = secret
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*routev1.Route) error {
+	api := c.clients.GetRouteClient()
+	if api == nil {
+		if len(desired) > 0 {
+			return fmt.Errorf("Route access is not available")
+		}
+		return nil
+	}
+	routes := api.Routes(namespace.Name)
+	names := map[string]bool{}
+	for _, value := range desired {
+		names[value.Name] = true
+		current, err := routes.Get(ctx, value.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			if _, err = routes.Create(ctx, value, metav1.CreateOptions{}); err != nil {
+				return classifyWriteError(err)
+			}
+			continue
+		}
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		ownerUID := value.OwnerReferences[0].UID
+		if current.Annotations["internal.skupper.io/controlled"] != "true" || !hasOwnerUID(current.OwnerReferences, ownerUID) {
+			return fmt.Errorf("Route %s/%s is not owned by SecuredAccess UID %s", namespace.Name, value.Name, ownerUID)
+		}
+		if value.Spec.Host == "" {
+			value.Spec.Host = current.Spec.Host
+		}
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.Annotations, value.Annotations) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) {
+			continue
+		}
+		value.ResourceVersion = current.ResourceVersion
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if _, err = routes.Update(ctx, value, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	current, err := routes.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	for i := range current.Items {
+		value := &current.Items[i]
+		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" {
+			continue
+		}
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := routes.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired *skupperv2alpha1.RouterAccess) error {
+	api := c.clients.GetSkupperClient().SkupperV2alpha1().RouterAccesses(namespace.Name)
+	current, err := api.Get(ctx, "skupper-router", metav1.GetOptions{})
+	if desired == nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if current.Annotations["internal.skupper.io/controlled"] != "true" || !ownedByUID(current.OwnerReferences, site.UID) {
+			return nil
+		}
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		return classifyWriteError(api.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}))
+	}
+	if apierrors.IsNotFound(err) {
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		_, err = api.Create(ctx, desired, metav1.CreateOptions{})
+		return classifyWriteError(err)
+	}
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	if current.Annotations["internal.skupper.io/controlled"] != "true" || !ownedByUID(current.OwnerReferences, site.UID) {
+		return fmt.Errorf("default RouterAccess %s/%s is not owned by Site UID %s", namespace.Name, current.Name, site.UID)
+	}
+	if reflect.DeepEqual(current.Spec, desired.Spec) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Annotations, desired.Annotations) {
+		return nil
+	}
+	desired.ResourceVersion = current.ResourceVersion
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
+	_, err = api.Update(ctx, desired, metav1.UpdateOptions{})
+	return classifyWriteError(err)
+}
+
+func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*skupperv2alpha1.SecuredAccess) error {
+	api := c.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name)
+	names := map[string]bool{}
+	for _, value := range desired {
+		names[value.Name] = true
+		current, err := api.Get(ctx, value.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			if _, err = api.Create(ctx, value, metav1.CreateOptions{}); err != nil {
+				return classifyWriteError(err)
+			}
+			continue
+		}
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		ownerUID := value.OwnerReferences[0].UID
+		if current.Annotations["internal.skupper.io/controlled"] != "true" || !hasOwnerUID(current.OwnerReferences, ownerUID) {
+			return fmt.Errorf("generated SecuredAccess %s/%s is not owned by RouterAccess UID %s", namespace.Name, value.Name, ownerUID)
+		}
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
+			continue
+		}
+		value.ResourceVersion = current.ResourceVersion
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if _, err = api.Update(ctx, value, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	current, err := api.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	for i := range current.Items {
+		value := &current.Items[i]
+		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" || value.Annotations["internal.skupper.io/routeraccess"] == "" {
+			continue
+		}
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*corev1.Service) error {
+	api := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
+	names := map[string]bool{}
+	for _, value := range desired {
+		names[value.Name] = true
+		current, err := api.Get(ctx, value.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return err
+			}
+			if _, err = api.Create(ctx, value, metav1.CreateOptions{}); err != nil {
+				return classifyWriteError(err)
+			}
+			continue
+		}
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		ownerUID := value.OwnerReferences[0].UID
+		if current.Annotations["internal.skupper.io/controlled"] != "true" || !hasOwnerUID(current.OwnerReferences, ownerUID) {
+			return fmt.Errorf("SecuredAccess Service %s/%s is not owned by SecuredAccess UID %s", namespace.Name, value.Name, ownerUID)
+		}
+		value.ResourceVersion = current.ResourceVersion
+		value.Spec.ClusterIP = current.Spec.ClusterIP
+		value.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
+		value.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
+		value.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.Annotations, value.Annotations) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) {
+			continue
+		}
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if _, err = api.Update(ctx, value, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	current, err := api.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
+	if err != nil {
+		return classifyWriteError(err)
+	}
+	for i := range current.Items {
+		value := &current.Items[i]
+		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" {
+			continue
+		}
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return err
+		}
+		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyWriteError(err)
+		}
+	}
+	return nil
+}
+
+func (c *NamespaceController) ensureCertificates(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*skupperv2alpha1.Certificate) ([]*skupperv2alpha1.Certificate, error) {
+	api := c.clients.GetSkupperClient().SkupperV2alpha1().Certificates(namespace.Name)
+	result := make([]*skupperv2alpha1.Certificate, 0, len(desired))
+	for _, value := range desired {
+		current, err := api.Get(ctx, value.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			if err := c.verifySite(ctx, namespace, site); err != nil {
+				return nil, err
+			}
+			created, err := api.Create(ctx, value, metav1.CreateOptions{})
+			if err != nil {
+				return nil, classifyWriteError(err)
+			}
+			result = append(result, created)
+			continue
+		}
+		if err != nil {
+			return nil, classifyWriteError(err)
+		}
+		if current.Annotations["internal.skupper.io/controlled"] != "true" && current.Labels["internal.skupper.io/certificate"] != "true" {
+			return nil, fmt.Errorf("Certificate %s/%s exists but is not controlled by Skupper", namespace.Name, value.Name)
+		}
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
+			result = append(result, current)
+			continue
+		}
+		value.ResourceVersion = current.ResourceVersion
+		if err := c.verifySite(ctx, namespace, site); err != nil {
+			return nil, err
+		}
+		updated, err := api.Update(ctx, value, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, classifyWriteError(err)
+		}
+		result = append(result, updated)
+	}
+	return result, nil
+}
+
+func (c *NamespaceController) ensureCertificateSecret(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, expected *skupperv2alpha1.Certificate, issuer *corev1.Secret, evaluationTime time.Time) (*corev1.Secret, error) {
+	certificate, err := c.clients.GetSkupperClient().SkupperV2alpha1().Certificates(namespace.Name).Get(ctx, expected.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, classifyWriteError(err)
+	}
+	if certificate.UID != expected.UID || certificate.ResourceVersion != expected.ResourceVersion || certificate.Generation != expected.Generation || certificate.DeletionTimestamp != nil {
+		return nil, reconcile.SupersededError{Reason: "Certificate changed or is deleting"}
+	}
+	secrets := c.clients.GetKubeClient().CoreV1().Secrets(namespace.Name)
+	current, err := secrets.Get(ctx, certificate.Name, metav1.GetOptions{})
+	if err == nil && certificates.SecretCorrectAt(certificate, current, evaluationTime) {
+		return current, nil
+	}
+	missing := apierrors.IsNotFound(err)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, classifyWriteError(err)
+	}
+	if !missing && !certificates.SecretControlled(current) {
+		return nil, fmt.Errorf("certificate Secret %s/%s exists but is not controlled by Skupper", namespace.Name, certificate.Name)
+	}
+	if !certificate.Spec.Signing && issuer == nil {
+		issuer, err = secrets.Get(ctx, certificate.Spec.Ca, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("get issuer Secret %s/%s: %w", namespace.Name, certificate.Spec.Ca, err)
+		}
+	}
+	desired, err := certificates.GenerateSecret(certificate, issuer)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return nil, err
+	}
+	if missing {
+		created, err := secrets.Create(ctx, desired, metav1.CreateOptions{})
+		return created, classifyWriteError(err)
+	}
+	desired.ResourceVersion = current.ResourceVersion
+	desired.Labels = current.Labels
+	for key, value := range current.Annotations {
+		if _, exists := desired.Annotations[key]; !exists {
+			desired.Annotations[key] = value
+		}
+	}
+	updated, err := secrets.Update(ctx, desired, metav1.UpdateOptions{})
+	return updated, classifyWriteError(err)
+}
+
+func hasOwnerUID(owners []metav1.OwnerReference, uid types.UID) bool {
+	for _, owner := range owners {
+		if owner.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *NamespaceController) ApplyStatuses(ctx context.Context, namespace reconcile.NamespaceIdentity, projection reconcile.StatusProjection) error {
@@ -916,6 +1330,32 @@ func (c *NamespaceController) ApplyStatuses(ctx context.Context, namespace recon
 		}
 		desired.ResourceVersion = current.ResourceVersion
 		if _, err := api.RouterAccesses(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.SecuredAccesses {
+		current, err := api.SecuredAccesses(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.SecuredAccesses(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
+			return classifyWriteError(err)
+		}
+	}
+	for _, desired := range projection.Certificates {
+		current, err := api.Certificates(namespace.Name).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if err := check(desired.UID, desired.ResourceVersion, desired.Generation, current); err != nil {
+			return err
+		}
+		desired.ResourceVersion = current.ResourceVersion
+		if _, err := api.Certificates(namespace.Name).UpdateStatus(ctx, desired, metav1.UpdateOptions{}); err != nil {
 			return classifyWriteError(err)
 		}
 	}

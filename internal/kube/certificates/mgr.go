@@ -361,29 +361,15 @@ func (m *CertificateManagerImpl) updateSecret(key string, certificate *skupperv2
 }
 
 func (m *CertificateManagerImpl) generateSecret(certificate *skupperv2alpha1.Certificate) (*corev1.Secret, error) {
-	var secret *corev1.Secret
-	var err error
-	if certificate.Spec.Signing {
-		secret, err = certs.GenerateSecret(certificate.Name, certificate.Spec.Subject, nil, 0, nil)
-		if err != nil {
-			return secret, err
-		}
-	} else {
-		expiration := time.Hour * 24 * 365 * 5 // TODO: make this configurable (through controller setting or field on certificate?)
+	var issuer *corev1.Secret
+	if !certificate.Spec.Signing {
 		caKey := fmt.Sprintf("%s/%s", certificate.Namespace, certificate.Spec.Ca)
-		ca, ok := m.secrets[caKey]
-		if !ok {
-			// TODO: no CA exists yet, set error on certificate status
+		issuer = m.secrets[caKey]
+		if issuer == nil {
 			return nil, fmt.Errorf("CA %q not found", caKey)
 		}
-		// TODO: handle server and client roles properly
-		secret, err = certs.GenerateSecret(certificate.Name, certificate.Spec.Subject, certificate.Spec.Hosts, expiration, ca)
-		if err != nil {
-			return nil, err
-		}
 	}
-	secret.ObjectMeta.OwnerReferences = ownerReferences(certificate)
-	return secret, nil
+	return GenerateSecret(certificate, issuer)
 }
 
 func (m *CertificateManagerImpl) createSecret(key string, certificate *skupperv2alpha1.Certificate) error {
@@ -443,6 +429,34 @@ func (m *CertificateManagerImpl) checkSecret(key string, secret *corev1.Secret) 
 }
 
 func isSecretCorrect(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret) bool {
+	return SecretCorrectAt(certificate, secret, time.Now())
+}
+
+// GenerateSecret creates certificate material for a Certificate. Issuer is
+// required for non-signing certificates and is ignored for signing CAs.
+func GenerateSecret(certificate *skupperv2alpha1.Certificate, issuer *corev1.Secret) (*corev1.Secret, error) {
+	var secret *corev1.Secret
+	var err error
+	if certificate.Spec.Signing {
+		secret, err = certs.GenerateSecret(certificate.Name, certificate.Spec.Subject, nil, 0, nil)
+	} else {
+		if issuer == nil {
+			return nil, fmt.Errorf("CA %q not found", certificate.Spec.Ca)
+		}
+		secret, err = certs.GenerateSecret(certificate.Name, certificate.Spec.Subject, certificate.Spec.Hosts, 5*365*24*time.Hour, issuer)
+	}
+	if err != nil {
+		return nil, err
+	}
+	secret.Namespace = certificate.Namespace
+	secret.OwnerReferences = ownerReferences(certificate)
+	secret.Annotations = map[string]string{"internal.skupper.io/controlled": "true", "internal.skupper.io/certificate": "true", "internal.skupper.io/hosts": strings.Join(certificate.Spec.Hosts, ",")}
+	return secret, nil
+}
+
+// SecretCorrectAt checks certificate identity, names and expiry at one fixed
+// reconciliation time so a pass cannot disagree with itself at a boundary.
+func SecretCorrectAt(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret, now time.Time) bool {
 	data, ok := secret.Data["tls.crt"]
 	if !ok {
 		return false
@@ -452,7 +466,7 @@ func isSecretCorrect(certificate *skupperv2alpha1.Certificate, secret *corev1.Se
 		slog.Error("Bad certificate secret", slog.String("key", certificate.Key()), slog.Any("error", err))
 		return false
 	}
-	if time.Now().After(cert.NotAfter) {
+	if now.After(cert.NotAfter) {
 		slog.Info("Certificate has expired", slog.String("key", certificate.Key()))
 		return false
 	}
@@ -484,6 +498,10 @@ func isSecretCorrect(certificate *skupperv2alpha1.Certificate, secret *corev1.Se
 func isSecretControlled(secret *corev1.Secret) bool {
 	return hasControlledAnnotation(secret) || hasCertificateOwner(secret)
 }
+
+// SecretControlled reports whether an existing Secret is eligible for
+// certificate reconciliation. Foreign Secrets are never overwritten.
+func SecretControlled(secret *corev1.Secret) bool { return isSecretControlled(secret) }
 
 func hasControlledAnnotation(secret *corev1.Secret) bool {
 	if secret.Annotations == nil {

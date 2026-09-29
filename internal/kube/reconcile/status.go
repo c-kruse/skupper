@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/skupperproject/skupper/internal/kube/certificates"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
@@ -44,21 +46,6 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 		evaluationTime = time.Unix(1, 0).UTC()
 	}
 	now := metav1.NewTime(evaluationTime)
-
-	site := desired.Site.DeepCopy()
-	beforeSite := site.Status.DeepCopy()
-	site.ClearLegacyNetworkStatus()
-	configured := configuredState(desired.Diagnostics, site.UID)
-	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, site.Generation, now)
-	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, allTargetsApplied(evidence), site.Generation, now)
-	required := []string{skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING}
-	if site.Spec.LinkAccess != "" && site.Spec.LinkAccess != "none" {
-		required = append(required, skupperv2alpha1.CONDITION_TYPE_RESOLVED)
-	}
-	aggregateStatus(&site.Status.Status, site.Generation, now, required...)
-	if !reflect.DeepEqual(*beforeSite, site.Status) {
-		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
-	}
 
 	for _, current := range sortedListeners(snapshot.Listeners) {
 		updated := current.DeepCopy()
@@ -162,6 +149,112 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 			desired.Statuses.Links = append(desired.Statuses.Links, updated)
 		}
 	}
+	serviceByName := map[string]*corev1.Service{}
+	for _, service := range snapshot.Services {
+		serviceByName[service.Name] = service
+	}
+	routeByName := map[string]string{}
+	for _, route := range snapshot.Routes {
+		for _, ingress := range route.Status.Ingress {
+			if ingress.Host != "" {
+				routeByName[route.Name] = ingress.Host
+				break
+			}
+		}
+	}
+	secretByName := map[string]*corev1.Secret{}
+	for _, secret := range snapshot.Secrets {
+		secretByName[secret.Name] = secret
+	}
+	secured := append([]*skupperv2alpha1.SecuredAccess(nil), snapshot.SecuredAccesses...)
+	sort.Slice(secured, func(i, j int) bool { return secured[i].Name < secured[j].Name })
+	securedEndpoints := map[string][]skupperv2alpha1.Endpoint{}
+	for _, current := range secured {
+		updated := current.DeepCopy()
+		before := updated.Status.DeepCopy()
+		service := serviceByName[updated.Name]
+		configured := pendingState("Exposure Service has not been realized")
+		resolved := pendingState("No external endpoint has been resolved")
+		var endpoints []skupperv2alpha1.Endpoint
+		if service != nil && ownedBy(service.OwnerReferences, updated.UID) {
+			configured = skupperv2alpha1.ReadyCondition()
+			accessType := updated.Spec.AccessType
+			if accessType == "" {
+				accessType = snapshot.DefaultAccessType
+			}
+			switch accessType {
+			case "local":
+				for _, port := range updated.Spec.Ports {
+					endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: updated.Name + "." + updated.Namespace, Port: strconv.Itoa(port.Port)})
+				}
+			case "loadbalancer":
+				for _, ingress := range service.Status.LoadBalancer.Ingress {
+					host := ingress.IP
+					if host == "" {
+						host = ingress.Hostname
+					}
+					if host == "" {
+						continue
+					}
+					for _, port := range service.Spec.Ports {
+						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: strconv.Itoa(int(port.Port))})
+					}
+				}
+			case "route":
+				for _, port := range updated.Spec.Ports {
+					if host := routeByName[updated.Name+"-"+port.Name]; host != "" {
+						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: host, Port: "443"})
+					}
+				}
+			case "nodeport":
+				if snapshot.ClusterHost == "" {
+					resolved = unknownState("Cluster host is not configured for nodeport access")
+					break
+				}
+				for _, port := range service.Spec.Ports {
+					if port.NodePort != 0 {
+						endpoints = append(endpoints, skupperv2alpha1.Endpoint{Name: port.Name, Host: snapshot.ClusterHost, Port: strconv.Itoa(int(port.NodePort))})
+					}
+				}
+			default:
+				resolved = unknownState("Endpoint observation for this access type is unavailable")
+			}
+			if len(endpoints) > 0 {
+				resolved = skupperv2alpha1.ReadyCondition()
+			}
+		}
+		sort.Slice(endpoints, func(i, j int) bool {
+			if endpoints[i].Name != endpoints[j].Name {
+				return endpoints[i].Name < endpoints[j].Name
+			}
+			if endpoints[i].Host != endpoints[j].Host {
+				return endpoints[i].Host < endpoints[j].Host
+			}
+			return endpoints[i].Port < endpoints[j].Port
+		})
+		updated.Status.Endpoints = endpoints
+		securedEndpoints[updated.Name] = endpoints
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configured, updated.Generation, now)
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RESOLVED, resolved, updated.Generation, now)
+		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RESOLVED)
+		if !reflect.DeepEqual(*before, updated.Status) {
+			desired.Statuses.SecuredAccesses = append(desired.Statuses.SecuredAccesses, updated)
+		}
+	}
+	certificatesInOrder := append([]*skupperv2alpha1.Certificate(nil), snapshot.Certificates...)
+	sort.Slice(certificatesInOrder, func(i, j int) bool { return certificatesInOrder[i].Name < certificatesInOrder[j].Name })
+	for _, current := range certificatesInOrder {
+		updated := current.DeepCopy()
+		before := updated.Status.DeepCopy()
+		state := pendingState("Certificate Secret has not been realized")
+		if secret := secretByName[updated.Name]; secret != nil && certificates.SecretCorrectAt(updated, secret, evaluationTime) {
+			state = skupperv2alpha1.ReadyCondition()
+		}
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_READY, state, updated.Generation, now)
+		if !reflect.DeepEqual(*before, updated.Status) {
+			desired.Statuses.Certificates = append(desired.Statuses.Certificates, updated)
+		}
+	}
 	for _, current := range sortedRouterAccess(snapshot.RouterAccesses) {
 		updated := current.DeepCopy()
 		before := updated.Status.DeepCopy()
@@ -170,10 +263,56 @@ func deriveStatuses(snapshot Snapshot, desired *DesiredNamespace) {
 			ids = append(ids, resourceID(updated.UID, "access/"+role.Name))
 		}
 		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, combineStates(configuredState(desired.Diagnostics, updated.UID), resourcesApplied(evidence, ids)), updated.Generation, now)
+		var endpoints []skupperv2alpha1.Endpoint
+		for _, access := range secured {
+			if access.Annotations["internal.skupper.io/routeraccess"] != updated.Name {
+				continue
+			}
+			group := access.Spec.Selector["skupper.io/group"]
+			for _, endpoint := range securedEndpoints[access.Name] {
+				endpoint.Group = group
+				endpoints = append(endpoints, endpoint)
+			}
+		}
+		updated.Status.Endpoints = endpoints
+		resolved := pendingState("No external endpoint has been resolved")
+		if len(endpoints) > 0 {
+			resolved = skupperv2alpha1.ReadyCondition()
+		}
+		setStatusCondition(&updated.Status.Status, skupperv2alpha1.CONDITION_TYPE_RESOLVED, resolved, updated.Generation, now)
 		aggregateStatus(&updated.Status.Status, updated.Generation, now, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RESOLVED)
 		if !reflect.DeepEqual(*before, updated.Status) {
 			desired.Statuses.Accesses = append(desired.Statuses.Accesses, updated)
 		}
+	}
+
+	site := desired.Site.DeepCopy()
+	beforeSite := site.Status.DeepCopy()
+	site.ClearLegacyNetworkStatus()
+	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_CONFIGURED, configuredState(desired.Diagnostics, site.UID), site.Generation, now)
+	setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_RUNNING, allTargetsApplied(evidence), site.Generation, now)
+	required := []string{skupperv2alpha1.CONDITION_TYPE_CONFIGURED, skupperv2alpha1.CONDITION_TYPE_RUNNING}
+	if site.Spec.LinkAccess != "" && site.Spec.LinkAccess != "none" {
+		required = append(required, skupperv2alpha1.CONDITION_TYPE_RESOLVED)
+		resolvedGroups := map[string]bool{}
+		for _, access := range secured {
+			if access.Annotations["internal.skupper.io/routeraccess"] == "skupper-router" && len(securedEndpoints[access.Name]) > 0 {
+				resolvedGroups[access.Spec.Selector["skupper.io/group"]] = true
+			}
+		}
+		resolved := len(resolvedGroups) > 0
+		if site.Spec.HA {
+			resolved = resolvedGroups["skupper-router"] && resolvedGroups["skupper-router-2"]
+		}
+		state := pendingState("Router access endpoint has not been resolved")
+		if resolved {
+			state = skupperv2alpha1.ReadyCondition()
+		}
+		setStatusCondition(&site.Status.Status, skupperv2alpha1.CONDITION_TYPE_RESOLVED, state, site.Generation, now)
+	}
+	aggregateStatus(&site.Status.Status, site.Generation, now, required...)
+	if !reflect.DeepEqual(*beforeSite, site.Status) {
+		desired.Statuses.Sites = append(desired.Statuses.Sites, site)
 	}
 }
 
