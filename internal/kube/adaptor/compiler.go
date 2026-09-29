@@ -63,12 +63,14 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		bindings[binding.ID] = binding
 	}
 
-	credentialProfile := func(owner routercontrol.ResourceID, tls routercontrol.TLSIntent, usage string) (string, error) {
+	credentialProfile := func(owner routercontrol.ResourceID, tls routercontrol.TLSIntent, usages ...string) (string, error) {
 		if tls.Mode == "" || tls.Mode == routercontrol.TLSModeDisabled {
 			return "", nil
 		}
-		if !slices.Contains(bindings[tls.CredentialBinding].Usages, usage) {
-			return "", fmt.Errorf("credential %q for resource %q lacks %q usage", tls.CredentialBinding, owner, usage)
+		for _, usage := range usages {
+			if !slices.Contains(bindings[tls.CredentialBinding].Usages, usage) {
+				return "", fmt.Errorf("credential %q for resource %q lacks %q usage", tls.CredentialBinding, owner, usage)
+			}
 		}
 		realization, found := credentials[tls.CredentialBinding]
 		if !found {
@@ -81,7 +83,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		return profile.Name, nil
 	}
 	for _, resource := range intent.RouterConnections {
-		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageClientAuth)
+		usages := []string{routercontrol.CredentialUsageTrust}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			usages = append(usages, routercontrol.CredentialUsageClientAuth)
+		}
+		profile, err := credentialProfile(resource.ID, resource.TLS, usages...)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
@@ -105,7 +111,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		result.ResourceNames[resource.ID] = []string{name}
 	}
 	for _, resource := range intent.RouterListeners {
-		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageServerAuth)
+		usages := []string{routercontrol.CredentialUsageServerAuth}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			usages = append(usages, routercontrol.CredentialUsageTrust)
+		}
+		profile, err := credentialProfile(resource.ID, resource.TLS, usages...)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
@@ -117,7 +127,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		if resource.Protocol != routercontrol.ProtocolTCP {
 			return CompiledIntent{}, fmt.Errorf("service listener %q protocol %q is unsupported", resource.ID, resource.Protocol)
 		}
-		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageServerAuth)
+		usages := []string{routercontrol.CredentialUsageServerAuth}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			usages = append(usages, routercontrol.CredentialUsageTrust)
+		}
+		profile, err := credentialProfile(resource.ID, resource.TLS, usages...)
 		if err != nil {
 			return CompiledIntent{}, err
 		}
@@ -140,7 +154,11 @@ func CompileIntent(intent routercontrol.RouterIntent, credentials map[routercont
 		if resource.Protocol != routercontrol.ProtocolTCP {
 			return CompiledIntent{}, fmt.Errorf("service connector %q protocol %q is unsupported", resource.ID, resource.Protocol)
 		}
-		profile, err := credentialProfile(resource.ID, resource.TLS, routercontrol.CredentialUsageClientAuth)
+		usages := []string{routercontrol.CredentialUsageTrust}
+		if resource.TLS.Mode == routercontrol.TLSModeMutual {
+			usages = append(usages, routercontrol.CredentialUsageClientAuth)
+		}
+		profile, err := credentialProfile(resource.ID, resource.TLS, usages...)
 		if err != nil {
 			return CompiledIntent{}, err
 		}

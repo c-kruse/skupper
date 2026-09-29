@@ -94,7 +94,7 @@ func TestSharedProxyAndTLSCredentialUsesExactV1Contract(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test"}, Data: data}
 	client := fake.NewSimpleClientset(secret)
 	provider := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), t.TempDir())
-	binding := routercontrol.CredentialBinding{ID: "shared", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "shared", Usages: []string{routercontrol.CredentialUsageClientAuth, routercontrol.CredentialUsageProxy}}
+	binding := routercontrol.CredentialBinding{ID: "shared", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "shared", Usages: []string{routercontrol.CredentialUsageTrust, routercontrol.CredentialUsageClientAuth, routercontrol.CredentialUsageProxy}}
 	got, err := provider.Resolve(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
@@ -110,5 +110,22 @@ func TestSharedProxyAndTLSCredentialUsesExactV1Contract(t *testing.T) {
 	binding.Usages = []string{"client"}
 	if _, err := provider.Resolve(context.Background(), binding); err == nil {
 		t.Fatal("alternate usage spelling was accepted")
+	}
+}
+
+func TestTrustOnlyCredentialRequiresCAWithoutClientKeypair(t *testing.T) {
+	data := credentialData(t, 4)
+	delete(data, "tls.crt")
+	delete(data, "tls.key")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "test"}, Data: data}
+	client := fake.NewSimpleClientset(secret)
+	provider := NewSecretCredentialProvider(client.CoreV1().Secrets("test"), t.TempDir())
+	binding := routercontrol.CredentialBinding{ID: "trust", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "trust", Usages: []string{routercontrol.CredentialUsageTrust}}
+	got, err := provider.Resolve(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Profile.CaCertFile == "" || got.Profile.CertFile != "" || got.Profile.PrivateKeyFile != "" {
+		t.Fatalf("trust-only credential required or emitted a client keypair: %#v", got.Profile)
 	}
 }

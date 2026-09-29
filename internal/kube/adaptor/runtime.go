@@ -203,6 +203,7 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 	engine := Engine{Router: r.router, Credentials: r.credentials, RouterIncarnation: sessionIncarnation, StartupConfig: r.startup}
 	var accepted *routercontrol.IntentUpdate
 	var compiled CompiledIntent
+	var compiledValid bool
 	var sample uint64
 	for {
 		select {
@@ -219,7 +220,10 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 		case <-reconcile.C:
 			if accepted != nil {
 				report, next := engine.RealizeDetailed(ctx, session.SessionID(), accepted.Sequence, accepted.Intent, accepted.Digest)
-				compiled = next
+				if next.RealizationID != "" {
+					compiled = next
+					compiledValid = true
+				}
 				if report.RouterIncarnation != sessionIncarnation {
 					return errors.New("local router management reconnected; start a fresh control session")
 				}
@@ -236,7 +240,11 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 				var observation routercontrol.ObservationSnapshot
 				switch item.event.Refresh.Scope {
 				case routercontrol.ObservationScopeResources:
-					observation = r.router.ObserveResources(session.SessionID(), sessionIncarnation, sample, compiled, item.event.Refresh.RequestID)
+					if !compiledValid {
+						observation = routercontrol.ObservationSnapshot{Scope: routercontrol.ObservationScopeResources, SampleSequence: sample, RefreshRequestID: item.event.Refresh.RequestID, Knowledge: routercontrol.KnowledgeUnknown, RouterIncarnation: sessionIncarnation, Reason: "accepted intent has no compiled realization"}
+					} else {
+						observation = r.router.ObserveResources(session.SessionID(), sessionIncarnation, sample, compiled, item.event.Refresh.RequestID)
+					}
 				case routercontrol.ObservationScopeAddresses:
 					if accepted == nil {
 						observation = routercontrol.ObservationSnapshot{Scope: routercontrol.ObservationScopeAddresses, SampleSequence: sample, RefreshRequestID: item.event.Refresh.RequestID, Knowledge: routercontrol.KnowledgeUnknown, RouterIncarnation: sessionIncarnation, Reason: "intent unavailable"}
@@ -263,8 +271,13 @@ func (r *controlRuntime) runSession(ctx context.Context, session *routercontrol.
 					return err
 				}
 				accepted = item.event.Intent
+				r.router.InvalidateRouterVerification()
+				compiledValid = false
 				report, next := engine.RealizeDetailed(ctx, session.SessionID(), accepted.Sequence, accepted.Intent, accepted.Digest)
-				compiled = next
+				if next.RealizationID != "" {
+					compiled = next
+					compiledValid = true
+				}
 				if report.RouterIncarnation != sessionIncarnation {
 					return errors.New("local router management reconnected; start a fresh control session")
 				}

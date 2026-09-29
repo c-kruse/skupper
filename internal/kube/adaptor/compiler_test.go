@@ -18,7 +18,7 @@ func TestCompileIntentIncludesTypedSettingsProxyAndStableCredentialIdentity(t *t
 		},
 		CredentialBindings: []routercontrol.CredentialBinding{
 			{ID: "proxy", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "proxy", Usages: []string{routercontrol.CredentialUsageProxy}},
-			{ID: "tls", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "tls", Usages: []string{routercontrol.CredentialUsageClientAuth}},
+			{ID: "tls", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "tls", Usages: []string{routercontrol.CredentialUsageTrust}},
 		},
 		RouterConnections: []routercontrol.RouterConnection{{
 			ID: "link", Host: "peer", Port: 55671, Role: "inter-router",

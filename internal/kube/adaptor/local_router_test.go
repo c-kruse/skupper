@@ -11,6 +11,11 @@ func TestManagementRecoveryInvalidatesRouterRealization(t *testing.T) {
 	if _, verified := router.CurrentRouterIncarnation(); !verified {
 		t.Fatal("fresh realization was not verified")
 	}
+	router.InvalidateRouterVerification()
+	if _, verified := router.CurrentRouterIncarnation(); verified {
+		t.Fatal("new accepted intent retained old realization evidence")
+	}
+	router.MarkRouterVerified()
 	router.managementFailed()
 	if got, verified := router.CurrentRouterIncarnation(); got != first || verified {
 		t.Fatalf("management failure left stale evidence current: %q verified=%v", got, verified)

@@ -43,7 +43,7 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 		return CredentialRealization{}, fmt.Errorf("credential %q uses unsupported provider %q", binding.ID, binding.Provider)
 	}
 	for _, usage := range binding.Usages {
-		if usage != routercontrol.CredentialUsageServerAuth && usage != routercontrol.CredentialUsageClientAuth && usage != routercontrol.CredentialUsageProxy {
+		if usage != routercontrol.CredentialUsageTrust && usage != routercontrol.CredentialUsageServerAuth && usage != routercontrol.CredentialUsageClientAuth && usage != routercontrol.CredentialUsageProxy {
 			return CredentialRealization{}, fmt.Errorf("credential %q uses unsupported usage %q", binding.ID, usage)
 		}
 	}
@@ -56,7 +56,7 @@ func (p *SecretCredentialProvider) Resolve(ctx context.Context, binding routerco
 	}
 	ca, cert, key := secret.Data["ca.crt"], secret.Data["tls.crt"], secret.Data["tls.key"]
 	isProxy := slices.Contains(binding.Usages, routercontrol.CredentialUsageProxy)
-	isTLS := slices.Contains(binding.Usages, routercontrol.CredentialUsageClientAuth) || slices.Contains(binding.Usages, routercontrol.CredentialUsageServerAuth)
+	isTLS := slices.Contains(binding.Usages, routercontrol.CredentialUsageTrust) || slices.Contains(binding.Usages, routercontrol.CredentialUsageClientAuth) || slices.Contains(binding.Usages, routercontrol.CredentialUsageServerAuth)
 	if isProxy && (len(secret.Data["host"]) == 0 || len(secret.Data["port"]) == 0) {
 		return CredentialRealization{}, fmt.Errorf("proxy credential %q requires host and port", binding.ID)
 	}

@@ -56,6 +56,12 @@ func (r *AMQPLocalRouter) MarkRouterVerified() string {
 	return r.incarnation
 }
 
+func (r *AMQPLocalRouter) InvalidateRouterVerification() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.verified = ""
+}
+
 func (r *AMQPLocalRouter) Read() (*qdr.RouterConfig, error) {
 	agent, err := r.Pool.Get()
 	if err != nil {

@@ -17,7 +17,7 @@ func (r *rotatingResolver) Resolve(context.Context, routercontrol.CredentialBind
 
 func credentialIntent() routercontrol.RouterIntent {
 	intent := testIntent()
-	intent.CredentialBindings = []routercontrol.CredentialBinding{{ID: "traffic", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageClientAuth}}}
+	intent.CredentialBindings = []routercontrol.CredentialBinding{{ID: "traffic", Provider: routercontrol.CredentialProviderKubernetesSecret, Reference: "traffic", Usages: []string{routercontrol.CredentialUsageTrust}}}
 	intent.ServiceConnectors[0].TLS = routercontrol.TLSIntent{Mode: routercontrol.TLSModeClient, CredentialBinding: "traffic", VerifyHostname: true}
 	return intent
 }
