@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 )
 
@@ -247,7 +248,7 @@ func (s *ClientSession) SendApplication(report ApplicationReport) error {
 	if err := validateApplicationReport(report); err != nil {
 		return err
 	}
-	return s.sendReport(&ClientMessage{ApplicationReport: &report})
+	return s.sendReport(ReportApplication, report)
 }
 
 func (s *ClientSession) SendObservation(observation ObservationSnapshot) error {
@@ -255,7 +256,7 @@ func (s *ClientSession) SendObservation(observation ObservationSnapshot) error {
 	if err := ValidateObservation(observation); err != nil {
 		return err
 	}
-	return s.sendReport(&ClientMessage{Observation: &observation})
+	return s.sendReport(ReportObservation, observation)
 }
 
 func (s *ClientSession) SendHeartbeat() error {
@@ -274,15 +275,36 @@ func (s *ClientSession) send(message *ClientMessage) error {
 	return s.stream.Send(message)
 }
 
-func (s *ClientSession) sendReport(message *ClientMessage) error {
-	encoded, err := json.Marshal(message)
+func (s *ClientSession) sendReport(kind ReportKind, report any) error {
+	encoded, err := json.Marshal(report)
 	if err != nil {
 		return err
 	}
 	if len(encoded) > s.limits.MaxReportBytes {
 		return fmt.Errorf("client report is %d bytes, limit is %d", len(encoded), s.limits.MaxReportBytes)
 	}
-	return s.send(message)
+	chunkCount := (len(encoded) + s.limits.ChunkBytes - 1) / s.limits.ChunkBytes
+	if chunkCount == 0 {
+		chunkCount = 1
+	}
+	if chunkCount > s.limits.MaxChunks {
+		return errors.New("client report exceeds chunk limit")
+	}
+	transactionID := uuid.NewString()
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if err := s.stream.Send(&ClientMessage{ReportBegin: &ReportBegin{SessionID: s.id, TransactionID: transactionID, Kind: kind, EncodedSize: uint64(len(encoded)), ChunkCount: uint32(chunkCount)}}); err != nil {
+		return err
+	}
+	for i := 0; i < chunkCount; i++ {
+		start := i * s.limits.ChunkBytes
+		end := min(start+s.limits.ChunkBytes, len(encoded))
+		chunk := append([]byte(nil), encoded[start:end]...)
+		if err := s.stream.Send(&ClientMessage{ReportChunk: &ReportChunk{SessionID: s.id, TransactionID: transactionID, Index: uint32(i), Data: chunk}}); err != nil {
+			return err
+		}
+	}
+	return s.stream.Send(&ClientMessage{ReportEnd: &ReportEnd{SessionID: s.id, TransactionID: transactionID, Complete: true}})
 }
 
 func validateServerUnion(message *ServerMessage) error {

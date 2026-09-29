@@ -256,6 +256,34 @@ type ResyncRequested struct {
 	Reason    string `json:"reason"`
 }
 
+type ReportKind string
+
+const (
+	ReportApplication ReportKind = "application"
+	ReportObservation ReportKind = "observation"
+)
+
+type ReportBegin struct {
+	SessionID     string     `json:"sessionId"`
+	TransactionID string     `json:"transactionId"`
+	Kind          ReportKind `json:"kind"`
+	EncodedSize   uint64     `json:"encodedSize"`
+	ChunkCount    uint32     `json:"chunkCount"`
+}
+
+type ReportChunk struct {
+	SessionID     string `json:"sessionId"`
+	TransactionID string `json:"transactionId"`
+	Index         uint32 `json:"index"`
+	Data          []byte `json:"data"`
+}
+
+type ReportEnd struct {
+	SessionID     string `json:"sessionId"`
+	TransactionID string `json:"transactionId"`
+	Complete      bool   `json:"complete"`
+}
+
 type ApplicationState string
 
 const (
@@ -363,6 +391,9 @@ type ClientMessage struct {
 	ResyncRequested   *ResyncRequested     `json:"resyncRequested,omitempty"`
 	ApplicationReport *ApplicationReport   `json:"applicationReport,omitempty"`
 	Observation       *ObservationSnapshot `json:"observation,omitempty"`
+	ReportBegin       *ReportBegin         `json:"reportBegin,omitempty"`
+	ReportChunk       *ReportChunk         `json:"reportChunk,omitempty"`
+	ReportEnd         *ReportEnd           `json:"reportEnd,omitempty"`
 	Heartbeat         *Heartbeat           `json:"heartbeat,omitempty"`
 }
 

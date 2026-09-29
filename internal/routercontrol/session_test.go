@@ -2,7 +2,9 @@ package routercontrol
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ type testSink struct {
 	mu           sync.Mutex
 	disconnected []SessionKey
 	lifecycle    []string
+	observations []ObservationSnapshot
 }
 
 func (s *testSink) Connected(_ SessionKey, sessionID string, _ Hello) {
@@ -39,6 +42,7 @@ func (s *testSink) Application(_ context.Context, _ SessionKey, report Applicati
 func (s *testSink) Observation(_ context.Context, _ SessionKey, observation ObservationSnapshot) error {
 	s.mu.Lock()
 	s.lifecycle = append(s.lifecycle, "observation:"+observation.SessionID)
+	s.observations = append(s.observations, observation)
 	s.mu.Unlock()
 	return nil
 }
@@ -261,20 +265,23 @@ func TestSessionEnforcesDocumentLimit(t *testing.T) {
 func TestSessionStateRejectsUnacceptedAndNonMonotonicReports(t *testing.T) {
 	state := newSessionState(Hello{RouterIncarnation: "router-1"})
 	digest := Digest(strings.Repeat("a", 64))
+	newDigest := Digest(strings.Repeat("b", 64))
 	report := ApplicationReport{Sequence: 1, IntentDigest: digest, RouterIncarnation: "router-1", RealizationID: "r", State: ApplicationApplied}
-	if err := state.validateApplication(report); err == nil {
+	if _, err := state.validateApplication(report); err == nil {
 		t.Fatal("accepted application before Accepted")
 	}
-	state.setAccepted(Accepted{Sequence: 2, Digest: digest})
-	if err := state.validateApplication(report); err == nil {
-		t.Fatal("accepted application for wrong desired sequence")
+	state.setAccepted(Accepted{Sequence: 1, Digest: digest})
+	state.setAccepted(Accepted{Sequence: 2, Digest: newDigest})
+	if superseded, err := state.validateApplication(report); err != nil || !superseded {
+		t.Fatalf("older accepted application was not ignored as superseded: superseded=%v err=%v", superseded, err)
 	}
 	report.Sequence = 2
-	if err := state.validateApplication(report); err != nil {
+	report.IntentDigest = newDigest
+	if superseded, err := state.validateApplication(report); err != nil || superseded {
 		t.Fatalf("current application rejected: %v", err)
 	}
 	report.RouterIncarnation = "old-router"
-	if err := state.validateApplication(report); err == nil {
+	if _, err := state.validateApplication(report); err == nil {
 		t.Fatal("accepted stale router incarnation")
 	}
 
@@ -303,6 +310,192 @@ func TestClientEnforcesReportLimit(t *testing.T) {
 	client := openTestSession(t, ctx, connection, intent.Target, "pod-report-limit", limits)
 	if err := client.SendObservation(ObservationSnapshot{Scope: ObservationScopeAddresses, SampleSequence: 1, Knowledge: KnowledgeUnknown, RouterIncarnation: "router-1", Reason: strings.Repeat("x", 1024)}); err == nil {
 		t.Fatal("oversized observation report was sent")
+	}
+}
+
+func TestSessionChunksLargeCompleteObservation(t *testing.T) {
+	publisher := NewPublisher()
+	intent := testIntent()
+	if _, err := publisher.Publish(intent); err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	limits.ChunkBytes = 64 * 1024
+	connection, _, sink, stop := startTestServer(t, publisher, limits)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := openTestSession(t, ctx, connection, intent.Target, "pod-large-report", limits)
+	update, err := client.NextIntent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Accept(update); err != nil {
+		t.Fatal(err)
+	}
+
+	addresses := make([]LocalAddressObservation, 9000)
+	for i := range addresses {
+		addresses[i].RoutingKey = strings.Repeat("routing-key-", 12) + strconv.Itoa(i)
+	}
+	observation := ObservationSnapshot{Scope: ObservationScopeAddresses, SampleSequence: 1, Knowledge: KnowledgeComplete, RouterIncarnation: "router-1", Addresses: addresses}
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= 1024*1024 {
+		t.Fatalf("large report fixture is only %d bytes", len(encoded))
+	}
+	if err := client.SendObservation(observation); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sink.mu.Lock()
+		count := len(sink.observations)
+		var got int
+		if count > 0 {
+			got = len(sink.observations[count-1].Addresses)
+		}
+		sink.mu.Unlock()
+		if got == len(addresses) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("assembled observation not delivered: got %d addresses", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestInterruptedObservationTransferDoesNotReachSink(t *testing.T) {
+	publisher := NewPublisher()
+	intent := testIntent()
+	if _, err := publisher.Publish(intent); err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	connection, _, sink, stop := startTestServer(t, publisher, limits)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := openTestSession(t, ctx, connection, intent.Target, "pod-interrupted-report", limits)
+	transactionID := "interrupted-report"
+	if err := client.send(&ClientMessage{ReportBegin: &ReportBegin{SessionID: client.SessionID(), TransactionID: transactionID, Kind: ReportObservation, EncodedSize: uint64(limits.ChunkBytes + 1), ChunkCount: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.send(&ClientMessage{ReportChunk: &ReportChunk{SessionID: client.SessionID(), TransactionID: transactionID, Index: 0, Data: make([]byte, limits.ChunkBytes)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sink.mu.Lock()
+		disconnected, observations := len(sink.disconnected), len(sink.observations)
+		sink.mu.Unlock()
+		if disconnected > 0 {
+			if observations != 0 {
+				t.Fatalf("interrupted transfer delivered %d observations", observations)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("interrupted report session did not disconnect")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type blockingLifecycleSink struct {
+	aEntered   chan struct{}
+	releaseA   chan struct{}
+	bConnected chan struct{}
+	onceA      sync.Once
+	onceB      sync.Once
+}
+
+func (s *blockingLifecycleSink) Connected(_ SessionKey, _ string, hello Hello) {
+	if hello.AdaptorInstanceID == "a" {
+		s.onceA.Do(func() { close(s.aEntered) })
+		<-s.releaseA
+	} else if hello.AdaptorInstanceID == "b" {
+		s.onceB.Do(func() { close(s.bConnected) })
+	}
+}
+func (*blockingLifecycleSink) Accepted(SessionKey, Accepted) {}
+func (*blockingLifecycleSink) Application(context.Context, SessionKey, ApplicationReport) error {
+	return nil
+}
+func (*blockingLifecycleSink) Observation(context.Context, SessionKey, ObservationSnapshot) error {
+	return nil
+}
+func (*blockingLifecycleSink) Disconnected(SessionKey, string) {}
+
+func TestConnectedCannotBeOvertakenByReplacement(t *testing.T) {
+	limits := DefaultLimits()
+	sink := &blockingLifecycleSink{aEntered: make(chan struct{}), releaseA: make(chan struct{}), bConnected: make(chan struct{})}
+	server, err := NewServer(NewPublisher(), func(context.Context, TargetIdentity) (SessionIdentity, error) {
+		return SessionIdentity{PodUID: "same-pod", ServiceAccountUID: "same-sa"}, nil
+	}, sink, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1024 * 1024)
+	options, err := GRPCServerOptions(limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer(options...)
+	RegisterRouterControlServer(grpcServer, server)
+	go func() { _ = grpcServer.Serve(listener) }()
+	defer func() { grpcServer.Stop(); listener.Close() }()
+	connection, err := grpc.DialContext(context.Background(), "bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	target := testIntent().Target
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := OpenClientSession(ctx, connection, Hello{Target: target, AdaptorInstanceID: "a", RouterIncarnation: "router"}, limits)
+		aDone <- err
+	}()
+	select {
+	case <-sink.aEntered:
+	case <-ctx.Done():
+		t.Fatal("first Connected was not entered")
+	}
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := OpenClientSession(ctx, connection, Hello{Target: target, AdaptorInstanceID: "b", RouterIncarnation: "router"}, limits)
+		bDone <- err
+	}()
+	select {
+	case <-sink.bConnected:
+		t.Fatal("replacement Connected overtook blocked prior Connected")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(sink.releaseA)
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("replacement session did not connect")
+	}
+	select {
+	case <-sink.bConnected:
+	case <-ctx.Done():
+		t.Fatal("replacement Connected not delivered")
+	}
+	select {
+	case <-aDone:
+	case <-ctx.Done():
 	}
 }
 

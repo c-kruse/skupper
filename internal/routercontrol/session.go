@@ -1,8 +1,8 @@
 package routercontrol
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +22,7 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{ChunkBytes: 256 * 1024, MaxDocumentBytes: 16 * 1024 * 1024, MaxChunks: 256, MaxReportBytes: 1024 * 1024}
+	return Limits{ChunkBytes: 256 * 1024, MaxDocumentBytes: 16 * 1024 * 1024, MaxChunks: 256, MaxReportBytes: 16 * 1024 * 1024}
 }
 
 func (l Limits) validate() error {
@@ -44,8 +44,9 @@ type Server struct {
 	sink      ObservationSink
 	limits    Limits
 
-	mu       sync.Mutex
-	sessions map[SessionKey]activeSession
+	mu          sync.Mutex
+	sessions    map[SessionKey]activeSession
+	lifecycleMu sync.Mutex
 }
 
 type activeSession struct {
@@ -59,11 +60,13 @@ type sessionState struct {
 	routerIncarnation string
 	acceptedDigest    Digest
 	acceptedSequence  uint64
+	accepted          map[uint64]Digest
+	acceptedOrder     []uint64
 	sampleSequences   map[string]uint64
 }
 
 func newSessionState(hello Hello) *sessionState {
-	return &sessionState{routerIncarnation: hello.RouterIncarnation, sampleSequences: map[string]uint64{}}
+	return &sessionState{routerIncarnation: hello.RouterIncarnation, accepted: map[uint64]Digest{}, sampleSequences: map[string]uint64{}}
 }
 
 func NewServer(publisher *Publisher, authorize AuthorizeFunc, sink ObservationSink, limits Limits) (*Server, error) {
@@ -119,26 +122,28 @@ func (s *Server) Sync(stream grpc.BidiStreamingServer[ClientMessage, ServerMessa
 	sessionID := uuid.NewString()
 	key := SessionKey{Target: hello.Target, Identity: identity}
 	refreshes := make(chan RefreshRequest, 1)
+	s.lifecycleMu.Lock()
 	s.mu.Lock()
 	if previous, found := s.sessions[key]; found {
 		previous.cancel()
 	}
 	s.sessions[key] = activeSession{id: sessionID, cancel: cancel, refresh: refreshes}
 	s.mu.Unlock()
+	s.sink.Connected(key, sessionID, hello)
+	s.lifecycleMu.Unlock()
+	var sinkMu sync.Mutex
 	defer func() {
 		cancel()
+		s.lifecycleMu.Lock()
+		defer s.lifecycleMu.Unlock()
+		sinkMu.Lock()
+		s.sink.Disconnected(key, sessionID)
+		sinkMu.Unlock()
 		s.mu.Lock()
 		if current, found := s.sessions[key]; found && current.id == sessionID {
 			delete(s.sessions, key)
 		}
 		s.mu.Unlock()
-	}()
-	s.sink.Connected(key, sessionID, hello)
-	var sinkMu sync.Mutex
-	defer func() {
-		sinkMu.Lock()
-		defer sinkMu.Unlock()
-		s.sink.Disconnected(key, sessionID)
 	}()
 
 	if err := stream.Send(&ServerMessage{Welcome: &Welcome{ProtocolVersion: ProtocolVersion, SchemaVersion: SchemaVersion, SessionID: sessionID, Target: hello.Target}}); err != nil {
@@ -170,9 +175,6 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[Cl
 		}
 		if err := validateClientUnion(message); err != nil {
 			return status.Error(codes.InvalidArgument, err.Error())
-		}
-		if encoded, err := json.Marshal(message); err != nil || len(encoded) > s.limits.MaxReportBytes {
-			return status.Error(codes.ResourceExhausted, "client report exceeds configured limit")
 		}
 		if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
 			return context.Canceled
@@ -222,15 +224,19 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[Cl
 			if err := validateApplicationReport(report); err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
 			}
-			if err := state.validateApplication(report); err != nil {
+			superseded, err := state.validateApplication(report)
+			if err != nil {
 				return status.Error(codes.FailedPrecondition, err.Error())
+			}
+			if superseded {
+				continue
 			}
 			sinkMu.Lock()
 			if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
 				sinkMu.Unlock()
 				return context.Canceled
 			}
-			err := s.sink.Application(ctx, key, report)
+			err = s.sink.Application(ctx, key, report)
 			sinkMu.Unlock()
 			if err != nil {
 				return err
@@ -257,6 +263,12 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[Cl
 				return err
 			}
 			state.recordObservation(observation)
+		case message.ReportBegin != nil:
+			if err := s.receiveReport(ctx, stream, key, sessionID, state, sinkMu, *message.ReportBegin); err != nil {
+				return err
+			}
+		case message.ReportChunk != nil, message.ReportEnd != nil:
+			return status.Error(codes.InvalidArgument, "report chunk or end without begin")
 		case message.Heartbeat != nil:
 			if message.Heartbeat.SessionID != sessionID {
 				return status.Error(codes.InvalidArgument, "heartbeat has wrong session")
@@ -265,6 +277,115 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[Cl
 			return status.Error(codes.InvalidArgument, "hello may only be sent once")
 		}
 	}
+}
+
+func (s *Server) receiveReport(ctx context.Context, stream grpc.BidiStreamingServer[ClientMessage, ServerMessage], key SessionKey, sessionID string, state *sessionState, sinkMu *sync.Mutex, begin ReportBegin) error {
+	if begin.SessionID != sessionID || begin.TransactionID == "" {
+		return status.Error(codes.InvalidArgument, "report begin has wrong session or empty transaction")
+	}
+	if begin.Kind != ReportApplication && begin.Kind != ReportObservation {
+		return status.Error(codes.InvalidArgument, "unknown report kind")
+	}
+	if begin.EncodedSize > uint64(s.limits.MaxReportBytes) || begin.ChunkCount == 0 || begin.ChunkCount > uint32(s.limits.MaxChunks) {
+		return status.Error(codes.ResourceExhausted, "report exceeds receive limits")
+	}
+	expectedChunks := (begin.EncodedSize + uint64(s.limits.ChunkBytes) - 1) / uint64(s.limits.ChunkBytes)
+	if expectedChunks == 0 {
+		expectedChunks = 1
+	}
+	if uint64(begin.ChunkCount) != expectedChunks {
+		return status.Error(codes.InvalidArgument, "report chunk count does not match encoded size")
+	}
+	content := bytes.NewBuffer(make([]byte, 0, int(begin.EncodedSize)))
+	for index := uint32(0); index < begin.ChunkCount; index++ {
+		message, err := stream.Recv()
+		if err != nil {
+			return fmt.Errorf("incomplete report transfer: %w", err)
+		}
+		if err := validateClientUnion(message); err != nil || message.ReportChunk == nil {
+			return status.Error(codes.InvalidArgument, "incomplete report transfer: expected chunk")
+		}
+		if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
+			return context.Canceled
+		}
+		chunk := message.ReportChunk
+		if chunk.SessionID != sessionID || chunk.TransactionID != begin.TransactionID || chunk.Index != index {
+			return status.Error(codes.InvalidArgument, "report chunk session, transaction, or order mismatch")
+		}
+		expectedBytes := s.limits.ChunkBytes
+		if index == begin.ChunkCount-1 {
+			expectedBytes = int(begin.EncodedSize) - content.Len()
+		}
+		if len(chunk.Data) != expectedBytes {
+			return status.Error(codes.InvalidArgument, "report chunk length does not match encoded size")
+		}
+		content.Write(chunk.Data)
+	}
+	message, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("incomplete report transfer: %w", err)
+	}
+	if err := validateClientUnion(message); err != nil || message.ReportEnd == nil {
+		return status.Error(codes.InvalidArgument, "incomplete report transfer: expected end")
+	}
+	end := message.ReportEnd
+	if end.SessionID != sessionID || end.TransactionID != begin.TransactionID || !end.Complete || uint64(content.Len()) != begin.EncodedSize {
+		return status.Error(codes.InvalidArgument, "invalid or incomplete report end")
+	}
+	if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
+		return context.Canceled
+	}
+	switch begin.Kind {
+	case ReportApplication:
+		var report ApplicationReport
+		if err := decodeStrict(content.Bytes(), &report); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		if report.SessionID != sessionID {
+			return status.Error(codes.InvalidArgument, "application report has wrong session")
+		}
+		if err := validateApplicationReport(report); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		superseded, err := state.validateApplication(report)
+		if err != nil {
+			return status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if superseded {
+			return nil
+		}
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
+			return context.Canceled
+		}
+		return s.sink.Application(ctx, key, report)
+	case ReportObservation:
+		var observation ObservationSnapshot
+		if err := decodeStrict(content.Bytes(), &observation); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		if observation.SessionID != sessionID {
+			return status.Error(codes.InvalidArgument, "observation has wrong session")
+		}
+		if err := ValidateObservation(observation); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		if err := state.validateObservation(observation); err != nil {
+			return status.Error(codes.FailedPrecondition, err.Error())
+		}
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		if ctx.Err() != nil || !s.isCurrent(key, sessionID) {
+			return context.Canceled
+		}
+		if err := s.sink.Observation(ctx, key, observation); err != nil {
+			return err
+		}
+		state.recordObservation(observation)
+		return nil
+	}
+	return nil
 }
 
 func (s *Server) send(ctx context.Context, stream grpc.BidiStreamingServer[ClientMessage, ServerMessage], key SessionKey, sessionID string, state *sessionState, sinkMu *sync.Mutex, updates <-chan struct{}, acks <-chan sessionAck, refreshes <-chan RefreshRequest, receiveErrors <-chan error) error {
@@ -374,6 +495,12 @@ func (s *sessionState) setAccepted(accepted Accepted) {
 	s.mu.Lock()
 	s.acceptedDigest = accepted.Digest
 	s.acceptedSequence = accepted.Sequence
+	s.accepted[accepted.Sequence] = accepted.Digest
+	s.acceptedOrder = append(s.acceptedOrder, accepted.Sequence)
+	if len(s.acceptedOrder) > 64 {
+		delete(s.accepted, s.acceptedOrder[0])
+		s.acceptedOrder = s.acceptedOrder[1:]
+	}
 	s.mu.Unlock()
 }
 
@@ -383,16 +510,21 @@ func (s *sessionState) isAccepted(accepted Accepted) bool {
 	return s.acceptedDigest == accepted.Digest && s.acceptedSequence == accepted.Sequence
 }
 
-func (s *sessionState) validateApplication(report ApplicationReport) error {
+// validateApplication returns superseded=true for evidence matching an older
+// accepted intent. Such evidence is ignored rather than closing the stream.
+func (s *sessionState) validateApplication(report ApplicationReport) (superseded bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if report.RouterIncarnation != s.routerIncarnation {
-		return errors.New("application report router incarnation does not match hello")
+		return false, errors.New("application report router incarnation does not match hello")
 	}
-	if s.acceptedDigest == "" || report.IntentDigest != s.acceptedDigest || report.Sequence != s.acceptedSequence {
-		return errors.New("application report does not match accepted intent")
+	if report.IntentDigest == s.acceptedDigest && report.Sequence == s.acceptedSequence {
+		return false, nil
 	}
-	return nil
+	if acceptedDigest, found := s.accepted[report.Sequence]; found && acceptedDigest == report.IntentDigest && report.Sequence < s.acceptedSequence {
+		return true, nil
+	}
+	return false, errors.New("application report does not match an accepted intent")
 }
 
 func (s *sessionState) validateObservation(observation ObservationSnapshot) error {
@@ -413,13 +545,13 @@ func (s *sessionState) recordObservation(observation ObservationSnapshot) {
 	s.mu.Unlock()
 }
 
-// GRPCServerOptions returns the transport receive limit matching MaxReportBytes.
-// Callers must include these options when constructing the TLS-enabled server.
+// GRPCServerOptions returns a per-message receive limit large enough for one
+// encoded report chunk. Total reconstructed report size is separately bounded.
 func GRPCServerOptions(limits Limits) ([]grpc.ServerOption, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	return []grpc.ServerOption{grpc.MaxRecvMsgSize(limits.MaxReportBytes)}, nil
+	return []grpc.ServerOption{grpc.MaxRecvMsgSize(max(1024*1024, limits.ChunkBytes*2))}, nil
 }
 
 // RequestRefresh delivers a controller-timed request to one exact active Pod
@@ -484,7 +616,7 @@ func sendTransfer(stream grpc.BidiStreamingServer[ClientMessage, ServerMessage],
 
 func validateClientUnion(message *ClientMessage) error {
 	count := 0
-	for _, set := range []bool{message.Hello != nil, message.Accepted != nil, message.Rejected != nil, message.ResyncRequested != nil, message.ApplicationReport != nil, message.Observation != nil, message.Heartbeat != nil} {
+	for _, set := range []bool{message.Hello != nil, message.Accepted != nil, message.Rejected != nil, message.ResyncRequested != nil, message.ApplicationReport != nil, message.Observation != nil, message.ReportBegin != nil, message.ReportChunk != nil, message.ReportEnd != nil, message.Heartbeat != nil} {
 		if set {
 			count++
 		}
