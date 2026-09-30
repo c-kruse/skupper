@@ -48,6 +48,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	publisher := protocol.NewPublisher()
+	revocations := auth.NewSessionRevocations()
 	var namespaces *controller.NamespaceController
 	observations := newObservationCache(func(names ...string) { namespaces.InvalidateNamespaces(names...) })
 	bootstrap := reconcile.DefaultRouterControlBootstrap(config.Namespace)
@@ -64,7 +65,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 		RequireExplicitControl: config.WatchNamespace != "" || config.RequireExplicitControl,
 		Workers:                config.Workers, DisableSecurityContext: config.DisableSecurityContext, Bootstrap: bootstrap,
 		SecuredAccess: config.SecuredAccessConfig, GatewayOwner: gatewayOwner,
-		Metrics: reconcileMetrics,
+		Metrics: reconcileMetrics, Authorization: revocations,
 	}, publisher, observations)
 	if err != nil {
 		return err
@@ -164,7 +165,7 @@ func Run(ctx context.Context, clients internalclient.Clients, config *controller
 				group, ctx := errgroup.WithContext(ctx)
 				group.Go(func() error { return grantService.RunLeader(ctx, fence) })
 				group.Go(func() error {
-					return serveLeader(ctx, clients, config, namespaces, observations, publisher, prepared, fence)
+					return serveLeader(ctx, clients, config, namespaces, observations, publisher, revocations, prepared, fence)
 				})
 				return group.Wait()
 			},
@@ -192,7 +193,7 @@ func controllerOwner(ctx context.Context, clients internalclient.Clients, config
 	return owner, nil
 }
 
-func serveLeader(ctx context.Context, clients internalclient.Clients, config *controller.Config, namespaces *controller.NamespaceController, observations *observationCache, publisher *protocol.Publisher, prepared leaderResources, fence *leadership.Fence) error {
+func serveLeader(ctx context.Context, clients internalclient.Clients, config *controller.Config, namespaces *controller.NamespaceController, observations *observationCache, publisher *protocol.Publisher, revocations *auth.SessionRevocations, prepared leaderResources, fence *leadership.Fence) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -206,7 +207,7 @@ func serveLeader(ctx context.Context, clients internalclient.Clients, config *co
 		observations.NoteNamespace(string(identity.NamespaceUID), identity.Namespace)
 		return nil
 	}
-	authenticator := &auth.Authenticator{Kube: clients.GetKubeClient(), Installation: prepared.installation, Authorize: authorize, Gate: fence}
+	authenticator := &auth.Authenticator{Kube: clients.GetKubeClient(), Installation: prepared.installation, Authorize: authorize, Gate: fence, Revocations: revocations}
 	enroller := &auth.Enroller{Kube: clients.GetKubeClient(), Installation: prepared.installation, Authorize: authorize, Gate: fence}
 	limits := protocol.DefaultLimits()
 	options, err := protocol.GRPCServerOptions(limits)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
+	auth "github.com/skupperproject/skupper/internal/kube/routercontrol"
 	"github.com/skupperproject/skupper/internal/kube/site/sizing"
 	"github.com/skupperproject/skupper/internal/routercontrol"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
@@ -35,8 +37,147 @@ type testIntentPublisher struct {
 
 type noOperationsPlanner struct{}
 
+type recordedAuthorizationInvalidator struct {
+	mu     sync.Mutex
+	events []string
+	errors int
+	notify chan string
+}
+
+func (r *recordedAuthorizationInvalidator) InvalidateAuthorization(kind auth.AuthorizationKind, namespace, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	event := string(kind) + ":" + namespace + "/" + name
+	r.events = append(r.events, event)
+	if r.notify != nil {
+		select {
+		case r.notify <- event:
+		default:
+		}
+	}
+}
+
+func (r *recordedAuthorizationInvalidator) AuthorizationWatchFailed(error) {
+	r.mu.Lock()
+	r.errors++
+	r.mu.Unlock()
+}
+
+func (r *recordedAuthorizationInvalidator) take() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := append([]string(nil), r.events...)
+	r.events = nil
+	return result
+}
+
 func (noOperationsPlanner) Plan(reconcile.Snapshot, reconcile.DesiredNamespace) reconcile.Plan {
 	return reconcile.Plan{}
+}
+
+func TestAuthorizationInvalidationsCoverChainAndIgnoreOperationalUpdates(t *testing.T) {
+	controllerOwner := true
+	deleted := metav1.NewTime(time.Now())
+	recorder := &recordedAuthorizationInvalidator{}
+	c := &NamespaceController{authorization: recorder}
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant", UID: "namespace-uid"}}
+	changedNamespace := namespace.DeepCopy()
+	changedNamespace.DeletionTimestamp = &deleted
+	c.authorizationNamespaceChanged(namespace, changedNamespace)
+
+	assignment := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "skupper", Namespace: "tenant", UID: "assignment-uid"}, Data: map[string]string{controllerSettingKey: "control/one"}}
+	changedAssignment := assignment.DeepCopy()
+	changedAssignment.Data[controllerSettingKey] = "control/two"
+	c.authorizationConfigMapChanged(assignment, changedAssignment)
+
+	allocation := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: allocationConfigMapName, Namespace: "tenant", UID: "allocation-uid"}, Data: map[string]string{"namespaceUID": "namespace-uid", "siteUID": "site-uid", "ports": "old"}}
+	portsOnly := allocation.DeepCopy()
+	portsOnly.Data["ports"] = "new"
+	c.authorizationConfigMapChanged(allocation, portsOnly)
+	changedAllocation := portsOnly.DeepCopy()
+	changedAllocation.Data["siteUID"] = "replacement-site"
+	c.authorizationConfigMapChanged(portsOnly, changedAllocation)
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "router-pod", Namespace: "tenant", UID: "pod-uid", Labels: map[string]string{"skupper.io/group": "skupper-router"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "router-rs", UID: "rs-uid", Controller: &controllerOwner}}}, Spec: corev1.PodSpec{ServiceAccountName: "router-sa"}}
+	statusOnly := pod.DeepCopy()
+	statusOnly.Status.Phase = corev1.PodRunning
+	c.authorizationPodChanged(pod, statusOnly)
+	changedPod := statusOnly.DeepCopy()
+	changedPod.DeletionTimestamp = &deleted
+	c.authorizationPodChanged(statusOnly, changedPod)
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "router-sa", Namespace: "tenant", UID: "sa-uid"}}
+	changedServiceAccount := serviceAccount.DeepCopy()
+	changedServiceAccount.UID = "replacement-sa"
+	c.authorizationServiceAccountChanged(serviceAccount, changedServiceAccount)
+
+	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "router-rs", Namespace: "tenant", UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "skupper-router", UID: "deployment-uid", Controller: &controllerOwner}}}}
+	changedReplicaSet := replicaSet.DeepCopy()
+	changedReplicaSet.DeletionTimestamp = &deleted
+	c.authorizationReplicaSetChanged(replicaSet, changedReplicaSet)
+
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: "tenant", UID: "deployment-uid"}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"skupper.io/group": "skupper-router"}}}}}
+	changedDeployment := deployment.DeepCopy()
+	changedDeployment.UID = "replacement-deployment"
+	c.authorizationDeploymentChanged(deployment, changedDeployment)
+
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "west", Namespace: "tenant", UID: "site-uid"}}
+	changedSite := site.DeepCopy()
+	changedSite.Spec.HA = true
+	c.authorizationSiteChanged(site, changedSite)
+
+	want := []string{
+		string(AuthorizationNamespace) + ":tenant/tenant",
+		string(AuthorizationAssignment) + ":tenant/skupper",
+		string(AuthorizationAllocation) + ":tenant/" + allocationConfigMapName,
+		string(AuthorizationPod) + ":tenant/router-pod",
+		string(AuthorizationServiceAccount) + ":tenant/router-sa",
+		string(AuthorizationRouterGroup) + ":tenant/skupper-router",
+		string(AuthorizationRouterGroup) + ":tenant/skupper-router",
+		string(AuthorizationSite) + ":tenant/west",
+	}
+	if got := recorder.take(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("authorization invalidations = %#v, want %#v", got, want)
+	}
+}
+
+func TestAuthorizationInformerHandlersSynchronizeBeforeServing(t *testing.T) {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant", UID: "namespace-uid"}}
+	assignment := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "skupper", Namespace: namespace.Name, UID: "assignment-uid"}, Data: map[string]string{controllerSettingKey: "control/one"}}
+	clients, err := fakeclient.NewFakeClient("control", []runtime.Object{namespace, assignment}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &recordedAuthorizationInvalidator{notify: make(chan string, 32)}
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "control/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("control"), Authorization: recorder}, newTestIntentPublisher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controller.StartCaches(ctx)
+	syncCtx, stopSync := context.WithTimeout(ctx, 5*time.Second)
+	defer stopSync()
+	if err := controller.WaitForCacheSync(syncCtx); err != nil {
+		t.Fatal(err)
+	}
+	for len(recorder.notify) > 0 {
+		<-recorder.notify
+	}
+	updated := assignment.DeepCopy()
+	updated.Data[controllerSettingKey] = "control/two"
+	if _, err := clients.GetKubeClient().CoreV1().ConfigMaps(namespace.Name).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-recorder.notify:
+		if event != string(AuthorizationAssignment)+":tenant/skupper" {
+			t.Fatalf("unexpected informer invalidation %q", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("synchronized assignment informer did not invalidate authorization")
+	}
 }
 
 func TestStandaloneAccessPlanExecutesServiceSecretAndStatusWrites(t *testing.T) {

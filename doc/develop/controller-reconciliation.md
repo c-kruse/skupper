@@ -428,6 +428,20 @@ assignment changes to close sessions. Bound authorization freshness during API
 outages and stop accepting reports/sending changes when it cannot be established.
 Short-lived certificates alone do not instantly revoke a deleted Pod's access.
 
+Do not repeat the complete live Kubernetes authorization walk independently for
+every connected stream. Admission performs authoritative reads of the Pod,
+ServiceAccount, Namespace, ReplicaSet, Deployment, Site, assignment, and allocation
+objects. After admission, shared synchronized informers revoke only sessions
+affected by authorization-relevant field changes. Synchronize both informer stores
+and their authorization handlers before serving. A namespace-scoped generation
+barrier spanning the admission reads and registry insertion prevents an event in
+that interval from being missed. Pod status and allocation-port-only updates are
+not authorization changes. Any authorization watch error closes all current
+sessions; client-go relists before resuming the watch. A later admission must still
+pass the complete live read path, and certificate expiry remains the final bound if
+a watch failure is not otherwise observable. Leadership fencing and expiry timers
+remain independent of informer and API work.
+
 Renew early with jitter using a fresh token review and preferably a new in-memory
 key, then reconnect. Close streams at certificate expiry; TLS handshakes alone do
 not expire existing connections. Controller failover does not rotate the CA.

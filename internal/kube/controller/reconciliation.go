@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/reconcile"
+	auth "github.com/skupperproject/skupper/internal/kube/routercontrol"
 	"github.com/skupperproject/skupper/internal/kube/securedaccess"
 	sitelabels "github.com/skupperproject/skupper/internal/kube/site/labels"
 	siteresources "github.com/skupperproject/skupper/internal/kube/site/resources"
@@ -48,6 +50,24 @@ const allocationConfigMapName = "skupper-controller-allocations"
 type ObservationSource interface {
 	Snapshot(namespace string, evaluationTime time.Time) map[routercontrol.TargetIdentity][]reconcile.Observation
 }
+
+// AuthorizationInvalidator receives only changes to objects used by live
+// router-control authorization. Implementations cancel affected sessions; a
+// watch error must invalidate every session because cache freshness is unknown.
+type AuthorizationInvalidator interface {
+	InvalidateAuthorization(kind auth.AuthorizationKind, namespace, name string)
+	AuthorizationWatchFailed(error)
+}
+
+const (
+	AuthorizationNamespace      = auth.AuthorizationNamespace
+	AuthorizationAssignment     = auth.AuthorizationAssignment
+	AuthorizationAllocation     = auth.AuthorizationAllocation
+	AuthorizationPod            = auth.AuthorizationPod
+	AuthorizationServiceAccount = auth.AuthorizationServiceAccount
+	AuthorizationSite           = auth.AuthorizationSite
+	AuthorizationRouterGroup    = auth.AuthorizationRouterGroup
+)
 
 // NamespaceController owns shared caches and the leader-only namespace queue.
 // StartCaches and WaitForCacheSync are safe for standbys and perform no writes.
@@ -73,6 +93,8 @@ type NamespaceController struct {
 	labellingUpdater       func(string, *corev1.ConfigMap) error
 	configurationConfigMap cache.SharedIndexInformer
 	configurationHandlers  []cache.ResourceEventHandlerRegistration
+	authorizationHandlers  []cache.ResourceEventHandlerRegistration
+	authorization          AuthorizationInvalidator
 	bootstrapMu            sync.RWMutex
 	leaderRunning          bool
 	synced                 atomic.Bool
@@ -97,14 +119,17 @@ type NamespaceControllerOptions struct {
 	// GatewayOwner is the controller StatefulSet (or legacy Deployment) that
 	// exclusively owns the shared skupper Gateway. Its UID is revalidated before
 	// writes, preventing takeover of a foreign Gateway.
-	GatewayOwner *metav1.OwnerReference
-	Metrics      reconcile.Metrics
+	GatewayOwner  *metav1.OwnerReference
+	Metrics       reconcile.Metrics
+	Authorization AuthorizationInvalidator
 }
 
 type namespaceInformers struct {
 	namespaces        cache.SharedIndexInformer
 	configMaps        cache.SharedIndexInformer
 	pods              cache.SharedIndexInformer
+	replicaSets       cache.SharedIndexInformer
+	deployments       cache.SharedIndexInformer
 	services          cache.SharedIndexInformer
 	serviceAccounts   cache.SharedIndexInformer
 	roles             cache.SharedIndexInformer
@@ -158,7 +183,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	if options.SecuredAccess != nil {
 		accessConfig = reconcile.AccessConfig{EnabledTypes: append([]string(nil), options.SecuredAccess.EnabledAccessTypes...), DefaultType: options.SecuredAccess.DefaultAccessType, ClusterHost: options.SecuredAccess.ClusterHost, IngressDomain: options.SecuredAccess.IngressDomain, IngressClassName: options.SecuredAccess.IngressClassName, HTTPProxyDomain: options.SecuredAccess.HttpProxyDomain, GatewayPort: options.SecuredAccess.GatewayPort, GatewayClass: options.SecuredAccess.GatewayClass, GatewayDomain: options.SecuredAccess.GatewayDomain, ControllerNamespace: controllerNamespace, GatewayOwner: options.GatewayOwner}
 	}
-	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace, defaultAccessType: options.DefaultAccessType, clusterHost: options.ClusterHost, accessConfig: accessConfig}
+	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, authorization: options.Authorization, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace, defaultAccessType: options.DefaultAccessType, clusterHost: options.ClusterHost, accessConfig: accessConfig}
 	if c.sizing == nil {
 		registry := sizing.NewRegistry()
 		c.sizing = registry
@@ -174,7 +199,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		c.configurationConfigMap = c.configurationFactory.Core().V1().ConfigMaps().Informer()
 	}
 	c.informers = namespaceInformers{
-		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), services: coreFactory.Core().V1().Services().Informer(), serviceAccounts: coreFactory.Core().V1().ServiceAccounts().Informer(), roles: coreFactory.Rbac().V1().Roles().Informer(), roleBindings: coreFactory.Rbac().V1().RoleBindings().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(), ingresses: coreFactory.Networking().V1().Ingresses().Informer(),
+		namespaces: coreFactory.Core().V1().Namespaces().Informer(), configMaps: coreFactory.Core().V1().ConfigMaps().Informer(), pods: coreFactory.Core().V1().Pods().Informer(), replicaSets: coreFactory.Apps().V1().ReplicaSets().Informer(), deployments: coreFactory.Apps().V1().Deployments().Informer(), services: coreFactory.Core().V1().Services().Informer(), serviceAccounts: coreFactory.Core().V1().ServiceAccounts().Informer(), roles: coreFactory.Rbac().V1().Roles().Informer(), roleBindings: coreFactory.Rbac().V1().RoleBindings().Informer(), secrets: coreFactory.Core().V1().Secrets().Informer(), ingresses: coreFactory.Networking().V1().Ingresses().Informer(),
 		sites: crs.Sites().Informer(), listeners: crs.Listeners().Informer(), multiKeyListeners: crs.MultiKeyListeners().Informer(), connectors: crs.Connectors().Informer(), links: crs.Links().Informer(), routerAccesses: crs.RouterAccesses().Informer(), certificates: crs.Certificates().Informer(), securedAccesses: crs.SecuredAccesses().Informer(), attached: crs.AttachedConnectors().Informer(), bindings: crs.AttachedConnectorBindings().Informer(),
 	}
 	if routeClient := clients.GetRouteClient(); routeClient != nil {
@@ -196,6 +221,9 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 	workloads := reconcile.WorkloadPlanner{Next: accesses, Ensurer: c}
 	c.queue = reconcile.NewQueue("namespace-reconciliation", options.Workers, reconcile.NamespaceReconciler{Collector: c, Deriver: reconcile.NamespaceDeriver{}, Planner: reconcile.StatusPlanner{Next: workloads, Writer: c}, Executor: reconcile.Executor{}}, options.Metrics)
 	if err := c.registerInvalidations(); err != nil {
+		return nil, err
+	}
+	if err := c.registerAuthorizationInvalidations(); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -246,6 +274,11 @@ func (c *NamespaceController) WaitForCacheSync(ctx context.Context) error {
 	for _, handler := range c.configurationHandlers {
 		if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
 			return fmt.Errorf("configuration event handler did not synchronize")
+		}
+	}
+	for _, handler := range c.authorizationHandlers {
+		if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
+			return fmt.Errorf("authorization event handler did not synchronize")
 		}
 	}
 	c.synced.Store(true)
@@ -382,6 +415,196 @@ func (c *NamespaceController) registerInvalidations() error {
 		return err
 	}
 	return nil
+}
+
+func (c *NamespaceController) registerAuthorizationInvalidations() error {
+	if c.authorization == nil {
+		return nil
+	}
+	informers := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.configMaps, c.informers.pods, c.informers.serviceAccounts, c.informers.replicaSets, c.informers.deployments, c.informers.sites}
+	for _, informer := range informers {
+		if err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+			slog.Error("Router authorization watch failed; revoking active sessions", "error", err)
+			c.authorization.AuthorizationWatchFailed(err)
+		}); err != nil {
+			return fmt.Errorf("configure authorization watch failure handler: %w", err)
+		}
+	}
+	registrations := []struct {
+		informer cache.SharedIndexInformer
+		changed  func(old, current interface{})
+	}{
+		{c.informers.namespaces, c.authorizationNamespaceChanged},
+		{c.informers.configMaps, c.authorizationConfigMapChanged},
+		{c.informers.pods, c.authorizationPodChanged},
+		{c.informers.serviceAccounts, c.authorizationServiceAccountChanged},
+		{c.informers.replicaSets, c.authorizationReplicaSetChanged},
+		{c.informers.deployments, c.authorizationDeploymentChanged},
+		{c.informers.sites, c.authorizationSiteChanged},
+	}
+	for _, registration := range registrations {
+		changed := registration.changed
+		handler, err := registration.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(current interface{}) { changed(nil, current) },
+			UpdateFunc: changed,
+			DeleteFunc: func(old interface{}) { changed(old, nil) },
+		})
+		if err != nil {
+			return fmt.Errorf("register authorization invalidation handler: %w", err)
+		}
+		c.authorizationHandlers = append(c.authorizationHandlers, handler)
+	}
+	return nil
+}
+
+func (c *NamespaceController) invalidateAuthorization(kind auth.AuthorizationKind, namespace, name string) {
+	if namespace != "" && name != "" {
+		c.authorization.InvalidateAuthorization(kind, namespace, name)
+	}
+}
+
+func (c *NamespaceController) authorizationNamespaceChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*corev1.Namespace)
+	next, _ := eventObject(current).(*corev1.Namespace)
+	if authorizationNamespaceEqual(previous, next) {
+		return
+	}
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object != nil {
+		c.invalidateAuthorization(AuthorizationNamespace, object.Name, object.Name)
+	}
+}
+
+func (c *NamespaceController) authorizationConfigMapChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*corev1.ConfigMap)
+	next, _ := eventObject(current).(*corev1.ConfigMap)
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object == nil || (object.Name != "skupper" && object.Name != allocationConfigMapName) || authorizationConfigMapEqual(previous, next) {
+		return
+	}
+	kind := AuthorizationAssignment
+	if object.Name == allocationConfigMapName {
+		kind = AuthorizationAllocation
+	}
+	c.invalidateAuthorization(kind, object.Namespace, object.Name)
+}
+
+func (c *NamespaceController) authorizationPodChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*corev1.Pod)
+	next, _ := eventObject(current).(*corev1.Pod)
+	if authorizationPodEqual(previous, next) {
+		return
+	}
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object != nil {
+		c.invalidateAuthorization(AuthorizationPod, object.Namespace, object.Name)
+	}
+}
+
+func (c *NamespaceController) authorizationServiceAccountChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*corev1.ServiceAccount)
+	next, _ := eventObject(current).(*corev1.ServiceAccount)
+	if authorizationObjectIdentityEqual(previous, next) {
+		return
+	}
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object != nil {
+		c.invalidateAuthorization(AuthorizationServiceAccount, object.Namespace, object.Name)
+	}
+}
+
+func (c *NamespaceController) authorizationReplicaSetChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*appsv1.ReplicaSet)
+	next, _ := eventObject(current).(*appsv1.ReplicaSet)
+	if authorizationReplicaSetEqual(previous, next) {
+		return
+	}
+	seen := map[string]bool{}
+	for _, object := range []*appsv1.ReplicaSet{previous, next} {
+		if object == nil {
+			continue
+		}
+		if owner := metav1.GetControllerOf(object); owner != nil && owner.APIVersion == "apps/v1" && owner.Kind == "Deployment" && !seen[owner.Name] {
+			seen[owner.Name] = true
+			c.invalidateAuthorization(AuthorizationRouterGroup, object.Namespace, owner.Name)
+		}
+	}
+}
+
+func (c *NamespaceController) authorizationDeploymentChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*appsv1.Deployment)
+	next, _ := eventObject(current).(*appsv1.Deployment)
+	if authorizationDeploymentEqual(previous, next) {
+		return
+	}
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object != nil {
+		c.invalidateAuthorization(AuthorizationRouterGroup, object.Namespace, object.Name)
+	}
+}
+
+func (c *NamespaceController) authorizationSiteChanged(old, current interface{}) {
+	previous, _ := eventObject(old).(*skupperv2alpha1.Site)
+	next, _ := eventObject(current).(*skupperv2alpha1.Site)
+	if authorizationSiteEqual(previous, next) {
+		return
+	}
+	object := next
+	if object == nil {
+		object = previous
+	}
+	if object != nil {
+		c.invalidateAuthorization(AuthorizationSite, object.Namespace, object.Name)
+	}
+}
+
+func authorizationNamespaceEqual(a, b *corev1.Namespace) bool {
+	return a != nil && b != nil && a.UID == b.UID && reflect.DeepEqual(a.DeletionTimestamp, b.DeletionTimestamp)
+}
+
+func authorizationConfigMapEqual(a, b *corev1.ConfigMap) bool {
+	if a == nil || b == nil || a.UID != b.UID || !reflect.DeepEqual(a.DeletionTimestamp, b.DeletionTimestamp) || a.Name != b.Name {
+		return false
+	}
+	if a.Name == allocationConfigMapName {
+		return a.Data["namespaceUID"] == b.Data["namespaceUID"] && a.Data["siteUID"] == b.Data["siteUID"]
+	}
+	return a.Data[controllerSettingKey] == b.Data[controllerSettingKey]
+}
+
+func authorizationPodEqual(a, b *corev1.Pod) bool {
+	return a != nil && b != nil && a.UID == b.UID && reflect.DeepEqual(a.DeletionTimestamp, b.DeletionTimestamp) && a.Spec.ServiceAccountName == b.Spec.ServiceAccountName && a.Labels["skupper.io/group"] == b.Labels["skupper.io/group"] && reflect.DeepEqual(a.OwnerReferences, b.OwnerReferences)
+}
+
+func authorizationObjectIdentityEqual(a, b metav1.Object) bool {
+	return a != nil && b != nil && !reflect.ValueOf(a).IsNil() && !reflect.ValueOf(b).IsNil() && a.GetUID() == b.GetUID() && reflect.DeepEqual(a.GetDeletionTimestamp(), b.GetDeletionTimestamp())
+}
+
+func authorizationReplicaSetEqual(a, b *appsv1.ReplicaSet) bool {
+	return authorizationObjectIdentityEqual(a, b) && reflect.DeepEqual(a.OwnerReferences, b.OwnerReferences)
+}
+
+func authorizationDeploymentEqual(a, b *appsv1.Deployment) bool {
+	return authorizationObjectIdentityEqual(a, b) && reflect.DeepEqual(a.OwnerReferences, b.OwnerReferences) && a.Spec.Template.Labels["skupper.io/group"] == b.Spec.Template.Labels["skupper.io/group"]
+}
+
+func authorizationSiteEqual(a, b *skupperv2alpha1.Site) bool {
+	return authorizationObjectIdentityEqual(a, b) && a.Spec.GetServiceAccount() == b.Spec.GetServiceAccount() && a.Spec.HA == b.Spec.HA
 }
 
 func (c *NamespaceController) configurationAdded(value interface{}) {

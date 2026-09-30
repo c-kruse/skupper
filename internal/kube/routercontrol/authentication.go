@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	protocol "github.com/skupperproject/skupper/internal/routercontrol"
@@ -19,8 +18,8 @@ type Authenticator struct {
 	Installation         *Installation
 	Authorize            AssignmentAuthorizer
 	Gate                 LeaderGate
+	Revocations          *SessionRevocations
 	Now                  func() time.Time
-	RecheckEvery         time.Duration
 	AuthorizationTimeout time.Duration
 }
 
@@ -38,13 +37,13 @@ func (a *Authenticator) ServerTLSConfig() *tls.Config {
 }
 
 type Session struct {
-	Identity   Identity
-	ctx        context.Context
-	cancel     context.CancelFunc
-	gate       LeaderGate
-	mu         sync.RWMutex
-	err        error
-	rechecking atomic.Bool
+	Identity    Identity
+	ctx         context.Context
+	cancel      context.CancelFunc
+	gate        LeaderGate
+	revocations *SessionRevocations
+	mu          sync.RWMutex
+	err         error
 }
 
 func (a *Authenticator) Session(parent context.Context, state tls.ConnectionState) (*Session, error) {
@@ -55,6 +54,9 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 	}
 	if len(state.VerifiedChains) != 1 || len(state.VerifiedChains[0]) == 0 {
 		return nil, ErrUnauthenticated
+	}
+	if a.Revocations == nil {
+		return nil, fmt.Errorf("router-control authorization revocations are not configured")
 	}
 	leaf := state.VerifiedChains[0][0]
 	identity, err := identityFromCertificate(leaf)
@@ -68,6 +70,7 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 		return nil, fmt.Errorf("%w: client certificate is not currently valid", ErrUnauthenticated)
 	}
+	revision := a.Revocations.begin(identity.Namespace)
 	if err := a.authorizeWithin(parent, identity); err != nil {
 		return nil, err
 	}
@@ -81,12 +84,27 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 		return nil, fmt.Errorf("%w: client certificate expired during authorization", ErrUnauthenticated)
 	}
 	ctx, cancel := context.WithCancel(parent)
-	session := &Session{Identity: identity, ctx: ctx, cancel: cancel, gate: a.Gate}
-	every := a.RecheckEvery
-	if every <= 0 {
-		every = 5 * time.Second
+	session := &Session{Identity: identity, ctx: ctx, cancel: cancel, gate: a.Gate, revocations: a.Revocations}
+	if err := a.Revocations.register(session, revision); err != nil {
+		cancel()
+		return nil, err
 	}
-	go session.monitor(a, leaf.NotAfter.Sub(now), every)
+	if a.Gate != nil {
+		if err := a.Gate.Check(); err != nil {
+			session.Close()
+			return nil, fmt.Errorf("%w: %v", ErrNotLeader, err)
+		}
+	}
+	now = a.now()
+	if !now.Before(leaf.NotAfter) {
+		session.Close()
+		return nil, fmt.Errorf("%w: client certificate expired during authorization registration", ErrUnauthenticated)
+	}
+	if err := session.Check(); err != nil {
+		session.Close()
+		return nil, err
+	}
+	go session.monitor(leaf.NotAfter.Sub(now))
 	return session, nil
 }
 
@@ -134,14 +152,13 @@ func (a *Authenticator) authorize(ctx context.Context, expected Identity) error 
 	return nil
 }
 
-func (s *Session) monitor(a *Authenticator, untilExpiry, every time.Duration) {
+func (s *Session) monitor(untilExpiry time.Duration) {
 	if untilExpiry < 0 {
 		untilExpiry = 0
 	}
 	timer := time.NewTimer(untilExpiry)
-	ticker := time.NewTicker(every)
 	defer timer.Stop()
-	defer ticker.Stop()
+	defer s.revocations.unregister(s)
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -152,22 +169,18 @@ func (s *Session) monitor(a *Authenticator, untilExpiry, every time.Duration) {
 		case <-gateDone(s.gate):
 			s.fail(ErrNotLeader)
 			return
-		case <-ticker.C:
-			if s.rechecking.CompareAndSwap(false, true) {
-				go func() {
-					defer s.rechecking.Store(false)
-					if err := a.authorizeWithin(s.ctx, s.Identity); err != nil {
-						s.fail(err)
-					}
-				}()
-			}
 		}
 	}
 }
 
 func (s *Session) Context() context.Context { return s.ctx }
 
-func (s *Session) Close() { s.cancel() }
+func (s *Session) Close() {
+	s.cancel()
+	if s.revocations != nil {
+		s.revocations.unregister(s)
+	}
+}
 
 func (s *Session) Check() error {
 	if s.gate != nil {

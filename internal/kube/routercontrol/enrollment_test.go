@@ -129,7 +129,7 @@ func TestEnrollRechecksLeadershipAfterSlowAuthorization(t *testing.T) {
 		result <- err
 	}()
 	<-authorizationStarted
-	gate.err = ErrNotLeader
+	gate.SetError(ErrNotLeader)
 	close(gate.done)
 	close(releaseAuthorization)
 	if err := <-result; err == nil || !strings.Contains(err.Error(), "active leader") {

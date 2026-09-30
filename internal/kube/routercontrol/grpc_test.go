@@ -16,7 +16,7 @@ import (
 
 func TestGRPCInterceptorInstallsTargetBoundSessionIdentity(t *testing.T) {
 	fixture := newSessionFixture(t)
-	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error { return nil }}
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error { return nil }}
 	state := tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}}
 	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: state}})
 	stream := &testServerStream{ctx: ctx}
@@ -58,33 +58,53 @@ func TestGRPCInterceptorRejectsMissingTLS(t *testing.T) {
 }
 
 func TestGRPCRevocationReturnsWhileHandlerIsBlocked(t *testing.T) {
-	fixture := newSessionFixture(t)
-	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error { return nil }}
-	state := tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}}
-	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: state}})
-	started := make(chan grpc.ServerStream, 1)
-	release := make(chan struct{})
-	defer close(release)
-	finished := make(chan error, 1)
-	go func() {
-		finished <- authenticator.StreamServerInterceptor()(nil, &testServerStream{ctx: ctx}, nil, func(_ any, stream grpc.ServerStream) error {
-			started <- stream
-			<-release // A transport call need not obey the wrapped context.
-			return nil
+	for _, test := range []struct {
+		name    string
+		expires time.Duration
+		revoke  func(*sessionFixture)
+	}{
+		{name: "leadership loss", revoke: func(fixture *sessionFixture) { close(fixture.gate.done) }},
+		{name: "authorization watch", revoke: func(fixture *sessionFixture) {
+			fixture.revocations.InvalidateAuthorization(AuthorizationPod, "site-ns", "router-pod")
+		}},
+		{name: "certificate expiry", expires: 20 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSessionFixture(t)
+			authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error { return nil }}
+			leaf := *fixture.leaf
+			if test.expires > 0 {
+				leaf.NotAfter = testNow.Add(test.expires)
+			}
+			state := tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{&leaf, fixture.install.ClientCA}}}
+			ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: state}})
+			started := make(chan grpc.ServerStream, 1)
+			release := make(chan struct{})
+			defer close(release)
+			finished := make(chan error, 1)
+			go func() {
+				finished <- authenticator.StreamServerInterceptor()(nil, &testServerStream{ctx: ctx}, nil, func(_ any, stream grpc.ServerStream) error {
+					started <- stream
+					<-release // A transport call need not obey the wrapped context.
+					return nil
+				})
+			}()
+			stream := <-started
+			if test.revoke != nil {
+				test.revoke(fixture)
+			}
+			select {
+			case err := <-finished:
+				if err == nil {
+					t.Fatal("revoked stream succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("revocation waited for blocked handler instead of terminating gRPC stream")
+			}
+			if err := stream.SendMsg("late intent"); err == nil {
+				t.Fatal("message was sent after authority was revoked")
+			}
 		})
-	}()
-	stream := <-started
-	close(fixture.gate.done)
-	select {
-	case err := <-finished:
-		if err == nil {
-			t.Fatal("revoked stream succeeded")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("revocation waited for blocked handler instead of terminating gRPC stream")
-	}
-	if err := stream.SendMsg("late intent"); err == nil {
-		t.Fatal("message was sent after authority was revoked")
 	}
 }
 
