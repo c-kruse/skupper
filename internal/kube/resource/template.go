@@ -92,6 +92,24 @@ func DeploymentApplyEqual(current, desired *appsv1.Deployment) bool {
 	if err != nil || !hasManagedFields(current.ManagedFields) {
 		return false
 	}
+	// SSA extraction drops empty granular structs: emptyDir: {} has no leaf
+	// fields to extract. Its presence still selects the volume source. Recover
+	// that discriminator from the actual object, without claiming unowned
+	// medium/sizeLimit fields or treating a different source as equivalent.
+	if owned.Spec != nil && owned.Spec.Template != nil && owned.Spec.Template.Spec != nil {
+		for i := range owned.Spec.Template.Spec.Volumes {
+			volume := &owned.Spec.Template.Spec.Volumes[i]
+			if volume.Name == nil || volume.EmptyDir != nil {
+				continue
+			}
+			for _, actual := range current.Spec.Template.Spec.Volumes {
+				if actual.Name == *volume.Name && actual.EmptyDir != nil {
+					volume.EmptyDir = applycorev1.EmptyDirVolumeSource()
+					break
+				}
+			}
+		}
+	}
 	wanted := &applyappsv1.DeploymentApplyConfiguration{}
 	if !decodeApply(desired, wanted) {
 		return false

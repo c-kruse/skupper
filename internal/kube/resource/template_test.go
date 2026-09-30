@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	applyappsv1 "k8s.io/client-go/applyconfigurations/apps/v1"
 )
@@ -55,5 +56,28 @@ func TestDeploymentWithoutManagedFieldsConservativelyReapplies(t *testing.T) {
 	current := &appsv1.Deployment{TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"}, ObjectMeta: metav1.ObjectMeta{Name: "router", Namespace: "site"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}}
 	if DeploymentApplyEqual(current, current.DeepCopy()) {
 		t.Fatal("object without ownership evidence was treated as converged")
+	}
+}
+
+func TestDeploymentEmptyDirPresenceIsComparedEvenWithoutOwnedLeafFields(t *testing.T) {
+	current := &appsv1.Deployment{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		ObjectMeta: metav1.ObjectMeta{Name: "router", Namespace: "site", ManagedFields: []metav1.ManagedFieldsEntry{{Manager: FieldManager, Operation: metav1.ManagedFieldsOperationApply, APIVersion: "apps/v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:template":{"f:spec":{"f:volumes":{"k:{\"name\":\"certs\"}":{".":{},"f:name":{},"f:emptyDir":{}}}}}}}`)}}}},
+		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "certs", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}}}},
+	}
+	desired := current.DeepCopy()
+	desired.ManagedFields = nil
+	if !DeploymentApplyEqual(current, desired) {
+		t.Fatal("emptyDir: {} never converged after SSA")
+	}
+	changedSource := current.DeepCopy()
+	changedSource.Spec.Template.Spec.Volumes[0].EmptyDir = nil
+	changedSource.Spec.Template.Spec.Volumes[0].Secret = &corev1.SecretVolumeSource{SecretName: "other"}
+	if DeploymentApplyEqual(changedSource, desired) {
+		t.Fatal("different volume source was treated as equivalent to emptyDir")
+	}
+	desired.Spec.Template.Spec.Volumes[0].EmptyDir.Medium = corev1.StorageMediumMemory
+	if DeploymentApplyEqual(current, desired) {
+		t.Fatal("change to explicit emptyDir settings was ignored")
 	}
 }

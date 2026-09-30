@@ -52,8 +52,12 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 	}
 	defer client.CoreV1().Namespaces().Delete(context.Background(), namespace, metav1.DeleteOptions{})
 
+	parent, err := client.CoreV1().ConfigMaps(namespace).Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test-owner"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	controller, block := true, true
-	owner := []metav1.OwnerReference{{APIVersion: "skupper.io/v2alpha1", Kind: "Site", Name: "site", UID: "site-uid", Controller: &controller, BlockOwnerDeletion: &block}}
+	owner := []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: parent.Name, UID: parent.UID, Controller: &controller, BlockOwnerDeletion: &block}}
 	replicas := int32(1)
 	deployment := &appsv1.Deployment{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
