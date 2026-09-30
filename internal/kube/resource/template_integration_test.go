@@ -118,6 +118,56 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 	if !DeploymentApplyEqual(currentDeployment, deployment) {
 		t.Fatal("field owned by another manager caused a workload rewrite")
 	}
+	// A strategic-merge patch transfers ownership of the changed label, even
+	// though the caller did not use SSA. Detect that drift but do not silently
+	// force the field back from the new owner.
+	currentDeployment, err = client.AppsV1().Deployments(namespace).Patch(ctx, deployment.Name, types.StrategicMergePatchType,
+		[]byte(`{"metadata":{"labels":{"application":"external-value","external.example/label":"retained"}}}`), metav1.PatchOptions{FieldManager: "external-drift"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if DeploymentApplyEqual(currentDeployment, deployment) {
+		t.Fatal("ownership transfer hid desired-label drift")
+	}
+	// Isolate ownership from unrelated Deployment status/RV changes here.
+	_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, "")
+	if !apierrors.IsConflict(err) || !apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
+		t.Fatalf("expected a field-ownership conflict, not forced adoption or an RV conflict: %v", err)
+	}
+	// Removing the conflicting value relinquishes ownership. Missing desired
+	// metadata must then repair and converge without removing foreign fields.
+	currentDeployment, err = client.AppsV1().Deployments(namespace).Patch(ctx, deployment.Name, types.StrategicMergePatchType,
+		[]byte(`{"metadata":{"labels":{"application":null}}}`), metav1.PatchOptions{FieldManager: "external-drift"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if DeploymentApplyEqual(currentDeployment, deployment) {
+		t.Fatal("missing desired label was treated as converged")
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, currentDeployment.ResourceVersion)
+		if err == nil {
+			break
+		}
+		if !apierrors.IsConflict(err) || apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
+			t.Fatal(err)
+		}
+		currentDeployment, err = client.AppsV1().Deployments(namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err != nil {
+		t.Fatalf("metadata repair did not find a stable resourceVersion: %v", err)
+	}
+	currentDeployment, err = client.AppsV1().Deployments(namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentDeployment.Labels["application"] != "skupper-router" || currentDeployment.Labels["external.example/label"] != "retained" || currentDeployment.Annotations["admission.example/injected"] != "true" || !DeploymentApplyEqual(currentDeployment, deployment) {
+		t.Fatal("metadata repair did not preserve foreign fields and reach a zero-delta comparison")
+	}
+	t.Log("desired-label drift detected; external ownership conflicts without force; relinquished field repaired and reconverged with foreign metadata intact")
 	withoutReplicas := deployment.DeepCopy()
 	withoutReplicas.Spec.Replicas = nil
 	if DeploymentApplyEqual(currentDeployment, withoutReplicas) {

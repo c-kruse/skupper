@@ -218,6 +218,12 @@ evidence conservatively selects an apply. Access objects preserve the same API
 allocations/defaults during comparison and execution. Optional access collections
 must be known complete before they authorize retirement.
 
+Detecting drift does not authorize taking a field from another SSA manager.
+Even a strategic-merge patch can transfer ownership of a desired label: planning
+detects the difference, but the no-force apply reports a conflict until that
+ownership is relinquished. A missing desired label can be restored while keeping
+unrelated foreign metadata; a stolen field is not silently forced back.
+
 The snapshot also includes the current leader's published intent identities.
 An available matching canonical digest needs no publication or live validation;
 Applied reports alone do not establish publication state after a leader change.
