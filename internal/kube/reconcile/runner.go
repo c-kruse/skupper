@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"k8s.io/client-go/util/workqueue"
 )
@@ -127,6 +128,11 @@ func (q *Queue) process(ctx context.Context) bool {
 		q.queue.Forget(item)
 		return true
 	}
+	// Time-dependent inputs have an absolute deadline captured in the plan.
+	// Execution time and unrelated failure backoff must not postpone it.
+	if !report.NextReevaluation.IsZero() {
+		q.queue.AddAfter(namespace, time.Until(report.NextReevaluation))
+	}
 	if err != nil || report.NeedsRetry() {
 		if err != nil {
 			q.metrics.ReconcileFinished("error")
@@ -155,8 +161,5 @@ func (q *Queue) process(ctx context.Context) bool {
 	}
 	q.metrics.ReconcileFinished("success")
 	q.queue.Forget(item)
-	if report.NextReevaluation > 0 {
-		q.queue.AddAfter(namespace, report.NextReevaluation)
-	}
 	return true
 }

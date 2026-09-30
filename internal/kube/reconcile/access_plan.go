@@ -65,11 +65,8 @@ func (p AccessPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan {
 		return plan
 	}
 	changes, deadline := planAccessChanges(snapshot, desired)
-	if !deadline.IsZero() {
-		after := deadline.Sub(snapshot.EvaluationTime)
-		if after > 0 && (plan.NextReevaluation == 0 || after < plan.NextReevaluation) {
-			plan.NextReevaluation = after
-		}
+	if !deadline.IsZero() && (plan.NextReevaluation.IsZero() || deadline.Before(plan.NextReevaluation)) {
+		plan.NextReevaluation = deadline
 	}
 	if changes.Empty() {
 		return plan
@@ -152,11 +149,13 @@ func serviceCorrect(actual, desired *corev1.Service) bool {
 		return false
 	}
 	wanted := desired.DeepCopy()
-	preserveServiceFields(wanted, actual)
+	PreserveAccessServiceFields(wanted, actual)
 	return reflect.DeepEqual(actual.Spec, wanted.Spec) && reflect.DeepEqual(actual.Labels, wanted.Labels) && reflect.DeepEqual(actual.Annotations, wanted.Annotations) && reflect.DeepEqual(actual.OwnerReferences, wanted.OwnerReferences)
 }
 
-func preserveServiceFields(desired, actual *corev1.Service) {
+// PreserveAccessServiceFields keeps allocated and externally defaulted fields
+// identical in the cached comparison and live access-Service update paths.
+func PreserveAccessServiceFields(desired, actual *corev1.Service) {
 	desired.Spec.ClusterIP = actual.Spec.ClusterIP
 	desired.Spec.ClusterIPs = append([]string(nil), actual.Spec.ClusterIPs...)
 	desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), actual.Spec.IPFamilies...)
@@ -220,7 +219,9 @@ func certificateCorrect(actual, desired *skupperv2alpha1.Certificate) bool {
 }
 
 func certificateSecretCorrect(certificate *skupperv2alpha1.Certificate, secret *corev1.Secret, now time.Time) bool {
-	return secret != nil && certificates.SecretControlled(secret) && hasOwnerIdentity(secret.OwnerReferences, "Certificate", certificate.UID) && certificates.SecretCorrectAt(certificate, secret, now)
+	// Valid externally supplied material is deliberately reusable. Ownership is
+	// required by execution only when replacing it, matching CertificateManager.
+	return secret != nil && certificates.SecretCorrectAt(certificate, secret, now)
 }
 
 func diffSecured(desired, actual []*skupperv2alpha1.SecuredAccess, parents []*skupperv2alpha1.RouterAccess) (selected, retired []*skupperv2alpha1.SecuredAccess) {
@@ -257,7 +258,7 @@ func diffServices(desired, actual []*corev1.Service, parents []*skupperv2alpha1.
 		}
 	}
 	for _, value := range actual {
-		if !names[value.Name] && retireChild(value.Annotations, value.OwnerReferences, parents) {
+		if !names[value.Name] && retireChild(value.Labels, value.Annotations, value.OwnerReferences, parents) {
 			retired = append(retired, value.DeepCopy())
 		}
 	}
@@ -278,7 +279,7 @@ func diffRoutes(desired, actual []*routev1.Route, parents []*skupperv2alpha1.Sec
 	}
 	if complete {
 		for _, value := range actual {
-			if !names[value.Name] && retireChild(value.Annotations, value.OwnerReferences, parents) {
+			if !names[value.Name] && retireChild(value.Labels, value.Annotations, value.OwnerReferences, parents) {
 				retired = append(retired, value.DeepCopy())
 			}
 		}
@@ -299,7 +300,7 @@ func diffIngresses(desired, actual []*networkingv1.Ingress, parents []*skupperv2
 		}
 	}
 	for _, value := range actual {
-		if !names[value.Name] && retireChild(value.Annotations, value.OwnerReferences, parents) {
+		if !names[value.Name] && retireChild(value.Labels, value.Annotations, value.OwnerReferences, parents) {
 			retired = append(retired, value.DeepCopy())
 		}
 	}
@@ -320,7 +321,7 @@ func diffDynamic(desired, actual []*unstructured.Unstructured, parents []*skuppe
 	}
 	if complete {
 		for _, value := range actual {
-			if !names[value.GetName()] && retireChild(value.GetAnnotations(), value.GetOwnerReferences(), parents) {
+			if !names[value.GetName()] && retireChild(value.GetLabels(), value.GetAnnotations(), value.GetOwnerReferences(), parents) {
 				retired = append(retired, value.DeepCopy())
 			}
 		}
@@ -328,9 +329,9 @@ func diffDynamic(desired, actual []*unstructured.Unstructured, parents []*skuppe
 	return
 }
 
-func retireChild(annotations map[string]string, owners []metav1.OwnerReference, parents []*skupperv2alpha1.SecuredAccess) bool {
+func retireChild(labels, annotations map[string]string, owners []metav1.OwnerReference, parents []*skupperv2alpha1.SecuredAccess) bool {
 	owner := metav1.GetControllerOf(&metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{OwnerReferences: owners}})
-	return controlled(annotations) && owner != nil && owner.Kind == "SecuredAccess" && securedIdentityExists(parents, owner)
+	return labels["internal.skupper.io/secured-access"] == "true" && controlled(annotations) && owner != nil && owner.Kind == "SecuredAccess" && securedIdentityExists(parents, owner)
 }
 
 func controlled(annotations map[string]string) bool {

@@ -23,7 +23,7 @@ type Operation struct {
 type Plan struct {
 	Namespace        NamespaceIdentity
 	Operations       []Operation
-	NextReevaluation time.Duration
+	NextReevaluation time.Time
 }
 
 type ResultState string
@@ -46,7 +46,7 @@ type ExecutionReport struct {
 	Namespace        NamespaceIdentity
 	Results          []OperationResult
 	RetryAfter       time.Duration
-	NextReevaluation time.Duration
+	NextReevaluation time.Time
 }
 
 func (r ExecutionReport) NeedsRetry() bool {

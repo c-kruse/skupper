@@ -1283,6 +1283,9 @@ func (c *NamespaceController) RetireListenerServices(ctx context.Context, namesp
 }
 
 func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, changes reconcile.AccessChanges) error {
+	if err := c.verifySite(ctx, namespace, site); err != nil {
+		return err
+	}
 	effectErrors := []error{}
 	if changes.Generated != nil || changes.RetireGenerated != nil {
 		if err := c.ensureGeneratedRouterAccess(ctx, namespace, site, changes.Generated, changes.RetireGenerated); err != nil {
@@ -1397,7 +1400,7 @@ func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace
 		}
 		owner := metav1.GetControllerOf(value)
 		observedOwner := metav1.GetControllerOf(observed)
-		if value.GetUID() != observed.GetUID() || value.GetAnnotations()["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+		if value.GetUID() != observed.GetUID() || value.GetLabels()["internal.skupper.io/secured-access"] != "true" || value.GetAnnotations()["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
 			failures = append(failures, reconcile.SupersededError{Reason: gvr.Resource + " retirement candidate changed"})
 			continue
 		}
@@ -1409,8 +1412,8 @@ func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace
 			failures = append(failures, e)
 			continue
 		}
-		uid := value.GetUID()
-		if e := api.Delete(ctx, value.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); e != nil && !apierrors.IsNotFound(e) {
+		uid, rv := value.GetUID(), value.GetResourceVersion()
+		if e := api.Delete(ctx, value.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv}}); e != nil && !apierrors.IsNotFound(e) {
 			failures = append(failures, classifyWriteError(e))
 		}
 	}
@@ -1533,7 +1536,7 @@ func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespa
 		}
 		owner := metav1.GetControllerOf(value)
 		observedOwner := metav1.GetControllerOf(observed)
-		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+		if value.UID != observed.UID || value.Labels["internal.skupper.io/secured-access"] != "true" || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
 			failures = append(failures, reconcile.SupersededError{Reason: "Ingress retirement candidate changed"})
 			continue
 		}
@@ -1545,7 +1548,7 @@ func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespa
 			failures = append(failures, fmt.Errorf("retire Ingress %s: %w", value.Name, err))
 			continue
 		}
-		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID, ResourceVersion: &value.ResourceVersion}}); err != nil && !apierrors.IsNotFound(err) {
 			failures = append(failures, fmt.Errorf("retire Ingress %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
@@ -1613,7 +1616,7 @@ func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace 
 		}
 		owner := metav1.GetControllerOf(value)
 		observedOwner := metav1.GetControllerOf(observed)
-		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+		if value.UID != observed.UID || value.Labels["internal.skupper.io/secured-access"] != "true" || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
 			failures = append(failures, reconcile.SupersededError{Reason: "Route retirement candidate changed"})
 			continue
 		}
@@ -1625,7 +1628,7 @@ func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace 
 			failures = append(failures, fmt.Errorf("retire Route %s: %w", value.Name, err))
 			continue
 		}
-		if err := routes.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+		if err := routes.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID, ResourceVersion: &value.ResourceVersion}}); err != nil && !apierrors.IsNotFound(err) {
 			failures = append(failures, fmt.Errorf("retire Route %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
@@ -1651,7 +1654,7 @@ func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, n
 		if err := c.verifySite(ctx, namespace, site); err != nil {
 			return err
 		}
-		return classifyWriteError(api.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID}}))
+		return classifyWriteError(api.Delete(ctx, current.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &current.UID, ResourceVersion: &current.ResourceVersion}}))
 	}
 	if apierrors.IsNotFound(err) {
 		if err := c.verifySite(ctx, namespace, site); err != nil {
@@ -1740,7 +1743,7 @@ func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespa
 			failures = append(failures, fmt.Errorf("retire SecuredAccess %s: %w", value.Name, err))
 			continue
 		}
-		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID, ResourceVersion: &value.ResourceVersion}}); err != nil && !apierrors.IsNotFound(err) {
 			failures = append(failures, fmt.Errorf("retire SecuredAccess %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
@@ -1776,7 +1779,7 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 			continue
 		}
 		value.ResourceVersion = current.ResourceVersion
-		preserveAccessServiceFields(value, current)
+		reconcile.PreserveAccessServiceFields(value, current)
 		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.Annotations, value.Annotations) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) {
 			continue
 		}
@@ -1799,7 +1802,7 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 		}
 		owner := metav1.GetControllerOf(value)
 		observedOwner := metav1.GetControllerOf(observed)
-		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+		if value.UID != observed.UID || value.Labels["internal.skupper.io/secured-access"] != "true" || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
 			failures = append(failures, reconcile.SupersededError{Reason: "Service retirement candidate changed"})
 			continue
 		}
@@ -1811,31 +1814,11 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 			failures = append(failures, fmt.Errorf("retire Service %s: %w", value.Name, err))
 			continue
 		}
-		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID}}); err != nil && !apierrors.IsNotFound(err) {
+		if err := api.Delete(ctx, value.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &value.UID, ResourceVersion: &value.ResourceVersion}}); err != nil && !apierrors.IsNotFound(err) {
 			failures = append(failures, fmt.Errorf("retire Service %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
 	return errors.Join(failures...)
-}
-
-func preserveAccessServiceFields(desired, current *corev1.Service) {
-	desired.Spec.ClusterIP = current.Spec.ClusterIP
-	desired.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
-	desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
-	desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
-	desired.Spec.HealthCheckNodePort = current.Spec.HealthCheckNodePort
-	desired.Spec.ExternalTrafficPolicy = current.Spec.ExternalTrafficPolicy
-	desired.Spec.AllocateLoadBalancerNodePorts = current.Spec.AllocateLoadBalancerNodePorts
-	desired.Spec.LoadBalancerClass = current.Spec.LoadBalancerClass
-	desired.Spec.SessionAffinityConfig = current.Spec.SessionAffinityConfig
-	desired.Spec.TrafficDistribution = current.Spec.TrafficDistribution
-	for index := range desired.Spec.Ports {
-		for _, actual := range current.Spec.Ports {
-			if actual.Name == desired.Spec.Ports[index].Name && desired.Spec.Ports[index].NodePort == 0 {
-				desired.Spec.Ports[index].NodePort = actual.NodePort
-			}
-		}
-	}
 }
 
 func (c *NamespaceController) ensureCertificates(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*skupperv2alpha1.Certificate, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) ([]*skupperv2alpha1.Certificate, error) {

@@ -58,6 +58,8 @@ func TestAccessPlannerSelectsNarrowDriftAndSafeRetirement(t *testing.T) {
 		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "site", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}
 	}
 	keep, metadataDrift, specDrift, ownerDrift, retire := makeService("keep"), makeService("metadata"), makeService("spec"), makeService("owner"), makeService("retire")
+	unmanaged := makeService("unmanaged")
+	unmanaged.Labels = nil
 	keep.UID, metadataDrift.UID, specDrift.UID, ownerDrift.UID, retire.UID = "keep-uid", "metadata-uid", "spec-uid", "owner-uid", "retire-uid"
 	wantedMetadata := metadataDrift.DeepCopy()
 	wantedMetadata.Labels["repair"] = "true"
@@ -66,7 +68,7 @@ func TestAccessPlannerSelectsNarrowDriftAndSafeRetirement(t *testing.T) {
 	wantedOwner := ownerDrift.DeepCopy()
 	ownerDrift.OwnerReferences[0].UID = "foreign-parent"
 	desiredServices := []*corev1.Service{keep.DeepCopy(), wantedMetadata, wantedSpec, wantedOwner}
-	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Services: []*corev1.Service{keep, metadataDrift, specDrift, ownerDrift, retire}}
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Services: []*corev1.Service{keep, metadataDrift, specDrift, ownerDrift, retire, unmanaged}}
 	changes, _ := planAccessChanges(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, AccessServices: desiredServices})
 	if len(changes.Services) != 3 || len(changes.RetireServices) != 1 {
 		t.Fatalf("planner selected wrong number of repairs/retirements: %#v", changes)
@@ -94,6 +96,7 @@ func TestAccessPlannerRepairsCertificateAndRequiresCompleteOptionalObservationFo
 	proxy := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "projectcontour.io/v1", "kind": "HTTPProxy", "metadata": map[string]interface{}{}, "spec": map[string]interface{}{}}}
 	proxy.SetName("retire")
 	proxy.SetUID("proxy-uid")
+	proxy.SetLabels(map[string]string{"internal.skupper.io/secured-access": "true"})
 	proxy.SetAnnotations(map[string]string{"internal.skupper.io/controlled": "true"})
 	proxy.SetOwnerReferences([]metav1.OwnerReference{owner})
 	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Certificates: []*skupperv2alpha1.Certificate{certificate}, HTTPProxies: []*unstructured.Unstructured{proxy}}
@@ -122,12 +125,18 @@ func TestCertificateDeadlineSelectsRenewalAtExpiry(t *testing.T) {
 	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, EvaluationTime: now, Certificates: []*skupperv2alpha1.Certificate{certificate}, Secrets: []*corev1.Secret{secret}}
 	planner := AccessPlanner{Next: emptyPlanner{}, Ensurer: &recordingAccessEnsurer{}}
 	plan := planner.Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace})
-	if len(plan.Operations) != 0 || plan.NextReevaluation != expiry.Sub(now) {
-		t.Fatalf("valid certificate did not produce one exact successful deadline: operations=%d retry=%s want=%s", len(plan.Operations), plan.NextReevaluation, expiry.Sub(now))
+	if len(plan.Operations) != 0 || !plan.NextReevaluation.Equal(expiry) {
+		t.Fatalf("valid certificate did not produce one exact successful deadline: operations=%d deadline=%s want=%s", len(plan.Operations), plan.NextReevaluation, expiry)
+	}
+	secret.OwnerReferences = nil
+	secret.Annotations = nil
+	plan = planner.Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace})
+	if len(plan.Operations) != 0 || !plan.NextReevaluation.Equal(expiry) {
+		t.Fatal("valid externally supplied certificate material scheduled replacement")
 	}
 	snapshot.EvaluationTime = expiry
 	plan = planner.Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace})
-	if len(plan.Operations) != 1 || plan.NextReevaluation != 0 {
+	if len(plan.Operations) != 1 || !plan.NextReevaluation.IsZero() {
 		t.Fatalf("expiry did not select issuance without a near-zero timer: operations=%d retry=%s", len(plan.Operations), plan.NextReevaluation)
 	}
 }

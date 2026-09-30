@@ -640,6 +640,51 @@ func TestStaleSecuredAccessSnapshotPreventsServiceMutations(t *testing.T) {
 	}
 }
 
+func TestAccessRetirementPreservesSelectionAndLiveVersionFences(t *testing.T) {
+	for _, change := range []string{"unchanged", "recreated", "unlabelled", "stale-site"} {
+		t.Run(change, func(t *testing.T) {
+			controller, clients, namespace, site := listenerServiceTestController(t)
+			parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid"}}
+			if _, err := clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name).Create(context.Background(), parent, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			observed := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "retire", Namespace: namespace.Name, UID: "service-uid", ResourceVersion: "10", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{accessOwner(parent)}}}
+			live := observed.DeepCopy()
+			live.ResourceVersion = "12"
+			switch change {
+			case "recreated":
+				live.UID = "replacement-uid"
+			case "unlabelled":
+				live.Labels = nil
+			case "stale-site":
+				site = site.DeepCopy()
+				site.Generation++
+			}
+			if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Create(context.Background(), live, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			deletes := 0
+			clients.GetKubeClient().(*kubefake.Clientset).PrependReactor("delete", "services", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				deletes++
+				preconditions := action.(clienttesting.DeleteAction).GetDeleteOptions().Preconditions
+				if preconditions == nil || preconditions.UID == nil || *preconditions.UID != live.UID || preconditions.ResourceVersion == nil || *preconditions.ResourceVersion != "12" {
+					t.Fatalf("retirement did not fence the live ownership check: %#v", preconditions)
+				}
+				return false, nil, nil
+			})
+			changes := reconcile.AccessChanges{RetireServices: []*corev1.Service{observed}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}}
+			err := controller.EnsureAccessComposition(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, site, changes)
+			if change == "unchanged" {
+				if err != nil || deletes != 1 {
+					t.Fatalf("safe retirement failed: deletes=%d err=%v", deletes, err)
+				}
+			} else if err == nil || deletes != 0 {
+				t.Fatalf("unsafe retirement proceeded: deletes=%d err=%v", deletes, err)
+			}
+		})
+	}
+}
+
 func TestAssignmentRevokedBetweenOwnerCheckAndMutationPreventsWrite(t *testing.T) {
 	controller, clients, namespace, _ := listenerServiceTestController(t)
 	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: namespace.Name, UID: "access-uid"}}
