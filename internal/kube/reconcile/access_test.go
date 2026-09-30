@@ -1,7 +1,9 @@
 package reconcile
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	routev1 "github.com/openshift/api/route/v1"
@@ -12,6 +14,123 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
+
+type recordingAccessEnsurer struct {
+	calls   int
+	changes AccessChanges
+}
+
+func (e *recordingAccessEnsurer) EnsureAccessComposition(_ context.Context, _ NamespaceIdentity, _ *skupperv2alpha1.Site, changes AccessChanges) error {
+	e.calls++
+	e.changes = changes
+	return nil
+}
+
+func TestAccessPlannerSkipsConvergedCacheAndDoesNotMutateSnapshot(t *testing.T) {
+	controller := true
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: "site", UID: "parent", ResourceVersion: "7", Generation: 2}}
+	owner := metav1.OwnerReference{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: parent.Name, UID: parent.UID, Controller: &controller}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: "site", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: corev1.ServiceSpec{ClusterIP: "10.0.0.1", Ports: []corev1.ServicePort{{Name: "tls", Port: 443, NodePort: 30443}}}}
+	desiredService := service.DeepCopy()
+	desiredService.Spec.ClusterIP = ""
+	desiredService.Spec.Ports[0].NodePort = 0
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Services: []*corev1.Service{service}, EvaluationTime: time.Now()}
+	before := snapshot.Services[0].DeepCopy()
+	ensurer := &recordingAccessEnsurer{}
+	plan := (AccessPlanner{Next: emptyPlanner{}, Ensurer: ensurer}).Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, AccessServices: []*corev1.Service{desiredService}})
+	if len(plan.Operations) != 0 {
+		t.Fatalf("converged access planned API effects: %#v", plan.Operations)
+	}
+	(Executor{}).Execute(context.Background(), plan)
+	if ensurer.calls != 0 {
+		t.Fatalf("converged plan made %d effect calls", ensurer.calls)
+	}
+	if diff := cmp.Diff(before, snapshot.Services[0]); diff != "" {
+		t.Fatalf("planning mutated snapshot (-want +got):\n%s", diff)
+	}
+}
+
+func TestAccessPlannerSelectsNarrowDriftAndSafeRetirement(t *testing.T) {
+	controller := true
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: "site", UID: "parent"}}
+	owner := metav1.OwnerReference{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: parent.Name, UID: parent.UID, Controller: &controller}
+	makeService := func(name string) *corev1.Service {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "site", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}
+	}
+	keep, metadataDrift, specDrift, ownerDrift, retire := makeService("keep"), makeService("metadata"), makeService("spec"), makeService("owner"), makeService("retire")
+	keep.UID, metadataDrift.UID, specDrift.UID, ownerDrift.UID, retire.UID = "keep-uid", "metadata-uid", "spec-uid", "owner-uid", "retire-uid"
+	wantedMetadata := metadataDrift.DeepCopy()
+	wantedMetadata.Labels["repair"] = "true"
+	wantedSpec := specDrift.DeepCopy()
+	wantedSpec.Spec.Ports = []corev1.ServicePort{{Name: "tls", Port: 443}}
+	wantedOwner := ownerDrift.DeepCopy()
+	ownerDrift.OwnerReferences[0].UID = "foreign-parent"
+	desiredServices := []*corev1.Service{keep.DeepCopy(), wantedMetadata, wantedSpec, wantedOwner}
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Services: []*corev1.Service{keep, metadataDrift, specDrift, ownerDrift, retire}}
+	changes, _ := planAccessChanges(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, AccessServices: desiredServices})
+	if len(changes.Services) != 3 || len(changes.RetireServices) != 1 {
+		t.Fatalf("planner selected wrong number of repairs/retirements: %#v", changes)
+	}
+	if got := []string{changes.Services[0].Name, changes.Services[1].Name, changes.Services[2].Name}; !cmp.Equal(got, []string{"metadata", "spec", "owner"}) || changes.RetireServices[0].UID != retire.UID || changes.RetireServices[0].Name != "retire" {
+		t.Fatalf("planner did not select only metadata drift and exact retirement: %#v", changes)
+	}
+	foreignParent := parent.DeepCopy()
+	foreignParent.UID = "replacement"
+	snapshot.SecuredAccesses = []*skupperv2alpha1.SecuredAccess{foreignParent}
+	changes, _ = planAccessChanges(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, AccessServices: desiredServices})
+	if len(changes.RetireServices) != 0 {
+		t.Fatalf("retirement was authorized by a different parent identity: %#v", changes.RetireServices)
+	}
+}
+
+func TestAccessPlannerRepairsCertificateAndRequiresCompleteOptionalObservationForRetirement(t *testing.T) {
+	controller := true
+	parent := &skupperv2alpha1.SecuredAccess{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: "site", UID: "parent"}}
+	owner := metav1.OwnerReference{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "SecuredAccess", Name: parent.Name, UID: parent.UID, Controller: &controller}
+	certificate := &skupperv2alpha1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "tls", Namespace: "site", UID: "certificate", Labels: map[string]string{"internal.skupper.io/certificate": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: skupperv2alpha1.CertificateSpec{Subject: "old"}}
+	wantedCertificate := certificate.DeepCopy()
+	wantedCertificate.UID = ""
+	wantedCertificate.Spec.Subject = "new"
+	proxy := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "projectcontour.io/v1", "kind": "HTTPProxy", "metadata": map[string]interface{}{}, "spec": map[string]interface{}{}}}
+	proxy.SetName("retire")
+	proxy.SetUID("proxy-uid")
+	proxy.SetAnnotations(map[string]string{"internal.skupper.io/controlled": "true"})
+	proxy.SetOwnerReferences([]metav1.OwnerReference{owner})
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, SecuredAccesses: []*skupperv2alpha1.SecuredAccess{parent}, Certificates: []*skupperv2alpha1.Certificate{certificate}, HTTPProxies: []*unstructured.Unstructured{proxy}}
+	changes, _ := planAccessChanges(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, Certificates: []*skupperv2alpha1.Certificate{wantedCertificate}})
+	if len(changes.Certificates) != 1 || len(changes.RetireHTTPProxies) != 0 {
+		t.Fatalf("certificate drift or incomplete retirement was planned incorrectly: %#v", changes)
+	}
+	snapshot.ObservedAccess.HTTPProxies = true
+	changes, _ = planAccessChanges(snapshot, DesiredNamespace{Namespace: snapshot.Namespace, Certificates: []*skupperv2alpha1.Certificate{wantedCertificate}})
+	if len(changes.RetireHTTPProxies) != 1 || changes.RetireHTTPProxies[0].GetUID() != proxy.GetUID() {
+		t.Fatalf("complete optional observation did not retire exact identity: %#v", changes.RetireHTTPProxies)
+	}
+}
+
+func TestCertificateDeadlineSelectsRenewalAtExpiry(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	certificate := &skupperv2alpha1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "issuer", Namespace: "site", UID: "certificate", ResourceVersion: "1", Generation: 1, Labels: map[string]string{"internal.skupper.io/certificate": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}}, Spec: skupperv2alpha1.CertificateSpec{Subject: "issuer", Signing: true}}
+	secret, err := certificates.GenerateSecret(certificate, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry, ok := certificates.SecretExpiry(secret)
+	if !ok {
+		t.Fatal("generated certificate has no expiry")
+	}
+	snapshot := Snapshot{Namespace: NamespaceIdentity{Name: "site", UID: "namespace"}, Assignment: Assignment{Controlled: true}, EvaluationTime: now, Certificates: []*skupperv2alpha1.Certificate{certificate}, Secrets: []*corev1.Secret{secret}}
+	planner := AccessPlanner{Next: emptyPlanner{}, Ensurer: &recordingAccessEnsurer{}}
+	plan := planner.Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace})
+	if len(plan.Operations) != 0 || plan.NextReevaluation != expiry.Sub(now) {
+		t.Fatalf("valid certificate did not produce one exact successful deadline: operations=%d retry=%s want=%s", len(plan.Operations), plan.NextReevaluation, expiry.Sub(now))
+	}
+	snapshot.EvaluationTime = expiry
+	plan = planner.Plan(snapshot, DesiredNamespace{Namespace: snapshot.Namespace})
+	if len(plan.Operations) != 1 || plan.NextReevaluation != 0 {
+		t.Fatalf("expiry did not select issuance without a near-zero timer: operations=%d retry=%s", len(plan.Operations), plan.NextReevaluation)
+	}
+}
 
 func TestAccessCompositionWaitsForRealParentUIDAndThenCreatesHAChildren(t *testing.T) {
 	snapshot := baseSnapshot()

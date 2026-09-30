@@ -98,8 +98,18 @@ type Snapshot struct {
 	DefaultAccessType string
 	ClusterHost       string
 	AccessConfig      AccessConfig
+	ObservedAccess    AccessObservations
 	SourceNamespaces  map[string]types.UID
 	SourceAssignments map[string]Assignment
+}
+
+// AccessObservations records which optional informer-backed collections were
+// available and complete when the snapshot was taken. Only complete
+// collections can authorize retirement.
+type AccessObservations struct {
+	Routes      bool
+	HTTPProxies bool
+	TLSRoutes   bool
 }
 
 type AccessConfig struct {

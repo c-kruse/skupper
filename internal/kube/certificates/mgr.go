@@ -466,7 +466,7 @@ func SecretCorrectAt(certificate *skupperv2alpha1.Certificate, secret *corev1.Se
 		slog.Error("Bad certificate secret", slog.String("key", certificate.Key()), slog.Any("error", err))
 		return false
 	}
-	if now.After(cert.NotAfter) {
+	if !now.Before(cert.NotAfter) {
 		slog.Info("Certificate has expired", slog.String("key", certificate.Key()))
 		return false
 	}
@@ -493,6 +493,21 @@ func SecretCorrectAt(certificate *skupperv2alpha1.Certificate, secret *corev1.Se
 		}
 	}
 	return true
+}
+
+// SecretExpiry returns the instant at which an otherwise-correct Secret must
+// next be evaluated. Certificate issuance policy intentionally has no renewal
+// lead time, so the deadline is the encoded NotAfter value itself.
+func SecretExpiry(secret *corev1.Secret) (time.Time, bool) {
+	data, ok := secret.Data["tls.crt"]
+	if !ok {
+		return time.Time{}, false
+	}
+	certificate, err := certs.DecodeCertificate(data)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return certificate.NotAfter, true
 }
 
 func isSecretControlled(secret *corev1.Secret) bool {

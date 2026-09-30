@@ -21,8 +21,9 @@ type Operation struct {
 }
 
 type Plan struct {
-	Namespace  NamespaceIdentity
-	Operations []Operation
+	Namespace        NamespaceIdentity
+	Operations       []Operation
+	NextReevaluation time.Duration
 }
 
 type ResultState string
@@ -42,9 +43,10 @@ type OperationResult struct {
 }
 
 type ExecutionReport struct {
-	Namespace  NamespaceIdentity
-	Results    []OperationResult
-	RetryAfter time.Duration
+	Namespace        NamespaceIdentity
+	Results          []OperationResult
+	RetryAfter       time.Duration
+	NextReevaluation time.Duration
 }
 
 func (r ExecutionReport) NeedsRetry() bool {
@@ -74,7 +76,7 @@ func (e SupersededError) Error() string { return "plan superseded: " + e.Reason 
 type Executor struct{}
 
 func (Executor) Execute(ctx context.Context, plan Plan) ExecutionReport {
-	report := ExecutionReport{Namespace: plan.Namespace}
+	report := ExecutionReport{Namespace: plan.Namespace, NextReevaluation: plan.NextReevaluation}
 	states := map[OperationID]ResultState{}
 	operations := append([]Operation(nil), plan.Operations...)
 	sort.SliceStable(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })

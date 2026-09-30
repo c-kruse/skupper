@@ -195,10 +195,11 @@ func TestStandaloneAccessPlanExecutesServiceSecretAndStatusWrites(t *testing.T) 
 	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), access.Name, metav1.GetOptions{}); err != nil {
 		t.Fatalf("standalone Service was not written: %v", err)
 	}
-	for _, name := range []string{"issuer", "enrollment"} {
-		if _, err := clients.GetKubeClient().CoreV1().Secrets(namespace.Name).Get(context.Background(), name, metav1.GetOptions{}); err != nil {
-			t.Fatalf("standalone Secret %s was not written: %v", name, err)
-		}
+	if _, err := clients.GetKubeClient().CoreV1().Secrets(namespace.Name).Get(context.Background(), "issuer", metav1.GetOptions{}); err != nil {
+		t.Fatalf("standalone issuer Secret was not written: %v", err)
+	}
+	if _, err := clients.GetKubeClient().CoreV1().Secrets(namespace.Name).Get(context.Background(), "enrollment", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("leaf Secret did not wait for generated Certificate identity: %v", err)
 	}
 	updated, err := clients.GetSkupperClient().SkupperV2alpha1().Certificates(namespace.Name).Get(context.Background(), issuer.Name, metav1.GetOptions{})
 	if err != nil || updated.Status.StatusType == "" {
@@ -584,7 +585,7 @@ func TestAccessServiceFailureDoesNotBlockLaterDesiredMutation(t *testing.T) {
 		{ObjectMeta: metav1.ObjectMeta{Name: foreign.Name, Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "z-valid", Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}},
 	}
-	err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, []*skupperv2alpha1.SecuredAccess{parent})
+	err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, nil, []*skupperv2alpha1.SecuredAccess{parent})
 	if err == nil {
 		t.Fatal("foreign Service was not reported")
 	}
@@ -610,6 +611,7 @@ func TestStaleSecuredAccessSnapshotPreventsServiceMutations(t *testing.T) {
 			owner := accessOwner(snapshot)
 			name := "service"
 			var desired []*corev1.Service
+			var retired []*corev1.Service
 			if operation != "create" {
 				current := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, UID: "service-uid", Labels: map[string]string{"internal.skupper.io/secured-access": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}
 				if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Create(context.Background(), current, metav1.CreateOptions{}); err != nil {
@@ -617,11 +619,13 @@ func TestStaleSecuredAccessSnapshotPreventsServiceMutations(t *testing.T) {
 				}
 				if operation == "update" {
 					desired = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, Labels: map[string]string{"changed": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}}
+				} else {
+					retired = []*corev1.Service{current.DeepCopy()}
 				}
 			} else {
 				desired = []*corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: []metav1.OwnerReference{owner}}}}
 			}
-			if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, []*skupperv2alpha1.SecuredAccess{snapshot}); err == nil {
+			if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, desired, retired, []*skupperv2alpha1.SecuredAccess{snapshot}); err == nil {
 				t.Fatal("stale parent snapshot was not reported")
 			}
 			actual, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), name, metav1.GetOptions{})
@@ -654,7 +658,7 @@ func TestAssignmentRevokedBetweenOwnerCheckAndMutationPreventsWrite(t *testing.T
 		return false, nil, nil
 	})
 	desired := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "blocked", Namespace: namespace.Name, OwnerReferences: []metav1.OwnerReference{accessOwner(parent)}}}
-	if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, []*corev1.Service{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err == nil {
+	if err := controller.ensureAccessServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, []*corev1.Service{desired}, nil, []*skupperv2alpha1.SecuredAccess{parent}); err == nil {
 		t.Fatal("assignment revocation was not reported")
 	}
 	if _, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), desired.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -707,7 +711,7 @@ func TestDynamicAccessForeignObjectDoesNotBlockIndependentCreate(t *testing.T) {
 	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	err := controller.ensureDynamicAccess(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{makeProxy("a-foreign"), makeProxy("z-valid")}, []*skupperv2alpha1.SecuredAccess{parent})
+	err := controller.ensureDynamicAccess(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{makeProxy("a-foreign"), makeProxy("z-valid")}, nil, []*skupperv2alpha1.SecuredAccess{parent})
 	if err == nil {
 		t.Fatal("foreign HTTPProxy was not reported")
 	}
@@ -743,7 +747,7 @@ func TestDynamicAccessUpdatePreservesDefaultsIsQuietAndRetires(t *testing.T) {
 		return false, nil, nil
 	})
 	identity := reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}
-	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, nil, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), desired.GetName(), metav1.GetOptions{})
@@ -754,10 +758,10 @@ func TestDynamicAccessUpdatePreservesDefaultsIsQuietAndRetires(t *testing.T) {
 	if !defaulted || updates != 1 {
 		t.Fatalf("defaulted field was lost or update missing: object=%#v updates=%d", updated, updates)
 	}
-	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, []*skupperv2alpha1.SecuredAccess{parent}); err != nil || updates != 1 {
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, []*unstructured.Unstructured{desired}, nil, []*skupperv2alpha1.SecuredAccess{parent}); err != nil || updates != 1 {
 		t.Fatalf("stable dynamic object was not quiet: updates=%d err=%v", updates, err)
 	}
-	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, nil, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
+	if err := controller.ensureDynamicAccess(context.Background(), identity, nil, reconcile.HTTPProxyGVR, nil, []*unstructured.Unstructured{updated.DeepCopy()}, []*skupperv2alpha1.SecuredAccess{parent}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := clients.GetDynamicClient().Resource(reconcile.HTTPProxyGVR).Namespace(namespace.Name).Get(context.Background(), desired.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {

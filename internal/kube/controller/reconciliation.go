@@ -812,12 +812,15 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	snapshot := reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace, UID: ns.UID}, EvaluationTime: evaluationTime, Assignment: c.assignment(namespace), Sites: listNamespace[*skupperv2alpha1.Site](c.informers.sites, namespace), Listeners: listNamespace[*skupperv2alpha1.Listener](c.informers.listeners, namespace), MultiKeyListeners: listNamespace[*skupperv2alpha1.MultiKeyListener](c.informers.multiKeyListeners, namespace), Connectors: listNamespace[*skupperv2alpha1.Connector](c.informers.connectors, namespace), Links: listNamespace[*skupperv2alpha1.Link](c.informers.links, namespace), RouterAccesses: listNamespace[*skupperv2alpha1.RouterAccess](c.informers.routerAccesses, namespace), Certificates: listNamespace[*skupperv2alpha1.Certificate](c.informers.certificates, namespace), SecuredAccesses: listNamespace[*skupperv2alpha1.SecuredAccess](c.informers.securedAccesses, namespace), Bindings: listNamespace[*skupperv2alpha1.AttachedConnectorBinding](c.informers.bindings, namespace), Services: listNamespace[*corev1.Service](c.informers.services, namespace), ServiceAccounts: listNamespace[*corev1.ServiceAccount](c.informers.serviceAccounts, namespace), Roles: listNamespace[*rbacv1.Role](c.informers.roles, namespace), RoleBindings: listNamespace[*rbacv1.RoleBinding](c.informers.roleBindings, namespace), Ingresses: listNamespace[*networkingv1.Ingress](c.informers.ingresses, namespace), Secrets: listNamespace[*corev1.Secret](c.informers.secrets, namespace), Bootstrap: bootstrap}
 	if c.informers.routes != nil {
 		snapshot.Routes = listNamespace[*routev1.Route](c.informers.routes, namespace)
+		snapshot.ObservedAccess.Routes = true
 	}
 	if c.informers.httpProxies != nil {
 		snapshot.HTTPProxies = listNamespace[*unstructured.Unstructured](c.informers.httpProxies, namespace)
+		snapshot.ObservedAccess.HTTPProxies = true
 	}
 	if c.informers.tlsRoutes != nil {
 		snapshot.TLSRoutes = listNamespace[*unstructured.Unstructured](c.informers.tlsRoutes, namespace)
+		snapshot.ObservedAccess.TLSRoutes = true
 	}
 	if c.informers.gateway != nil {
 		if value, exists, _ := c.informers.gateway.GetStore().GetByKey(c.controllerNamespace + "/skupper"); exists {
@@ -1279,52 +1282,46 @@ func (c *NamespaceController) RetireListenerServices(ctx context.Context, namesp
 	return nil
 }
 
-func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, generated *skupperv2alpha1.RouterAccess, secured []*skupperv2alpha1.SecuredAccess, desiredCertificates []*skupperv2alpha1.Certificate, services []*corev1.Service, routes []*routev1.Route, ingresses []*networkingv1.Ingress, httpProxies, tlsRoutes []*unstructured.Unstructured, gateway *unstructured.Unstructured, snapshotRouterAccesses []*skupperv2alpha1.RouterAccess, snapshotSecuredAccesses []*skupperv2alpha1.SecuredAccess, snapshotCertificates []*skupperv2alpha1.Certificate, _ []*corev1.Secret, evaluationTime time.Time) error {
-	if err := c.verifySite(ctx, namespace, site); err != nil {
-		return err
-	}
+func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, changes reconcile.AccessChanges) error {
 	effectErrors := []error{}
-	if site != nil {
-		if err := c.ensureGeneratedRouterAccess(ctx, namespace, site, generated); err != nil {
+	if changes.Generated != nil || changes.RetireGenerated != nil {
+		if err := c.ensureGeneratedRouterAccess(ctx, namespace, site, changes.Generated, changes.RetireGenerated); err != nil {
 			effectErrors = append(effectErrors, fmt.Errorf("ensure generated RouterAccess: %w", err))
 		}
 	}
-	if err := c.ensureSecuredAccesses(ctx, namespace, site, secured, snapshotRouterAccesses); err != nil {
+	if err := c.ensureSecuredAccesses(ctx, namespace, site, changes.Secured, changes.RetireSecured, changes.RouterAccesses); err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure generated SecuredAccess resources: %w", err))
 	}
-	if err := c.ensureAccessServices(ctx, namespace, site, services, snapshotSecuredAccesses); err != nil {
+	if err := c.ensureAccessServices(ctx, namespace, site, changes.Services, changes.RetireServices, changes.SecuredAccesses); err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure SecuredAccess Services: %w", err))
 	}
-	if err := c.ensureAccessRoutes(ctx, namespace, site, routes, snapshotSecuredAccesses); err != nil {
+	if err := c.ensureAccessRoutes(ctx, namespace, site, changes.Routes, changes.RetireRoutes, changes.SecuredAccesses); err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure SecuredAccess Routes: %w", err))
 	}
-	if err := c.ensureAccessIngresses(ctx, namespace, site, ingresses, snapshotSecuredAccesses); err != nil {
+	if err := c.ensureAccessIngresses(ctx, namespace, site, changes.Ingresses, changes.RetireIngresses, changes.SecuredAccesses); err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure SecuredAccess Ingresses: %w", err))
 	}
-	if c.informers.httpProxies != nil {
-		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.HTTPProxyGVR, httpProxies, snapshotSecuredAccesses); err != nil {
+	if len(changes.HTTPProxies)+len(changes.RetireHTTPProxies) > 0 {
+		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.HTTPProxyGVR, changes.HTTPProxies, changes.RetireHTTPProxies, changes.SecuredAccesses); err != nil {
 			effectErrors = append(effectErrors, fmt.Errorf("ensure HTTPProxies: %w", err))
 		}
 	}
-	if c.informers.tlsRoutes != nil {
-		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.TLSRouteGVR, tlsRoutes, snapshotSecuredAccesses); err != nil {
+	if len(changes.TLSRoutes)+len(changes.RetireTLSRoutes) > 0 {
+		if err := c.ensureDynamicAccess(ctx, namespace, site, reconcile.TLSRouteGVR, changes.TLSRoutes, changes.RetireTLSRoutes, changes.SecuredAccesses); err != nil {
 			effectErrors = append(effectErrors, fmt.Errorf("ensure TLSRoutes: %w", err))
 		}
 	}
-	if gateway != nil {
-		if err := c.ensureGateway(ctx, namespace, site, gateway); err != nil {
+	if changes.Gateway != nil {
+		if err := c.ensureGateway(ctx, namespace, site, changes.Gateway); err != nil {
 			effectErrors = append(effectErrors, fmt.Errorf("ensure Gateway: %w", err))
 		}
 	}
-	applied, err := c.ensureCertificates(ctx, namespace, site, desiredCertificates, snapshotSecuredAccesses)
+	_, err := c.ensureCertificates(ctx, namespace, site, changes.Certificates, changes.SecuredAccesses)
 	if err != nil {
 		effectErrors = append(effectErrors, fmt.Errorf("ensure generated Certificates: %w", err))
 	}
 	byName := map[string]*skupperv2alpha1.Certificate{}
-	for _, certificate := range snapshotCertificates {
-		byName[certificate.Name] = certificate
-	}
-	for _, certificate := range applied {
+	for _, certificate := range changes.CertificateSecrets {
 		byName[certificate.Name] = certificate
 	}
 	availableSecrets := map[string]*corev1.Secret{}
@@ -1337,7 +1334,7 @@ func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, names
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			secret, err := c.ensureCertificateSecret(ctx, namespace, site, byName[name], availableSecrets[byName[name].Spec.Ca], evaluationTime)
+			secret, err := c.ensureCertificateSecret(ctx, namespace, site, byName[name], availableSecrets[byName[name].Spec.Ca], changes.EvaluationTime)
 			if err != nil {
 				effectErrors = append(effectErrors, fmt.Errorf("ensure Certificate Secret %s: %w", name, err))
 				continue
@@ -1348,12 +1345,10 @@ func (c *NamespaceController) EnsureAccessComposition(ctx context.Context, names
 	return errors.Join(effectErrors...)
 }
 
-func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, gvr schema.GroupVersionResource, desired []*unstructured.Unstructured, expected []*skupperv2alpha1.SecuredAccess) error {
+func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, gvr schema.GroupVersionResource, desired, retired []*unstructured.Unstructured, expected []*skupperv2alpha1.SecuredAccess) error {
 	api := c.clients.GetDynamicClient().Resource(gvr).Namespace(namespace.Name)
-	names := map[string]bool{}
 	var failures []error
 	for _, value := range desired {
-		names[value.GetName()] = true
 		if err := c.verifyAccessOwners(ctx, namespace, site, value.GetOwnerReferences(), nil, expected); err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", value.GetName(), err))
 			continue
@@ -1372,8 +1367,8 @@ func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace
 				failures = append(failures, fmt.Errorf("%s is foreign", value.GetName()))
 				continue
 			}
-			mergedSpec := mergeDesiredJSON(current.Object["spec"], value.Object["spec"])
-			if reflect.DeepEqual(current.Object["spec"], mergedSpec) {
+			mergedSpec := reconcile.MergeDesiredJSON(current.Object["spec"], value.Object["spec"])
+			if reflect.DeepEqual(current.Object["spec"], mergedSpec) && reflect.DeepEqual(current.GetLabels(), value.GetLabels()) && reflect.DeepEqual(current.GetAnnotations(), value.GetAnnotations()) && reflect.DeepEqual(current.GetOwnerReferences(), value.GetOwnerReferences()) {
 				continue
 			}
 			updated := current.DeepCopy()
@@ -1391,17 +1386,19 @@ func (c *NamespaceController) ensureDynamicAccess(ctx context.Context, namespace
 			failures = append(failures, fmt.Errorf("%s: %w", value.GetName(), classifyWriteError(err)))
 		}
 	}
-	current, err := api.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
-	if err != nil {
-		return errors.Join(append(failures, classifyWriteError(err))...)
-	}
-	for i := range current.Items {
-		value := &current.Items[i]
-		if names[value.GetName()] || value.GetAnnotations()["internal.skupper.io/controlled"] != "true" {
+	for _, observed := range retired {
+		value, err := api.Get(ctx, observed.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			failures = append(failures, classifyWriteError(err))
 			continue
 		}
 		owner := metav1.GetControllerOf(value)
-		if owner == nil || owner.Kind != "SecuredAccess" {
+		observedOwner := metav1.GetControllerOf(observed)
+		if value.GetUID() != observed.GetUID() || value.GetAnnotations()["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+			failures = append(failures, reconcile.SupersededError{Reason: gvr.Resource + " retirement candidate changed"})
 			continue
 		}
 		parent := expectedSecuredAccess(expected, owner)
@@ -1471,12 +1468,15 @@ func (c *NamespaceController) ensureGateway(ctx context.Context, namespace recon
 	if current.GetAnnotations()["internal.skupper.io/controlled"] != "true" || current.GroupVersionKind() != desired.GroupVersionKind() || currentOwner == nil || currentOwner.UID != owner.UID {
 		return fmt.Errorf("Gateway is foreign and will not be claimed")
 	}
-	mergedSpec := mergeDesiredJSON(current.Object["spec"], desired.Object["spec"])
-	if reflect.DeepEqual(current.Object["spec"], mergedSpec) {
+	mergedSpec := reconcile.MergeDesiredJSON(current.Object["spec"], desired.Object["spec"])
+	if reflect.DeepEqual(current.Object["spec"], mergedSpec) && reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) && reflect.DeepEqual(current.GetAnnotations(), desired.GetAnnotations()) && reflect.DeepEqual(current.GetOwnerReferences(), desired.GetOwnerReferences()) {
 		return nil
 	}
 	updated := current.DeepCopy()
 	updated.Object["spec"] = mergedSpec
+	updated.SetLabels(desired.GetLabels())
+	updated.SetAnnotations(desired.GetAnnotations())
+	updated.SetOwnerReferences(desired.GetOwnerReferences())
 	if err := c.verifySite(ctx, namespace, site); err != nil {
 		return err
 	}
@@ -1487,27 +1487,10 @@ func (c *NamespaceController) ensureGateway(ctx context.Context, namespace recon
 	return err
 }
 
-// mergeDesiredJSON applies controller-owned desired fields while retaining
-// unknown/defaulted fields returned by extension APIs.
-func mergeDesiredJSON(current, desired interface{}) interface{} {
-	currentMap, currentOK := current.(map[string]interface{})
-	desiredMap, desiredOK := desired.(map[string]interface{})
-	if !currentOK || !desiredOK {
-		return runtime.DeepCopyJSONValue(desired)
-	}
-	result := runtime.DeepCopyJSONValue(currentMap).(map[string]interface{})
-	for key, desiredValue := range desiredMap {
-		result[key] = mergeDesiredJSON(currentMap[key], desiredValue)
-	}
-	return result
-}
-
-func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*networkingv1.Ingress, expected []*skupperv2alpha1.SecuredAccess) error {
+func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired, retired []*networkingv1.Ingress, expected []*skupperv2alpha1.SecuredAccess) error {
 	api := c.clients.GetKubeClient().NetworkingV1().Ingresses(namespace.Name)
-	names := map[string]bool{}
 	var failures []error
 	for _, value := range desired {
-		names[value.Name] = true
 		if err := c.verifyAccessOwners(ctx, namespace, site, value.OwnerReferences, nil, expected); err != nil {
 			failures = append(failures, fmt.Errorf("Ingress %s: %w", value.Name, err))
 			continue
@@ -1539,17 +1522,19 @@ func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespa
 			failures = append(failures, fmt.Errorf("Ingress %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
-	current, err := api.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
-	if err != nil {
-		return errors.Join(append(failures, classifyWriteError(err))...)
-	}
-	for i := range current.Items {
-		value := &current.Items[i]
-		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" {
+	for _, observed := range retired {
+		value, err := api.Get(ctx, observed.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			failures = append(failures, classifyWriteError(err))
 			continue
 		}
 		owner := metav1.GetControllerOf(value)
-		if owner == nil || owner.Kind != "SecuredAccess" {
+		observedOwner := metav1.GetControllerOf(observed)
+		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+			failures = append(failures, reconcile.SupersededError{Reason: "Ingress retirement candidate changed"})
 			continue
 		}
 		parent := expectedSecuredAccess(expected, owner)
@@ -1567,7 +1552,7 @@ func (c *NamespaceController) ensureAccessIngresses(ctx context.Context, namespa
 	return errors.Join(failures...)
 }
 
-func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*routev1.Route, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) error {
+func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired, retired []*routev1.Route, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) error {
 	api := c.clients.GetRouteClient()
 	if api == nil {
 		if len(desired) > 0 {
@@ -1576,10 +1561,8 @@ func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace 
 		return nil
 	}
 	routes := api.Routes(namespace.Name)
-	names := map[string]bool{}
 	var failures []error
 	for _, value := range desired {
-		names[value.Name] = true
 		if err := c.verifyAccessOwners(ctx, namespace, site, value.OwnerReferences, nil, expectedSecuredAccesses); err != nil {
 			failures = append(failures, fmt.Errorf("Route %s: %w", value.Name, err))
 			continue
@@ -1619,17 +1602,19 @@ func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace 
 			failures = append(failures, fmt.Errorf("Route %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
-	current, err := routes.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
-	if err != nil {
-		return errors.Join(append(failures, classifyWriteError(err))...)
-	}
-	for i := range current.Items {
-		value := &current.Items[i]
-		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" {
+	for _, observed := range retired {
+		value, err := routes.Get(ctx, observed.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			failures = append(failures, classifyWriteError(err))
 			continue
 		}
 		owner := metav1.GetControllerOf(value)
-		if owner == nil || owner.Kind != "SecuredAccess" {
+		observedOwner := metav1.GetControllerOf(observed)
+		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+			failures = append(failures, reconcile.SupersededError{Reason: "Route retirement candidate changed"})
 			continue
 		}
 		parent := expectedSecuredAccess(expectedSecuredAccesses, owner)
@@ -1647,7 +1632,7 @@ func (c *NamespaceController) ensureAccessRoutes(ctx context.Context, namespace 
 	return errors.Join(failures...)
 }
 
-func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired *skupperv2alpha1.RouterAccess) error {
+func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired, retired *skupperv2alpha1.RouterAccess) error {
 	api := c.clients.GetSkupperClient().SkupperV2alpha1().RouterAccesses(namespace.Name)
 	current, err := api.Get(ctx, "skupper-router", metav1.GetOptions{})
 	if desired == nil {
@@ -1657,8 +1642,11 @@ func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, n
 		if err != nil {
 			return classifyWriteError(err)
 		}
+		if retired == nil || current.UID != retired.UID {
+			return reconcile.SupersededError{Reason: "RouterAccess retirement candidate changed"}
+		}
 		if current.Annotations["internal.skupper.io/controlled"] != "true" || !ownedByUID(current.OwnerReferences, site.UID) {
-			return nil
+			return reconcile.SupersededError{Reason: "RouterAccess retirement candidate ownership changed"}
 		}
 		if err := c.verifySite(ctx, namespace, site); err != nil {
 			return err
@@ -1678,7 +1666,7 @@ func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, n
 	if current.Annotations["internal.skupper.io/controlled"] != "true" || !ownedByUID(current.OwnerReferences, site.UID) {
 		return fmt.Errorf("default RouterAccess %s/%s is not owned by Site UID %s", namespace.Name, current.Name, site.UID)
 	}
-	if reflect.DeepEqual(current.Spec, desired.Spec) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Annotations, desired.Annotations) {
+	if reflect.DeepEqual(current.Spec, desired.Spec) && reflect.DeepEqual(current.Labels, desired.Labels) && reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) && reflect.DeepEqual(current.Annotations, desired.Annotations) {
 		return nil
 	}
 	desired.ResourceVersion = current.ResourceVersion
@@ -1689,12 +1677,10 @@ func (c *NamespaceController) ensureGeneratedRouterAccess(ctx context.Context, n
 	return classifyWriteError(err)
 }
 
-func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*skupperv2alpha1.SecuredAccess, expectedRouterAccesses []*skupperv2alpha1.RouterAccess) error {
+func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired, retired []*skupperv2alpha1.SecuredAccess, expectedRouterAccesses []*skupperv2alpha1.RouterAccess) error {
 	api := c.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses(namespace.Name)
-	names := map[string]bool{}
 	var failures []error
 	for _, value := range desired {
-		names[value.Name] = true
 		if err := c.verifyAccessOwners(ctx, namespace, site, value.OwnerReferences, expectedRouterAccesses, nil); err != nil {
 			failures = append(failures, fmt.Errorf("SecuredAccess %s: %w", value.Name, err))
 			continue
@@ -1719,7 +1705,7 @@ func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespa
 			failures = append(failures, fmt.Errorf("generated SecuredAccess %s/%s is not owned by RouterAccess UID %s", namespace.Name, value.Name, ownerUID))
 			continue
 		}
-		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
 			continue
 		}
 		value.ResourceVersion = current.ResourceVersion
@@ -1731,17 +1717,19 @@ func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespa
 			failures = append(failures, fmt.Errorf("SecuredAccess %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
-	current, err := api.List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return errors.Join(append(failures, classifyWriteError(err))...)
-	}
-	for i := range current.Items {
-		value := &current.Items[i]
-		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" || value.Annotations["internal.skupper.io/routeraccess"] == "" {
+	for _, observed := range retired {
+		value, err := api.Get(ctx, observed.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			failures = append(failures, classifyWriteError(err))
 			continue
 		}
 		owner := metav1.GetControllerOf(value)
-		if owner == nil || owner.Kind != "RouterAccess" {
+		observedOwner := metav1.GetControllerOf(observed)
+		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+			failures = append(failures, reconcile.SupersededError{Reason: "SecuredAccess retirement candidate changed"})
 			continue
 		}
 		parent := expectedRouterAccess(expectedRouterAccesses, owner)
@@ -1759,12 +1747,10 @@ func (c *NamespaceController) ensureSecuredAccesses(ctx context.Context, namespa
 	return errors.Join(failures...)
 }
 
-func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*corev1.Service, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) error {
+func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired, retired []*corev1.Service, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) error {
 	api := c.clients.GetKubeClient().CoreV1().Services(namespace.Name)
-	names := map[string]bool{}
 	var failures []error
 	for _, value := range desired {
-		names[value.Name] = true
 		if err := c.verifyAccessOwners(ctx, namespace, site, value.OwnerReferences, nil, expectedSecuredAccesses); err != nil {
 			failures = append(failures, fmt.Errorf("Service %s: %w", value.Name, err))
 			continue
@@ -1790,23 +1776,7 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 			continue
 		}
 		value.ResourceVersion = current.ResourceVersion
-		value.Spec.ClusterIP = current.Spec.ClusterIP
-		value.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
-		value.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
-		value.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
-		value.Spec.HealthCheckNodePort = current.Spec.HealthCheckNodePort
-		value.Spec.ExternalTrafficPolicy = current.Spec.ExternalTrafficPolicy
-		value.Spec.AllocateLoadBalancerNodePorts = current.Spec.AllocateLoadBalancerNodePorts
-		value.Spec.LoadBalancerClass = current.Spec.LoadBalancerClass
-		value.Spec.SessionAffinityConfig = current.Spec.SessionAffinityConfig
-		value.Spec.TrafficDistribution = current.Spec.TrafficDistribution
-		for index := range value.Spec.Ports {
-			for _, actual := range current.Spec.Ports {
-				if actual.Name == value.Spec.Ports[index].Name && value.Spec.Ports[index].NodePort == 0 {
-					value.Spec.Ports[index].NodePort = actual.NodePort
-				}
-			}
-		}
+		preserveAccessServiceFields(value, current)
 		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.Annotations, value.Annotations) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) {
 			continue
 		}
@@ -1818,17 +1788,19 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 			failures = append(failures, fmt.Errorf("Service %s: %w", value.Name, classifyWriteError(err)))
 		}
 	}
-	current, err := api.List(ctx, metav1.ListOptions{LabelSelector: "internal.skupper.io/secured-access=true"})
-	if err != nil {
-		return errors.Join(append(failures, classifyWriteError(err))...)
-	}
-	for i := range current.Items {
-		value := &current.Items[i]
-		if names[value.Name] || value.Annotations["internal.skupper.io/controlled"] != "true" {
+	for _, observed := range retired {
+		value, err := api.Get(ctx, observed.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			failures = append(failures, classifyWriteError(err))
 			continue
 		}
 		owner := metav1.GetControllerOf(value)
-		if owner == nil || owner.Kind != "SecuredAccess" {
+		observedOwner := metav1.GetControllerOf(observed)
+		if value.UID != observed.UID || value.Annotations["internal.skupper.io/controlled"] != "true" || owner == nil || observedOwner == nil || owner.UID != observedOwner.UID {
+			failures = append(failures, reconcile.SupersededError{Reason: "Service retirement candidate changed"})
 			continue
 		}
 		parent := expectedSecuredAccess(expectedSecuredAccesses, owner)
@@ -1844,6 +1816,26 @@ func (c *NamespaceController) ensureAccessServices(ctx context.Context, namespac
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func preserveAccessServiceFields(desired, current *corev1.Service) {
+	desired.Spec.ClusterIP = current.Spec.ClusterIP
+	desired.Spec.ClusterIPs = append([]string(nil), current.Spec.ClusterIPs...)
+	desired.Spec.IPFamilies = append([]corev1.IPFamily(nil), current.Spec.IPFamilies...)
+	desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
+	desired.Spec.HealthCheckNodePort = current.Spec.HealthCheckNodePort
+	desired.Spec.ExternalTrafficPolicy = current.Spec.ExternalTrafficPolicy
+	desired.Spec.AllocateLoadBalancerNodePorts = current.Spec.AllocateLoadBalancerNodePorts
+	desired.Spec.LoadBalancerClass = current.Spec.LoadBalancerClass
+	desired.Spec.SessionAffinityConfig = current.Spec.SessionAffinityConfig
+	desired.Spec.TrafficDistribution = current.Spec.TrafficDistribution
+	for index := range desired.Spec.Ports {
+		for _, actual := range current.Spec.Ports {
+			if actual.Name == desired.Spec.Ports[index].Name && desired.Spec.Ports[index].NodePort == 0 {
+				desired.Spec.Ports[index].NodePort = actual.NodePort
+			}
+		}
+	}
 }
 
 func (c *NamespaceController) ensureCertificates(ctx context.Context, namespace reconcile.NamespaceIdentity, site *skupperv2alpha1.Site, desired []*skupperv2alpha1.Certificate, expectedSecuredAccesses []*skupperv2alpha1.SecuredAccess) ([]*skupperv2alpha1.Certificate, error) {
@@ -1881,7 +1873,7 @@ func (c *NamespaceController) ensureCertificates(ctx context.Context, namespace 
 			failures = append(failures, fmt.Errorf("Certificate %s/%s is controlled by different resource identities", namespace.Name, value.Name))
 			continue
 		}
-		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
+		if reflect.DeepEqual(current.Spec, value.Spec) && reflect.DeepEqual(current.Labels, value.Labels) && reflect.DeepEqual(current.OwnerReferences, value.OwnerReferences) && reflect.DeepEqual(current.Annotations, value.Annotations) {
 			result = append(result, current)
 			continue
 		}

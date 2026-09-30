@@ -155,5 +155,8 @@ func (q *Queue) process(ctx context.Context) bool {
 	}
 	q.metrics.ReconcileFinished("success")
 	q.queue.Forget(item)
+	if report.NextReevaluation > 0 {
+		q.queue.AddAfter(namespace, report.NextReevaluation)
+	}
 	return true
 }
