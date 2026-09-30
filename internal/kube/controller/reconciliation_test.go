@@ -229,6 +229,44 @@ func newTestIntentPublisher() *testIntentPublisher {
 	return &testIntentPublisher{published: make(chan routercontrol.RouterIntent, 1), real: routercontrol.NewPublisher()}
 }
 
+func TestCollectIncludesIsolatedPublicationStateWithoutAPIReads(t *testing.T) {
+	clients, err := fakeclient.NewFakeClient("controller-ns", nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := newTestIntentPublisher()
+	controller, err := NewNamespaceController(clients, NamespaceControllerOptions{ControllerID: "controller-ns/skupper-controller", Bootstrap: reconcile.DefaultRouterControlBootstrap("controller-ns")}, publisher, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
+	if err := controller.informers.namespaces.GetStore().Add(namespace); err != nil {
+		t.Fatal(err)
+	}
+	target := routercontrol.TargetIdentity{NamespaceUID: string(namespace.UID), SiteUID: "site-uid", RouterGroup: "skupper-router"}
+	digest, err := publisher.Publish(routercontrol.RouterIntent{Target: target, Settings: routercontrol.RouterSettings{Mode: routercontrol.RoutingModeInterior}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range []*clienttesting.Fake{&clients.GetKubeClient().(*kubefake.Clientset).Fake, &clients.GetSkupperClient().(*skupperfake.Clientset).Fake, &clients.GetDynamicClient().(*dynamicfake.FakeDynamicClient).Fake} {
+		client.PrependReactor("*", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			t.Fatalf("collection made a live API request: %s %s", action.GetVerb(), action.GetResource().Resource)
+			return true, nil, nil
+		})
+	}
+	snapshot, err := controller.Collect(context.Background(), namespace.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.PublishedIntents[target]; got != (routercontrol.Publication{Digest: digest, Available: true, Revision: 1}) {
+		t.Fatalf("collector omitted current publication: %#v", got)
+	}
+	delete(snapshot.PublishedIntents, target)
+	if !publisher.PublishedIntents(string(namespace.UID))[target].Available {
+		t.Fatal("snapshot mutation changed live publisher")
+	}
+}
+
 func TestNamespaceControllerSeparatesCacheSyncFromLeaderEffects(t *testing.T) {
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site-ns", UID: "site-uid"}}
