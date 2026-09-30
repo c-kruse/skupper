@@ -341,6 +341,40 @@ func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
 	}
 }
 
+func TestWorkloadStillDependsOnAllocationWhenPublicationAndPreparationConverged(t *testing.T) {
+	for _, failure := range []error{nil, errors.New("allocation conflict")} {
+		t.Run(fmt.Sprint(failure), func(t *testing.T) {
+			events := []string{}
+			site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+			target := RouterTarget{NamespaceUID: "namespace-uid", SiteUID: string(site.UID), RouterGroup: "skupper-router"}
+			intent := routercontrol.RouterIntent{Target: target, Settings: routercontrol.RouterSettings{Mode: routercontrol.RoutingModeInterior}}
+			_, digest, err := routercontrol.CanonicalIntent(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: site.Namespace, UID: "namespace-uid"}, SiteUID: site.UID, Site: site, Allocations: AllocationState{SiteUID: site.UID, Ports: map[string]int{}}, Intents: map[RouterTarget]routercontrol.RouterIntent{target: intent}, Statuses: StatusProjection{Sites: []*skupperv2alpha1.Site{site}}}
+			addWorkloadDesired(&desired)
+			snapshot := Snapshot{Namespace: desired.Namespace, ServiceAccounts: []*corev1.ServiceAccount{desired.ServiceAccount.DeepCopy()}, Roles: []*rbacv1.Role{desired.Role.DeepCopy()}, RoleBindings: []*rbacv1.RoleBinding{desired.RoleBinding.DeepCopy()}, RouterControlCA: desired.RouterControlCA.DeepCopy(), PublishedIntents: map[RouterTarget]routercontrol.Publication{target: {Digest: digest, Available: true}}}
+			publisher := &workloadOrderPublisher{events: &events}
+			ensurer := &workloadOrderEnsurer{events: &events, publisher: publisher}
+			writer := &recordingStatusWriter{}
+			publication := PublicationPlanner{Allocations: &recordingCommitter{err: failure}, Publisher: publisher}
+			plan := (StatusPlanner{Next: WorkloadPlanner{Next: publication, Ensurer: ensurer}, Writer: writer}).Plan(snapshot, desired)
+			report := (Executor{}).Execute(context.Background(), plan)
+			if failure == nil {
+				if report.NeedsRetry() || !reflect.DeepEqual(events, []string{"workload"}) {
+					t.Fatalf("successful allocation did not unblock workload: events=%v report=%#v", events, report)
+				}
+			} else if !report.NeedsRetry() || len(events) != 0 {
+				t.Fatalf("workload crossed failed allocation despite skipped preparation/publication: events=%v report=%#v", events, report)
+			}
+			if writer.calls != 1 {
+				t.Fatal("allocation result suppressed status projection")
+			}
+		})
+	}
+}
+
 func TestConvergedWorkloadPlanHasNoEffectsAndHostOnlyChangeIsIsolated(t *testing.T) {
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
 	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site}

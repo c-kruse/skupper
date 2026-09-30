@@ -73,6 +73,9 @@ func (p WorkloadPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Plan 
 	if len(rolloutDependencies) == 0 {
 		rolloutDependencies = preparation
 	}
+	if len(rolloutDependencies) == 0 {
+		rolloutDependencies = existingIDs(allocationID)
+	}
 
 	afterRollout := rolloutDependencies
 	if desired.WorkloadsKnown {

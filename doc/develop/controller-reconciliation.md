@@ -174,7 +174,11 @@ after `Done`. Always call `Done`; `Forget` resets retry history, not dirty work.
 
 Combine retry, renewal, and observation-expiry deadlines. New events may prompt
 an earlier pass. A delayed add remaining after success is harmless because a
-converged reconciliation performs no material writes.
+converged reconciliation has an empty effect plan and makes no reconciliation
+API requests. Shared informer LIST/WATCH, leader leases, and admission traffic
+are separate. Certificate expiration is an absolute `NextReevaluation` deadline
+carried through execution; execution time and an unrelated error retry must not
+postpone it.
 
 At startup and leadership acquisition, wait for required cache/handler sync and
 enqueue namespaces discovered from inputs, owned outputs, and allocation state.
@@ -205,6 +209,27 @@ The snapshot includes:
 Deep-copy informer data and take immutable observation-cache views. Pure functions
 do not call clients, listers, clocks, random generators, credential providers, or
 stream senders. Never log or serialize whole Secret-bearing snapshots.
+
+Planning compares desired resources with the actual cached objects, not a saved
+hash of the last successful plan. Deployment and local-Service comparison uses
+SSA-owned fields, accounting for defaults, owned-field removal, and the volume
+source presence that SSA extraction omits for `emptyDir: {}`. Missing ownership
+evidence conservatively selects an apply. Access objects preserve the same API
+allocations/defaults during comparison and execution. Optional access collections
+must be known complete before they authorize retirement.
+
+The snapshot also includes the current leader's published intent identities.
+An available matching canonical digest needs no publication or live validation;
+Applied reports alone do not establish publication state after a leader change.
+A Connector host-only change therefore selects publication and any changed
+status, not unrelated workload, RBAC, CA, or access maintenance.
+
+Build dependencies only for selected operations, preserving allocation → router
+prerequisites → control trust → intent publication → workload rollout. If the
+intermediate operations are already converged, rollout still depends on any
+selected allocation repair. A selected effect retains live authority/ownership
+checks and object UID/resourceVersion fencing; skipping an effect does not
+weaken the checks on effects that remain.
 
 Informer stores do not provide a transaction across kinds or with router reports.
 Record input identities and reconsider on changes. Do not order resourceVersions
