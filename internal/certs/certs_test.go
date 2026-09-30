@@ -15,7 +15,18 @@ limitations under the License.
 package certs
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"testing"
+	"time"
 
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -115,4 +126,72 @@ func TestGH2284(t *testing.T) {
 	}
 
 	assert.DeepEqual(t, cert.DNSNames, []string{""})
+}
+
+func TestECDSAGenerationAndExistingIssuers(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NilError(t, err)
+	legacyTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "existing RSA issuer"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	legacyDER, err := x509.CreateCertificate(rand.Reader, legacyTemplate, legacyTemplate, &rsaKey.PublicKey, rsaKey)
+	assert.NilError(t, err)
+	legacy := &corev1.Secret{Data: map[string][]byte{
+		"tls.crt": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacyDER}),
+		"tls.key": pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rsaKey)}),
+	}}
+	generated, err := GenerateSecret("ca", "new ECDSA issuer", nil, time.Hour, nil)
+	assert.NilError(t, err)
+	pair, err := tls.X509KeyPair(generated.Data["tls.crt"], generated.Data["tls.key"])
+	assert.NilError(t, err)
+	ecKey, ok := pair.PrivateKey.(*ecdsa.PrivateKey)
+	assert.Assert(t, ok, "new CA must use ECDSA")
+	assert.Equal(t, ecKey.Curve, elliptic.P256())
+	sec1 := generated.DeepCopy()
+	sec1DER, err := x509.MarshalECPrivateKey(ecKey)
+	assert.NilError(t, err)
+	sec1.Data["tls.key"] = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: sec1DER})
+	for name, issuer := range map[string]*corev1.Secret{"new-pkcs8-ecdsa": generated, "existing-sec1-ecdsa": sec1, "existing-pkcs1-rsa": legacy} {
+		t.Run(name, func(t *testing.T) {
+			original := issuer.DeepCopy()
+			leaf, err := GenerateSecret("leaf", "backend", []string{"backend.test", "127.0.0.1"}, time.Hour, issuer)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, issuer, original)
+			assert.Equal(t, len(leaf.Data), 3)
+			assert.Assert(t, bytes.Equal(leaf.Data["ca.crt"], issuer.Data["tls.crt"]))
+			pair, err := tls.X509KeyPair(leaf.Data["tls.crt"], leaf.Data["tls.key"])
+			assert.NilError(t, err)
+			key, ok := pair.PrivateKey.(*ecdsa.PrivateKey)
+			assert.Assert(t, ok, "new leaf must use ECDSA even with a legacy RSA issuer")
+			assert.Equal(t, key.Curve, elliptic.P256())
+			block, _ := pem.Decode(leaf.Data["tls.key"])
+			assert.Equal(t, block.Type, "PRIVATE KEY")
+			_, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+			assert.NilError(t, err)
+			certificate, err := DecodeCertificate(leaf.Data["tls.crt"])
+			assert.NilError(t, err)
+			assert.Equal(t, certificate.KeyUsage, x509.KeyUsageDigitalSignature)
+			roots := x509.NewCertPool()
+			assert.Assert(t, roots.AppendCertsFromPEM(leaf.Data["ca.crt"]))
+			for _, usage := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+				_, err = certificate.Verify(x509.VerifyOptions{Roots: roots, DNSName: "backend.test", KeyUsages: []x509.ExtKeyUsage{usage}})
+				assert.NilError(t, err)
+			}
+		})
+	}
+}
+
+func BenchmarkGenerateSecret(b *testing.B) {
+	ca, err := GenerateSecret("ca", "issuer", nil, time.Hour, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for name, issuer := range map[string]*corev1.Secret{"ca": nil, "leaf": ca} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := GenerateSecret("certificate", "backend", []string{"backend.test"}, time.Hour, issuer); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

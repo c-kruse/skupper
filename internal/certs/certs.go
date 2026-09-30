@@ -15,8 +15,10 @@ limitations under the License.
 package certs
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -29,24 +31,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func publicKey(priv interface{}) interface{} {
-	switch k := priv.(type) {
-	case *rsa.PrivateKey:
-		return &k.PublicKey
-	default:
-		return nil
-	}
-}
-
-func pemBlockForKey(priv interface{}) *pem.Block {
-	switch k := priv.(type) {
-	case *rsa.PrivateKey:
-		return &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)}
-	default:
-		return nil
-	}
-}
 
 type CertificateAuthority struct {
 	Certificate *x509.Certificate
@@ -79,23 +63,21 @@ func getCAFromSecret(secret *corev1.Secret) (*CertificateAuthority, error) {
 		return nil, err
 	}
 
-	privateKeyBytes, err := decodeDataElement(secret.Data["tls.key"], "tls.key")
-	if err != nil {
-		return nil, err
-	}
-	key, err := x509.ParsePKCS1PrivateKey(privateKeyBytes)
+	// Accept both existing RSA/PKCS#1 issuers and new ECDSA/PKCS#8
+	// issuers without replacing or rotating their persisted credentials.
+	pair, err := tls.X509KeyPair(secret.Data["tls.crt"], secret.Data["tls.key"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to get CA private key from secret %s", err)
 	}
 
 	return &CertificateAuthority{
 		Certificate: cert,
-		Key:         key,
+		Key:         pair.PrivateKey,
 		CrtData:     secret.Data["tls.crt"],
 	}, nil
 }
 
-// GenerateSecret generates a kubernetes secret.
+// GenerateSecret generates a kubernetes secret with an ECDSA P-256 key.
 // name is the corev1.Secret's name.
 // subject is the x509 certificate's common name.
 // hosts are the host names in the x509 certificate subject alternative names extension.
@@ -108,7 +90,7 @@ func GenerateSecret(name string, subject string, hosts []string, expiration time
 		return nil, fmt.Errorf("error reading CA Certificate from Secret %q: %s", ca.Name, err)
 	}
 
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
 
@@ -133,7 +115,7 @@ func GenerateSecret(name string, subject string, hosts []string, expiration time
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 	}
@@ -160,7 +142,11 @@ func GenerateSecret(name string, subject string, hosts []string, expiration time
 		cakey = caCert.Key
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, publicKey(priv), cakey)
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, priv.Public(), cakey)
+	if err != nil {
+		return nil, err
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +164,7 @@ func GenerateSecret(name string, subject string, hosts []string, expiration time
 	}
 
 	certString := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	keyString := pem.EncodeToMemory(pemBlockForKey(priv))
+	keyString := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
 
 	secret.Data["tls.crt"] = []byte(certString)
 	secret.Data["tls.key"] = []byte(keyString)
