@@ -9,6 +9,7 @@ import (
 	"time"
 
 	routev1 "github.com/openshift/api/route/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -81,6 +82,7 @@ type Snapshot struct {
 	Attached          []*skupperv2alpha1.AttachedConnector
 	Bindings          []*skupperv2alpha1.AttachedConnectorBinding
 	Pods              []*corev1.Pod
+	Deployments       []*appsv1.Deployment
 	Services          []*corev1.Service
 	ServiceAccounts   []*corev1.ServiceAccount
 	Roles             []*rbacv1.Role
@@ -91,6 +93,8 @@ type Snapshot struct {
 	TLSRoutes         []*unstructured.Unstructured
 	Gateway           *unstructured.Unstructured
 	Secrets           []*corev1.Secret
+	RouterControlCA   *corev1.ConfigMap
+	RenderedWorkloads map[types.UID]RenderedWorkload
 	Observations      map[RouterTarget][]Observation
 	PublishedIntents  map[RouterTarget]routercontrol.Publication
 	Allocations       AllocationState
@@ -110,6 +114,14 @@ type AccessObservations struct {
 	Routes      bool
 	HTTPProxies bool
 	TLSRoutes   bool
+}
+
+// RenderedWorkload captures client-free template output at collection time so
+// planning and execution use the exact sizing, image, labelling, and security
+// inputs observed by the attempt.
+type RenderedWorkload struct {
+	Deployments  []*appsv1.Deployment
+	LocalService *corev1.Service
 }
 
 type AccessConfig struct {
@@ -172,6 +184,10 @@ type DesiredNamespace struct {
 	ServiceAccount    *corev1.ServiceAccount
 	Role              *rbacv1.Role
 	RoleBinding       *rbacv1.RoleBinding
+	RouterControlCA   *corev1.ConfigMap
+	WorkloadsKnown    bool
+	Deployments       []*appsv1.Deployment
+	LocalService      *corev1.Service
 	GeneratedAccess   *skupperv2alpha1.RouterAccess
 	SecuredAccesses   []*skupperv2alpha1.SecuredAccess
 	Certificates      []*skupperv2alpha1.Certificate

@@ -452,6 +452,30 @@ func TestControlsNamespacePreservesAutomaticAndExplicitEmptyAssignment(t *testin
 	}
 }
 
+func TestCachedObjectGuardRejectsLagAndSameNameRecreation(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected *corev1.Service
+		current  *corev1.Service
+	}{
+		{name: "appeared after missing snapshot", current: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "router", UID: "foreign", ResourceVersion: "1"}}},
+		{name: "same name recreated", expected: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "router", UID: "old", ResourceVersion: "7"}}, current: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "router", UID: "new", ResourceVersion: "8"}}},
+		{name: "resourceVersion advanced", expected: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "router", UID: "same", ResourceVersion: "7"}}, current: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "router", UID: "same", ResourceVersion: "8"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := verifyCachedObject(test.expected, test.current, nil); err == nil {
+				t.Fatal("stale cache guard accepted a conflicting live object")
+			} else {
+				var superseded reconcile.SupersededError
+				if !errors.As(err, &superseded) {
+					t.Fatalf("guard error is not superseded: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t *testing.T) {
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-ns", UID: "namespace-uid"}}
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site-ns", UID: "site-uid"}}
@@ -464,7 +488,7 @@ func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t 
 		t.Fatal(err)
 	}
 	desired := (reconcile.NamespaceDeriver{}).Derive(reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controlled: true}, Sites: []*skupperv2alpha1.Site{site}, Allocations: reconcile.AllocationState{Ports: map[string]int{}}})
-	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err != nil {
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	role, err := clients.GetKubeClient().RbacV1().Roles(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{})
@@ -474,7 +498,7 @@ func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t 
 	if !metav1.IsControlledBy(role, site) || len(role.Rules) != 1 || len(role.Rules[0].Resources) != 1 || role.Rules[0].Resources[0] != "secrets" {
 		t.Fatalf("unexpected router Role: %#v", role)
 	}
-	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, nil, nil, nil); err != nil {
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, nil, nil, nil, desired.ServiceAccount, desired.Role, desired.RoleBinding); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -485,7 +509,7 @@ func TestRouterPrerequisitesAreOwnedLeastPrivilegeAndDoNotClaimForeignObjects(t 
 	if _, err := clients.GetKubeClient().CoreV1().ServiceAccounts(namespace.Name).Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err == nil {
+	if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding, foreign, nil, nil); err == nil {
 		t.Fatal("controller claimed a foreign router ServiceAccount")
 	}
 	if _, err := clients.GetKubeClient().RbacV1().Roles(namespace.Name).Get(context.Background(), "skupper-router", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -529,7 +553,7 @@ func TestRouterPrerequisitesDoNotAdoptForeignRoleOrRoleBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			desired := (reconcile.NamespaceDeriver{}).Derive(reconcile.Snapshot{Namespace: reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, Assignment: reconcile.Assignment{Controlled: true}, Sites: []*skupperv2alpha1.Site{site}, Allocations: reconcile.AllocationState{Ports: map[string]int{}}})
-			if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding); err == nil {
+			if err := controller.EnsureRouterPrerequisites(context.Background(), desired.Namespace, site, desired.ServiceAccount, desired.Role, desired.RoleBinding, nil, nil, nil); err == nil {
 				t.Fatalf("controller accepted foreign %s", test.name)
 			}
 			owners, err := test.owners(clients, namespace.Name)
@@ -562,7 +586,11 @@ func TestDefaultedListenerServiceIsQuiet(t *testing.T) {
 		updates++
 		return false, nil, nil
 	})
-	if err := controller.EnsureListenerServices(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, site, []*corev1.Service{desired}); err != nil {
+	expected, err := clients.GetKubeClient().CoreV1().Services(namespace.Name).Get(context.Background(), desired.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.EnsureListenerService(context.Background(), reconcile.NamespaceIdentity{Name: namespace.Name, UID: namespace.UID}, site, desired, expected); err != nil {
 		t.Fatal(err)
 	}
 	if updates != 0 {

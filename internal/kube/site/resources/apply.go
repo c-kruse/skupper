@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"strconv"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/yaml"
 
@@ -222,6 +225,37 @@ func Apply(clients internalclient.Clients, ctx context.Context, site *skupperv2a
 // It does not mount or reference a router-config ConfigMap.
 func ApplyWithRouterControl(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl RouterControlConfig) error {
 	return apply(clients, ctx, site, group, size, labelling, disableSecCtx, &routerControl)
+}
+
+// RenderWithRouterControl deterministically renders the workload objects that
+// ApplyWithRouterControl would send to SSA, without requiring a client.
+func RenderWithRouterControl(site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl RouterControlConfig) (*appsv1.Deployment, *corev1.Service, error) {
+	templates := resourceTemplates(site, group, size, labelling, disableSecCtx, &routerControl)
+	deployment := &appsv1.Deployment{}
+	service := &corev1.Service{}
+	for _, candidate := range templates {
+		object, err := candidate.Render(site.Namespace)
+		if err != nil {
+			return nil, nil, err
+		}
+		var target runtime.Object
+		switch candidate.Resource.Resource {
+		case "deployments":
+			target = deployment
+		case "services":
+			target = service
+		default:
+			return nil, nil, fmt.Errorf("unsupported router workload resource %q", candidate.Resource.Resource)
+		}
+		data, err := object.MarshalJSON()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := yaml.Unmarshal(data, target); err != nil {
+			return nil, nil, err
+		}
+	}
+	return deployment, service, nil
 }
 
 func apply(clients internalclient.Clients, ctx context.Context, site *skupperv2alpha1.Site, group string, size sizing.Sizing, labelling Labelling, disableSecCtx bool, routerControl *RouterControlConfig) error {

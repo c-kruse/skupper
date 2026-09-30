@@ -7,7 +7,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/skupperproject/skupper/internal/kube/resource"
 	"github.com/skupperproject/skupper/internal/routercontrol"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,17 +79,17 @@ type workloadOrderEnsurer struct {
 	observedConnections uint32
 }
 
-func (e *workloadOrderEnsurer) EnsureRouterPrerequisites(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding) error {
+func (e *workloadOrderEnsurer) EnsureRouterPrerequisites(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding, *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding) error {
 	*e.events = append(*e.events, "prerequisites")
 	return e.prerequisiteError
 }
 
-func (e *workloadOrderEnsurer) EnsureRouterControlCA(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, RouterControlBootstrap) error {
+func (e *workloadOrderEnsurer) EnsureRouterControlCA(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.ConfigMap, *corev1.ConfigMap) error {
 	*e.events = append(*e.events, "trust")
 	return e.caError
 }
 
-func (e *workloadOrderEnsurer) EnsureSite(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string, RouterControlBootstrap) error {
+func (e *workloadOrderEnsurer) EnsureDeployment(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *appsv1.Deployment, *appsv1.Deployment) error {
 	*e.events = append(*e.events, "workload")
 	if len(e.publisher.published) > 0 {
 		e.observedConnections = e.publisher.published[len(e.publisher.published)-1].Settings.DataConnectionCount
@@ -95,13 +97,32 @@ func (e *workloadOrderEnsurer) EnsureSite(context.Context, NamespaceIdentity, *s
 	return nil
 }
 
-func (*workloadOrderEnsurer) EnsureListenerService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service) error {
+func (*workloadOrderEnsurer) EnsureLocalService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service, *corev1.Service) error {
 	return nil
 }
 
-func (e *workloadOrderEnsurer) RetireListenerServices(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, []string) error {
+func (*workloadOrderEnsurer) RetireDeployment(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *appsv1.Deployment) error {
+	return nil
+}
+
+func (*workloadOrderEnsurer) EnsureListenerService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service, *corev1.Service) error {
+	return nil
+}
+
+func (e *workloadOrderEnsurer) RetireListenerService(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, *corev1.Service) error {
 	*e.events = append(*e.events, "retire-listeners")
 	return nil
+}
+
+func addWorkloadDesired(desired *DesiredNamespace) {
+	controller, block := true, true
+	owner := []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: desired.Site.Name, UID: desired.Site.UID, Controller: &controller, BlockOwnerDeletion: &block}}
+	desired.ServiceAccount = &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: desired.Namespace.Name, OwnerReferences: owner}}
+	desired.Role = &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: desired.Namespace.Name, OwnerReferences: owner}}
+	desired.RoleBinding = &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: desired.Namespace.Name, OwnerReferences: owner}}
+	desired.RouterControlCA = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "skupper-controller-ca", Namespace: desired.Namespace.Name, OwnerReferences: owner}, Data: map[string]string{"ca.crt": "CA"}}
+	desired.WorkloadsKnown = true
+	desired.Deployments = []*appsv1.Deployment{{ObjectMeta: metav1.ObjectMeta{Name: "skupper-router", Namespace: desired.Namespace.Name, OwnerReferences: owner}}}
 }
 
 func TestStatusProjectionFollowsEffectsEvenOnFailure(t *testing.T) {
@@ -194,6 +215,7 @@ func TestExecutorRetainsIndependentSuccessAndBlocksDependents(t *testing.T) {
 func TestRouterPrerequisitesPrecedeCAAndWorkload(t *testing.T) {
 	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
 	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site, Allocations: AllocationState{SiteUID: site.UID, Ports: map[string]int{}}}
+	addWorkloadDesired(&desired)
 	plan := (WorkloadPlanner{Next: emptyPlanner{}}).Plan(Snapshot{Namespace: desired.Namespace, Allocations: copyAllocations(desired.Allocations)}, desired)
 	dependencies := map[OperationID][]OperationID{}
 	for _, operation := range plan.Operations {
@@ -202,7 +224,7 @@ func TestRouterPrerequisitesPrecedeCAAndWorkload(t *testing.T) {
 	if !reflect.DeepEqual(dependencies["ensure-router-control-ca"], []OperationID{"ensure-router-prerequisites"}) {
 		t.Fatalf("CA does not wait for router prerequisites: %#v", dependencies)
 	}
-	if !reflect.DeepEqual(dependencies["ensure-site-workloads"], []OperationID{"ensure-router-control-ca"}) {
+	if !reflect.DeepEqual(dependencies["ensure-deployment/skupper-router"], []OperationID{"ensure-router-control-ca"}) {
 		t.Fatalf("workload does not wait for CA prerequisite: %#v", dependencies)
 	}
 }
@@ -215,6 +237,7 @@ func TestCurrentIntentIsPublishedBeforeWorkloadUpdate(t *testing.T) {
 	newIntent := routercontrol.RouterIntent{Target: target, Settings: routercontrol.RouterSettings{DataConnectionCount: 2}}
 	allocations := AllocationState{SiteUID: site.UID, Ports: map[string]int{}}
 	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site, Allocations: copyAllocations(allocations), Intents: map[RouterTarget]routercontrol.RouterIntent{target: newIntent}}
+	addWorkloadDesired(&desired)
 	publisher := &workloadOrderPublisher{events: &events, published: []routercontrol.RouterIntent{oldIntent}}
 	ensurer := &workloadOrderEnsurer{events: &events, publisher: publisher}
 	publication := PublicationPlanner{Allocations: &recordingCommitter{}, Publisher: publisher, Validator: func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, map[string]types.UID) error {
@@ -226,7 +249,7 @@ func TestCurrentIntentIsPublishedBeforeWorkloadUpdate(t *testing.T) {
 	if report.NeedsRetry() {
 		t.Fatalf("ordered rollout unexpectedly failed: %#v", report)
 	}
-	if want := []string{"prerequisites", "trust", "validate", "publish", "workload", "retire-listeners"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"prerequisites", "trust", "validate", "publish", "workload"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("workload did not follow current intent publication: got %v, want %v", events, want)
 	}
 	if ensurer.observedConnections != 2 {
@@ -268,6 +291,7 @@ func TestWorkloadAndPublicationRespectPreparationFailures(t *testing.T) {
 				Intents:     map[RouterTarget]routercontrol.RouterIntent{target: {Target: target}},
 				Statuses:    StatusProjection{Sites: []*skupperv2alpha1.Site{site.DeepCopy()}},
 			}
+			addWorkloadDesired(&desired)
 			publisher := &workloadOrderPublisher{events: &events, err: test.publicationError}
 			ensurer := &workloadOrderEnsurer{events: &events, publisher: publisher, prerequisiteError: test.prerequisiteError, caError: test.caError}
 			publication := PublicationPlanner{Allocations: &recordingCommitter{err: test.allocationError}, Publisher: publisher, Validator: func(context.Context, NamespaceIdentity, *skupperv2alpha1.Site, map[string]types.UID) error {
@@ -309,14 +333,91 @@ func TestListenerServiceEffectsDoNotBlockPublication(t *testing.T) {
 	for _, operation := range plan.Operations {
 		dependencies[operation.ID] = operation.Dependencies
 	}
-	if !reflect.DeepEqual(dependencies["publish/skupper-router"], []OperationID{"ensure-router-control-ca"}) {
+	if len(dependencies["publish/skupper-router"]) != 0 {
 		t.Fatalf("publication is coupled to listener Service effects: %#v", dependencies["publish/skupper-router"])
 	}
-	if !reflect.DeepEqual(dependencies["ensure-site-workloads"], []OperationID{"publish/skupper-router"}) {
-		t.Fatalf("workload does not wait for intent publication: %#v", dependencies["ensure-site-workloads"])
-	}
-	if !reflect.DeepEqual(dependencies["ensure-listener-service/one"], []OperationID{"ensure-site-workloads"}) || !reflect.DeepEqual(dependencies["ensure-listener-service/two"], []OperationID{"ensure-site-workloads"}) {
+	if !reflect.DeepEqual(dependencies["ensure-listener-service/one"], []OperationID{"publish/skupper-router"}) || !reflect.DeepEqual(dependencies["ensure-listener-service/two"], []OperationID{"publish/skupper-router"}) {
 		t.Fatalf("listener Service operations are not independently planned: %#v", dependencies)
+	}
+}
+
+func TestConvergedWorkloadPlanHasNoEffectsAndHostOnlyChangeIsIsolated(t *testing.T) {
+	site := &skupperv2alpha1.Site{ObjectMeta: metav1.ObjectMeta{Name: "site", Namespace: "site", UID: "site-uid"}}
+	desired := DesiredNamespace{Namespace: NamespaceIdentity{Name: "site", UID: "namespace-uid"}, SiteUID: site.UID, Site: site}
+	addWorkloadDesired(&desired)
+	desired.Deployments[0].TypeMeta = metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"}
+	replicas := int32(1)
+	desired.Deployments[0].Spec.Replicas = &replicas
+	desired.LocalService = &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: metav1.ObjectMeta{Name: "skupper-router-local", Namespace: "site", OwnerReferences: append([]metav1.OwnerReference(nil), desired.Deployments[0].OwnerReferences...)}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}}
+	listener := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "site", Labels: map[string]string{"internal.skupper.io/listener": "true"}, Annotations: map[string]string{"internal.skupper.io/controlled": "true"}, OwnerReferences: append([]metav1.OwnerReference(nil), desired.Deployments[0].OwnerReferences...)}}
+	desired.ListenerServices = []*corev1.Service{listener}
+
+	deployment := desired.Deployments[0].DeepCopy()
+	deployment.UID, deployment.ResourceVersion = "deployment-uid", "7"
+	deployment.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "skupper-controller", Operation: metav1.ManagedFieldsOperationApply, APIVersion: "apps/v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:ownerReferences":{".":{},"k:{\"uid\":\"site-uid\"}":{}}},"f:spec":{"f:replicas":{}}}`)}}}
+	local := desired.LocalService.DeepCopy()
+	local.UID, local.ResourceVersion = "service-uid", "8"
+	local.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "skupper-controller", Operation: metav1.ManagedFieldsOperationApply, APIVersion: "v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:ownerReferences":{".":{},"k:{\"uid\":\"site-uid\"}":{}}},"f:spec":{"f:type":{}}}`)}}}
+	serviceAccount := desired.ServiceAccount.DeepCopy()
+	role := desired.Role.DeepCopy()
+	binding := desired.RoleBinding.DeepCopy()
+	ca := desired.RouterControlCA.DeepCopy()
+	for index, object := range []metav1.Object{serviceAccount, role, binding, ca, listener} {
+		object.SetUID(types.UID(fmt.Sprintf("uid-%d", index)))
+		object.SetResourceVersion(fmt.Sprintf("%d", index+1))
+	}
+	snapshot := Snapshot{Namespace: desired.Namespace, Sites: []*skupperv2alpha1.Site{site.DeepCopy()}, Deployments: []*appsv1.Deployment{deployment}, Services: []*corev1.Service{local, listener.DeepCopy()}, ServiceAccounts: []*corev1.ServiceAccount{serviceAccount}, Roles: []*rbacv1.Role{role}, RoleBindings: []*rbacv1.RoleBinding{binding}, RouterControlCA: ca}
+	if !resource.DeploymentApplyEqual(deployment, desired.Deployments[0]) || !resource.ServiceApplyEqual(local, desired.LocalService) {
+		t.Fatalf("test fixture is not semantically converged: deployment=%v service=%v", resource.DeploymentApplyEqual(deployment, desired.Deployments[0]), resource.ServiceApplyEqual(local, desired.LocalService))
+	}
+
+	if operations := (WorkloadPlanner{Next: emptyPlanner{}}).Plan(snapshot, desired).Operations; len(operations) != 0 {
+		t.Fatalf("converged workload plan emitted API effects: %#v", operationKinds(operations))
+	}
+	hostChange := fixedPlanner{plan: Plan{Operations: []Operation{{ID: "publish/skupper-router", Kind: "PublishRouterIntent", Run: func(context.Context) error { return nil }}}}}
+	operations := (WorkloadPlanner{Next: hostChange}).Plan(snapshot, desired).Operations
+	if len(operations) != 1 || operations[0].Kind != "PublishRouterIntent" || len(operations[0].Dependencies) != 0 {
+		t.Fatalf("host-only intent change scheduled unrelated workload effects: %#v", operationKinds(operations))
+	}
+
+	drift := snapshot
+	driftedRole := role.DeepCopy()
+	driftedRole.Rules = []rbacv1.PolicyRule{{Verbs: []string{"list"}}}
+	drift.Roles = []*rbacv1.Role{driftedRole}
+	assertOperationIDs(t, (WorkloadPlanner{Next: emptyPlanner{}}).Plan(drift, desired).Operations, "ensure-router-prerequisites")
+	drift = snapshot
+	drift.RouterControlCA = ca.DeepCopy()
+	drift.RouterControlCA.Data["ca.crt"] = "external"
+	assertOperationIDs(t, (WorkloadPlanner{Next: emptyPlanner{}}).Plan(drift, desired).Operations, "ensure-router-control-ca")
+	drift = snapshot
+	driftedDeployment := deployment.DeepCopy()
+	driftedReplicas := int32(2)
+	driftedDeployment.Spec.Replicas = &driftedReplicas
+	drift.Deployments = []*appsv1.Deployment{driftedDeployment}
+	assertOperationIDs(t, (WorkloadPlanner{Next: emptyPlanner{}}).Plan(drift, desired).Operations, "ensure-deployment/skupper-router")
+	drift = snapshot
+	driftedLocal := local.DeepCopy()
+	driftedLocal.Spec.Type = corev1.ServiceTypeNodePort
+	drift.Services = []*corev1.Service{driftedLocal, listener.DeepCopy()}
+	assertOperationIDs(t, (WorkloadPlanner{Next: emptyPlanner{}}).Plan(drift, desired).Operations, "ensure-local-service")
+}
+
+func operationKinds(operations []Operation) []string {
+	result := make([]string, 0, len(operations))
+	for _, operation := range operations {
+		result = append(result, string(operation.ID)+":"+operation.Kind)
+	}
+	return result
+}
+
+func assertOperationIDs(t *testing.T, operations []Operation, expected ...OperationID) {
+	t.Helper()
+	actual := make([]OperationID, 0, len(operations))
+	for _, operation := range operations {
+		actual = append(actual, operation.ID)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("operations = %v, want %v", actual, expected)
 	}
 }
 

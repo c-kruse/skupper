@@ -60,6 +60,18 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	}
 	deriveRouterPrerequisites(active, &desired)
 	diagnoseRouterPrerequisites(snapshot, active, &desired)
+	controller, block := true, true
+	desired.RouterControlCA = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: desired.Bootstrap.CABundleConfigMap, Namespace: snapshot.Namespace.Name, OwnerReferences: []metav1.OwnerReference{{APIVersion: skupperv2alpha1.SchemeGroupVersion.String(), Kind: "Site", Name: active.Name, UID: active.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Data: map[string]string{desired.Bootstrap.CABundleKey: string(desired.Bootstrap.PublicCA)}}
+	if rendered, ok := snapshot.RenderedWorkloads[active.UID]; ok {
+		desired.WorkloadsKnown = true
+		for _, deployment := range rendered.Deployments {
+			desired.Deployments = append(desired.Deployments, deployment.DeepCopy())
+		}
+		if rendered.LocalService != nil {
+			desired.LocalService = rendered.LocalService.DeepCopy()
+		}
+	}
+	diagnoseWorkloadOwnership(snapshot, active, &desired)
 	if snapshot.Allocations.SiteUID == active.UID {
 		desired.Allocations = copyAllocations(snapshot.Allocations)
 	} else {
@@ -232,6 +244,28 @@ func (NamespaceDeriver) Derive(snapshot Snapshot) DesiredNamespace {
 	sort.Slice(desired.ListenerServices, func(i, j int) bool { return desired.ListenerServices[i].Name < desired.ListenerServices[j].Name })
 	deriveStatuses(snapshot, &desired)
 	return desired
+}
+
+func diagnoseWorkloadOwnership(snapshot Snapshot, site *skupperv2alpha1.Site, desired *DesiredNamespace) {
+	if current := snapshot.RouterControlCA; current != nil && !metav1.IsControlledBy(current, site) {
+		desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignRouterControlCA", Message: fmt.Sprintf("router-control CA ConfigMap %s/%s is not controlled by Site UID %s", current.Namespace, current.Name, site.UID)})
+	}
+	desiredDeployments := map[string]bool{}
+	for _, deployment := range desired.Deployments {
+		desiredDeployments[deployment.Name] = true
+	}
+	for _, current := range snapshot.Deployments {
+		if desiredDeployments[current.Name] && !metav1.IsControlledBy(current, site) {
+			desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignDeployment", Message: fmt.Sprintf("router Deployment %s/%s is not controlled by Site UID %s", current.Namespace, current.Name, site.UID)})
+		}
+	}
+	if desired.LocalService != nil {
+		for _, current := range snapshot.Services {
+			if current.Name == desired.LocalService.Name && !ownedBy(current.OwnerReferences, site.UID) {
+				desired.Diagnostics = append(desired.Diagnostics, Diagnostic{Resource: site.UID, Reason: "ForeignService", Message: fmt.Sprintf("router Service %s/%s is not owned by Site UID %s", current.Namespace, current.Name, site.UID)})
+			}
+		}
+	}
 }
 
 func addListenerServicePort(desired *DesiredNamespace, service *corev1.Service, resource types.UID, protocol corev1.Protocol, servicePort, targetPort int, owners map[string]types.UID, conflicts map[string]bool) {
