@@ -463,7 +463,13 @@ func (m controlSessionManager) run(ctx context.Context, current *connectedContro
 			}, 1)
 			replacement = result
 			go func() {
+				started := m.now()
 				control, err := m.connect(ctx)
+				outcome := "success"
+				if err != nil {
+					outcome = "error"
+				}
+				m.metrics.ConnectionAttempt(outcome, m.now().Sub(started))
 				result <- struct {
 					control *connectedControlSession
 					err     error

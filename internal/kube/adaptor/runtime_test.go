@@ -26,8 +26,15 @@ type blockingEventReceiver struct {
 
 type recordingRuntimeMetrics struct {
 	NoopRuntimeMetrics
-	mu      sync.Mutex
-	streams []bool
+	mu       sync.Mutex
+	streams  []bool
+	attempts []string
+}
+
+func (m *recordingRuntimeMetrics) ConnectionAttempt(outcome string, _ time.Duration) {
+	m.mu.Lock()
+	m.attempts = append(m.attempts, outcome)
+	m.mu.Unlock()
 }
 
 func (m *recordingRuntimeMetrics) SetControlStreamUp(up bool) {
@@ -145,6 +152,11 @@ func TestCredentialRenewalKeepsUsableSessionAcrossTransientEnrollmentFailure(t *
 	}
 	if states := metrics.streamStates(); len(states) != 2 || !states[0] || states[1] {
 		t.Fatalf("transport health transitions = %v, want [true false]", states)
+	}
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if len(metrics.attempts) != 2 || metrics.attempts[0] != "error" || metrics.attempts[1] != "success" {
+		t.Fatalf("renewal connection attempts = %v, want [error success]", metrics.attempts)
 	}
 }
 

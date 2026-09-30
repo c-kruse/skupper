@@ -216,7 +216,8 @@ func TestWatchRevocationPreventsCertificateReadmission(t *testing.T) {
 func TestSixtyFourIdleSessionsHaveNoPeriodicAuthorizationReads(t *testing.T) {
 	fixture := newSessionFixture(t)
 	fixture.client.ClearActions()
-	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(ctx context.Context, identity Identity) error {
+	var elapsed atomic.Int64
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow.Add(time.Duration(elapsed.Load())) }, Authorize: func(ctx context.Context, identity Identity) error {
 		for i := 0; i < 3; i++ {
 			if _, err := fixture.client.CoreV1().Namespaces().Get(ctx, identity.Namespace, metav1.GetOptions{}); err != nil {
 				return err
@@ -233,18 +234,28 @@ func TestSixtyFourIdleSessionsHaveNoPeriodicAuthorizationReads(t *testing.T) {
 			t.Fatal(err)
 		}
 		sessions = append(sessions, session)
+		t.Cleanup(session.Close)
 	}
 	afterAdmission := len(fixture.client.Actions())
 	if afterAdmission != 64*8 {
 		t.Fatalf("admission requests = %d, want %d", afterAdmission, 64*8)
 	}
 	time.Sleep(100 * time.Millisecond)
+	elapsed.Store(int64(30 * time.Minute))
+	for _, session := range sessions {
+		if err := session.Check(); err != nil {
+			t.Fatalf("valid idle session required another authorization audit: %v", err)
+		}
+	}
 	if afterIdle := len(fixture.client.Actions()); afterIdle != afterAdmission {
 		t.Fatalf("idle sessions made %d periodic authorization requests", afterIdle-afterAdmission)
 	}
 	t.Logf("observed %d admission GETs and zero steady-state authorization GETs for 64 idle sessions", afterAdmission)
+	elapsed.Store(int64(time.Hour))
 	for _, session := range sessions {
-		session.Close()
+		if err := session.Check(); err == nil {
+			t.Fatal("idle session remained authorized at certificate expiry")
+		}
 	}
 }
 

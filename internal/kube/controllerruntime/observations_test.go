@@ -178,6 +178,7 @@ func TestHealthyCredentialHandoffPreservesEvidenceWithoutExtendingFreshness(t *t
 		}
 	}
 	originalDeadline := now.Add(observationFreshFor)
+	now = now.Add(7 * time.Second)
 	c.Connected(key, "session-2", protocol.Hello{RouterIncarnation: "router-1"})
 	c.Disconnected(key, "session-1")
 	c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "wrong", Sequence: 99})
@@ -193,6 +194,10 @@ func TestHealthyCredentialHandoffPreservesEvidenceWithoutExtendingFreshness(t *t
 	if afterAcceptance.Application == nil || afterAcceptance.Application.RealizationID != "realization-1" || afterAcceptance.Application.Sequence != 1 {
 		t.Fatalf("unchanged successor did not retain realization: %#v", afterAcceptance.Application)
 	}
+	report.SessionID, report.Sequence = "session-2", 1
+	if err := c.Application(context.Background(), key, report); err != nil {
+		t.Fatal(err)
+	}
 	requests = map[string]string{}
 	c.refresh(refreshFunc(func(_ protocol.SessionKey, _, request, scope string) error {
 		requests[scope] = request
@@ -204,13 +209,21 @@ func TestHealthyCredentialHandoffPreservesEvidenceWithoutExtendingFreshness(t *t
 	if sample := c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Snapshot.SampleSequence; sample != 1 {
 		t.Fatalf("successor sample sequence = %d, want restarted sequence 1", sample)
 	}
+	refreshedDeadline := now.Add(observationFreshFor)
 	now = originalDeadline.Add(-time.Nanosecond)
-	if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+	if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeAddresses].Fresh {
 		t.Fatal("carried evidence expired before its original deadline")
 	}
 	now = originalDeadline
-	if c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+	if c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeAddresses].Fresh {
 		t.Fatal("credential handoff extended observation freshness")
+	}
+	if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+		t.Fatal("successor's verified refresh did not extend its own scope's freshness")
+	}
+	now = refreshedDeadline
+	if c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+		t.Fatal("successor's verified refresh exceeded its request-anchored deadline")
 	}
 }
 
