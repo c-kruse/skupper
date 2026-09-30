@@ -436,11 +436,22 @@ affected by authorization-relevant field changes. Synchronize both informer stor
 and their authorization handlers before serving. A namespace-scoped generation
 barrier spanning the admission reads and registry insertion prevents an event in
 that interval from being missed. Pod status and allocation-port-only updates are
-not authorization changes. Any authorization watch error closes all current
-sessions; client-go relists before resuming the watch. A later admission must still
-pass the complete live read path, and certificate expiry remains the final bound if
-a watch failure is not otherwise observable. Leadership fencing and expiry timers
-remain independent of informer and API work.
+not authorization changes.
+
+Because informer synchronization is only an initial latch and watch-error hooks do
+not observe every disconnected or retrying watch, give each session a hard
+authorization deadline no more than two minutes after the oldest contributing
+authoritative read. A leader-owned auditor refreshes active identities every minute,
+spread across that interval, using bounded concurrency and request-scoped
+deduplication of shared namespace/Site/assignment reads. It does not scan unrelated
+Pods or perform full-cluster LISTs. Extend only the exact sessions and identities
+included in a completely successful audit whose invalidation revision is unchanged;
+a late result cannot revive expired authority or refresh a reconnect omitted from
+the batch. API failures and timeouts retry without extending the prior deadline.
+Watch errors request a coalesced early audit but neither prove nor disprove cache
+freshness. Leadership fencing, certificate expiry, and authorization expiry remain
+independent of informer and API work, and every message checks the deadlines
+synchronously.
 
 Renew early with jitter using a fresh token review and preferably a new in-memory
 key, then reconnect. Close streams at certificate expiry; TLS handshakes alone do

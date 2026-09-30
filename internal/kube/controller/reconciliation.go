@@ -424,7 +424,7 @@ func (c *NamespaceController) registerAuthorizationInvalidations() error {
 	informers := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.configMaps, c.informers.pods, c.informers.serviceAccounts, c.informers.replicaSets, c.informers.deployments, c.informers.sites}
 	for _, informer := range informers {
 		if err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-			slog.Error("Router authorization watch failed; revoking active sessions", "error", err)
+			slog.Error("Router authorization watch failed; requesting an early authoritative audit", "error", err)
 			c.authorization.AuthorizationWatchFailed(err)
 		}); err != nil {
 			return fmt.Errorf("configure authorization watch failure handler: %w", err)

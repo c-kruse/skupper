@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -37,13 +38,17 @@ func (a *Authenticator) ServerTLSConfig() *tls.Config {
 }
 
 type Session struct {
-	Identity    Identity
-	ctx         context.Context
-	cancel      context.CancelFunc
-	gate        LeaderGate
-	revocations *SessionRevocations
-	mu          sync.RWMutex
-	err         error
+	Identity              Identity
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	gate                  LeaderGate
+	revocations           *SessionRevocations
+	now                   func() time.Time
+	certificateExpiry     time.Time
+	mu                    sync.RWMutex
+	err                   error
+	authorizationDeadline time.Time
+	authorizationChanged  chan struct{}
 }
 
 func (a *Authenticator) Session(parent context.Context, state tls.ConnectionState) (*Session, error) {
@@ -66,7 +71,8 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 	if identity.Installation != a.Installation.Name {
 		return nil, fmt.Errorf("%w: certificate belongs to another installation", ErrUnauthenticated)
 	}
-	now := a.now()
+	evidenceStart := a.now()
+	now := evidenceStart
 	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 		return nil, fmt.Errorf("%w: client certificate is not currently valid", ErrUnauthenticated)
 	}
@@ -84,8 +90,8 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 		return nil, fmt.Errorf("%w: client certificate expired during authorization", ErrUnauthenticated)
 	}
 	ctx, cancel := context.WithCancel(parent)
-	session := &Session{Identity: identity, ctx: ctx, cancel: cancel, gate: a.Gate, revocations: a.Revocations}
-	if err := a.Revocations.register(session, revision); err != nil {
+	session := &Session{Identity: identity, ctx: ctx, cancel: cancel, gate: a.Gate, revocations: a.Revocations, now: a.now, certificateExpiry: leaf.NotAfter, authorizationDeadline: a.Revocations.freshnessDeadline(evidenceStart, leaf.NotAfter), authorizationChanged: make(chan struct{}, 1)}
+	if err := a.Revocations.register(session, revision, evidenceStart); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -96,15 +102,15 @@ func (a *Authenticator) Session(parent context.Context, state tls.ConnectionStat
 		}
 	}
 	now = a.now()
-	if !now.Before(leaf.NotAfter) {
+	if !now.Before(leaf.NotAfter) || !now.Before(session.authorizationExpiry()) {
 		session.Close()
-		return nil, fmt.Errorf("%w: client certificate expired during authorization registration", ErrUnauthenticated)
+		return nil, fmt.Errorf("%w: authorization evidence expired during admission", ErrUnauthorized)
 	}
 	if err := session.Check(); err != nil {
 		session.Close()
 		return nil, err
 	}
-	go session.monitor(leaf.NotAfter.Sub(now))
+	go session.monitor()
 	return session, nil
 }
 
@@ -128,7 +134,7 @@ func (a *Authenticator) authorizeWithin(ctx context.Context, identity Identity) 
 	case err := <-result:
 		return err
 	case <-authCtx.Done():
-		return fmt.Errorf("%w: live authorization was not confirmed: %v", ErrUnauthorized, authCtx.Err())
+		return AuthorizationUnavailable(fmt.Errorf("live authorization deadline: %w", authCtx.Err()))
 	case <-gateDone(a.Gate):
 		return ErrNotLeader
 	}
@@ -147,25 +153,41 @@ func (a *Authenticator) authorize(ctx context.Context, expected Identity) error 
 		return fmt.Errorf("%w: no assignment authorizer", ErrUnauthorized)
 	}
 	if err := a.Authorize(ctx, actual); err != nil {
+		if errors.Is(err, ErrAuthorizationUnavailable) {
+			return err
+		}
 		return fmt.Errorf("%w: %v", ErrUnauthorized, err)
 	}
 	return nil
 }
 
-func (s *Session) monitor(untilExpiry time.Duration) {
-	if untilExpiry < 0 {
-		untilExpiry = 0
-	}
-	timer := time.NewTimer(untilExpiry)
-	defer timer.Stop()
+func (s *Session) monitor() {
+	certificateTimer := time.NewTimer(until(s.now(), s.certificateExpiry))
+	authorizationDeadline := s.authorizationExpiry()
+	authorizationTimer := time.NewTimer(until(s.now(), authorizationDeadline))
+	defer certificateTimer.Stop()
+	defer authorizationTimer.Stop()
 	defer s.revocations.unregister(s)
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-timer.C:
+		case <-certificateTimer.C:
 			s.fail(fmt.Errorf("client certificate expired"))
 			return
+		case <-authorizationTimer.C:
+			if current := s.authorizationExpiry(); current.After(authorizationDeadline) {
+				authorizationDeadline = current
+				resetTimer(authorizationTimer, until(s.now(), authorizationDeadline))
+				continue
+			}
+			s.fail(fmt.Errorf("authorization freshness expired"))
+			return
+		case <-s.authorizationChanged:
+			if current := s.authorizationExpiry(); current.After(authorizationDeadline) {
+				authorizationDeadline = current
+				resetTimer(authorizationTimer, until(s.now(), authorizationDeadline))
+			}
 		case <-gateDone(s.gate):
 			s.fail(ErrNotLeader)
 			return
@@ -185,8 +207,17 @@ func (s *Session) Close() {
 func (s *Session) Check() error {
 	if s.gate != nil {
 		if err := s.gate.Check(); err != nil {
-			return fmt.Errorf("%w: %v", ErrNotLeader, err)
+			revoked := fmt.Errorf("%w: %v", ErrNotLeader, err)
+			s.fail(revoked)
+			return revoked
 		}
+	}
+	now := s.now()
+	if !now.Before(s.certificateExpiry) {
+		s.fail(fmt.Errorf("client certificate expired"))
+	}
+	if !now.Before(s.authorizationExpiry()) {
+		s.fail(fmt.Errorf("authorization freshness expired"))
 	}
 	select {
 	case <-s.ctx.Done():
@@ -199,6 +230,32 @@ func (s *Session) Check() error {
 	default:
 		return nil
 	}
+}
+
+func (s *Session) authorizationExpiry() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authorizationDeadline
+}
+
+func (s *Session) renewAuthorization(evidenceStart time.Time, freshness time.Duration) bool {
+	deadline := evidenceStart.Add(freshness)
+	if s.certificateExpiry.Before(deadline) {
+		deadline = s.certificateExpiry
+	}
+	s.mu.Lock()
+	now := s.now()
+	if s.err != nil || s.ctx.Err() != nil || !now.Before(s.authorizationDeadline) || !now.Before(deadline) {
+		s.mu.Unlock()
+		return false
+	}
+	s.authorizationDeadline = deadline
+	s.mu.Unlock()
+	select {
+	case s.authorizationChanged <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // CheckTarget prevents a message from substituting another authenticated target.
@@ -226,4 +283,25 @@ func gateDone(gate LeaderGate) <-chan struct{} {
 		return nil
 	}
 	return gate.Done()
+}
+
+func authorizationDefinitive(err error) bool {
+	return errors.Is(err, ErrUnauthenticated) || errors.Is(err, ErrUnauthorized)
+}
+
+func until(now, deadline time.Time) time.Duration {
+	if duration := deadline.Sub(now); duration > 0 {
+		return duration
+	}
+	return 0
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(duration)
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -115,7 +116,7 @@ func TestInitialAuthorizationHasHardDeadline(t *testing.T) {
 	started := time.Now()
 	_, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}})
 	close(release)
-	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+	if err == nil || !errors.Is(err, ErrAuthorizationUnavailable) {
 		t.Fatalf("hung initial authorization error = %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
@@ -196,14 +197,34 @@ func TestSharedRevocationsCoverCompleteIdentityAndAssignmentChain(t *testing.T) 
 	}
 }
 
-func TestWatchFailureRevokesAndClosesAdmissionRace(t *testing.T) {
+func TestWatchFailureRequestsAuditButFreshnessStillBoundsSession(t *testing.T) {
 	fixture := newSessionFixture(t)
+	fixture.revocations.freshness = 30 * time.Millisecond
 	session := fixture.session(t, time.Hour)
 	fixture.revocations.AuthorizationWatchFailed(fmt.Errorf("watch closed"))
+	if batches := fixture.revocations.due(fixture.revocations.now()); len(batches) != 1 {
+		t.Fatalf("watch failure scheduled %d audit batches, want 1", len(batches))
+	}
 	select {
 	case <-session.Context().Done():
 	case <-time.After(time.Second):
-		t.Fatal("watch failure did not revoke active session")
+		t.Fatal("session exceeded its authorization freshness deadline")
+	}
+}
+
+func TestAdmissionDuringBrokenWatchStillRequiresLiveReadsAndExpires(t *testing.T) {
+	fixture := newSessionFixture(t)
+	fixture.revocations.freshness = 30 * time.Millisecond
+	fixture.revocations.AuthorizationWatchFailed(fmt.Errorf("watch unavailable"))
+	fixture.client.ClearActions()
+	session := fixture.session(t, time.Hour)
+	if got := len(fixture.client.Actions()); got != 5 {
+		t.Fatalf("admission during watch failure made %d workload reads, want 5", got)
+	}
+	select {
+	case <-session.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("post-failure admission exceeded its fresh authorization bound")
 	}
 }
 
@@ -218,46 +239,6 @@ func TestScopedInvalidationLeavesUnaffectedSessionOpen(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	session.Close()
-}
-
-func TestSixtyFourIdleSessionsPerformNoPeriodicAuthorization(t *testing.T) {
-	fixture := newSessionFixture(t)
-	var authorizations atomic.Int32
-	var assignmentRequests atomic.Int32
-	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error {
-		authorizations.Add(1)
-		// The runtime assignment authorizer performs three additional live
-		// reads (assignment ConfigMap, Site, allocation ConfigMap).
-		assignmentRequests.Add(3)
-		return nil
-	}}
-	fixture.client.ClearActions()
-	var sessions []*Session
-	for i := 0; i < 64; i++ {
-		session, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{fixture.leaf, fixture.install.ClientCA}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		sessions = append(sessions, session)
-	}
-	actionsAfterAdmission := len(fixture.client.Actions())
-	time.Sleep(50 * time.Millisecond)
-	if got := len(fixture.client.Actions()); got != actionsAfterAdmission {
-		t.Fatalf("idle sessions issued %d periodic Kubernetes requests", got-actionsAfterAdmission)
-	}
-	if authorizations.Load() != 64 {
-		t.Fatalf("live authorizations = %d, want one per admission", authorizations.Load())
-	}
-	if actionsAfterAdmission != 64*5 {
-		t.Fatalf("workload admission requests = %d, want %d", actionsAfterAdmission, 64*5)
-	}
-	if total := actionsAfterAdmission + int(assignmentRequests.Load()); total != 64*8 {
-		t.Fatalf("complete admission requests = %d, want %d", total, 64*8)
-	}
-	t.Log("64 idle sessions: previous five-second rechecks required 102.4 GET/s; shared invalidation requires 0 periodic GET/s")
-	for _, session := range sessions {
-		session.Close()
-	}
 }
 
 type sessionFixture struct {

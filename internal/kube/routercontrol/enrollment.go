@@ -15,7 +15,10 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -129,23 +132,29 @@ func (e *Enroller) checkGate() error {
 }
 
 func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount string, serviceAccountUID types.UID, podName string, podUID types.UID) (Identity, error) {
-	pod, err := e.Kube.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	pod, err := AuthorizationRead(ctx, "pods/"+namespace+"/"+podName, func(ctx context.Context) (*corev1.Pod, error) {
+		return e.Kube.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	})
 	if err != nil {
-		return Identity{}, fmt.Errorf("read bound Pod: %w", err)
+		return Identity{}, authorizationReadFailure("bound Pod", err)
 	}
 	if pod.UID != podUID || pod.DeletionTimestamp != nil || pod.Spec.ServiceAccountName != serviceAccount {
 		return Identity{}, fmt.Errorf("%w: bound Pod was replaced, deleted, or uses another ServiceAccount", ErrUnauthenticated)
 	}
-	sa, err := e.Kube.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
+	sa, err := AuthorizationRead(ctx, "serviceaccounts/"+namespace+"/"+serviceAccount, func(ctx context.Context) (*corev1.ServiceAccount, error) {
+		return e.Kube.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
+	})
 	if err != nil {
-		return Identity{}, fmt.Errorf("read bound ServiceAccount: %w", err)
+		return Identity{}, authorizationReadFailure("bound ServiceAccount", err)
 	}
 	if sa.UID != serviceAccountUID || sa.DeletionTimestamp != nil {
 		return Identity{}, fmt.Errorf("%w: bound ServiceAccount was replaced or deleted", ErrUnauthenticated)
 	}
-	ns, err := e.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	ns, err := AuthorizationRead(ctx, "namespaces/"+namespace, func(ctx context.Context) (*corev1.Namespace, error) {
+		return e.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	})
 	if err != nil {
-		return Identity{}, fmt.Errorf("read namespace identity: %w", err)
+		return Identity{}, authorizationReadFailure("namespace identity", err)
 	}
 	if ns.DeletionTimestamp != nil {
 		return Identity{}, fmt.Errorf("%w: namespace is being deleted", ErrUnauthorized)
@@ -154,9 +163,11 @@ func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount s
 	if err != nil {
 		return Identity{}, fmt.Errorf("Pod ownership: %w", err)
 	}
-	rs, err := e.Kube.AppsV1().ReplicaSets(namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
+	rs, err := AuthorizationRead(ctx, "replicasets/"+namespace+"/"+rsOwner.Name, func(ctx context.Context) (*appsv1.ReplicaSet, error) {
+		return e.Kube.AppsV1().ReplicaSets(namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
+	})
 	if err != nil {
-		return Identity{}, fmt.Errorf("read owning ReplicaSet: %w", err)
+		return Identity{}, authorizationReadFailure("owning ReplicaSet", err)
 	}
 	if rs.UID != rsOwner.UID || rs.DeletionTimestamp != nil {
 		return Identity{}, fmt.Errorf("%w: owning ReplicaSet was replaced or deleted", ErrUnauthorized)
@@ -165,9 +176,11 @@ func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount s
 	if err != nil {
 		return Identity{}, fmt.Errorf("ReplicaSet ownership: %w", err)
 	}
-	deployment, err := e.Kube.AppsV1().Deployments(namespace).Get(ctx, deploymentOwner.Name, metav1.GetOptions{})
+	deployment, err := AuthorizationRead(ctx, "deployments/"+namespace+"/"+deploymentOwner.Name, func(ctx context.Context) (*appsv1.Deployment, error) {
+		return e.Kube.AppsV1().Deployments(namespace).Get(ctx, deploymentOwner.Name, metav1.GetOptions{})
+	})
 	if err != nil {
-		return Identity{}, fmt.Errorf("read owning Deployment: %w", err)
+		return Identity{}, authorizationReadFailure("owning Deployment", err)
 	}
 	if deployment.UID != deploymentOwner.UID || deployment.DeletionTimestamp != nil {
 		return Identity{}, fmt.Errorf("%w: owning Deployment was replaced or deleted", ErrUnauthorized)
@@ -181,6 +194,13 @@ func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount s
 		return Identity{}, fmt.Errorf("%w: router group metadata is missing or inconsistent", ErrUnauthorized)
 	}
 	return Identity{Installation: e.Installation.Name, Namespace: namespace, NamespaceUID: ns.UID, SiteName: siteOwner.Name, SiteUID: siteOwner.UID, Group: group, PodName: pod.Name, PodUID: pod.UID, ServiceAccount: serviceAccount, ServiceAccountUID: sa.UID}, nil
+}
+
+func authorizationReadFailure(resource string, err error) error {
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("%w: %s no longer exists", ErrUnauthorized, resource)
+	}
+	return AuthorizationUnavailable(fmt.Errorf("read %s: %w", resource, err))
 }
 
 func validateCSR(der []byte) (*x509.CertificateRequest, error) {

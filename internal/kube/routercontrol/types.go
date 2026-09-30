@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -17,10 +18,15 @@ const (
 )
 
 var (
-	ErrUnauthenticated = errors.New("router adaptor is not authenticated")
-	ErrUnauthorized    = errors.New("router adaptor is not authorized")
-	ErrNotLeader       = errors.New("controller is not the active leader")
+	ErrUnauthenticated          = errors.New("router adaptor is not authenticated")
+	ErrUnauthorized             = errors.New("router adaptor is not authorized")
+	ErrAuthorizationUnavailable = errors.New("router adaptor authorization could not be confirmed")
+	ErrNotLeader                = errors.New("controller is not the active leader")
 )
+
+func AuthorizationUnavailable(err error) error {
+	return fmt.Errorf("%w: %v", ErrAuthorizationUnavailable, err)
+}
 
 // Identity is derived exclusively from TokenReview and live Kubernetes objects.
 // Values supplied in an enrollment request or CSR are never copied into it.
