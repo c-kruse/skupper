@@ -129,6 +129,78 @@ func (f *auditorFixture) auditRound() int {
 	return len(f.client.Actions()) - before
 }
 
+func TestAuditSpreadCoversTheWholeMinute(t *testing.T) {
+	var buckets [6]int
+	for i := 0; i < 1024; i++ {
+		delay := auditSpread(fmt.Sprintf("tenant-%04d", i), time.Minute)
+		if delay < 0 || delay >= time.Minute {
+			t.Fatalf("audit delay %v is outside the interval", delay)
+		}
+		buckets[delay/(10*time.Second)]++
+	}
+	for bucket, count := range buckets {
+		if count == 0 {
+			t.Fatalf("no audits scheduled in ten-second bucket %d: %v", bucket, buckets)
+		}
+	}
+}
+
+func TestWatchErrorsCannotBypassAuditRetrySpacing(t *testing.T) {
+	fixture := newAuditorFixture(t)
+	fixture.revocations.freshness = DefaultAuthorizationFreshness
+	_, state := fixture.addIdentity("tenant", "skupper-router", "one")
+	session := fixture.session(state)
+	defer session.Close()
+	now := time.Now()
+	fixture.revocations.now = func() time.Time { return now }
+	fixture.revocations.AuthorizationWatchFailed(errors.New("watch unavailable"))
+	batches := fixture.revocations.due(now)
+	if len(batches) != 1 {
+		t.Fatalf("initial early audit batches = %d, want 1", len(batches))
+	}
+	fixture.revocations.complete(batches[0], map[Identity]error{session.Identity: AuthorizationUnavailable(errors.New("429"))})
+	for i := 0; i < 4; i++ {
+		now = now.Add(time.Second)
+		fixture.revocations.AuthorizationWatchFailed(errors.New("watch still unavailable"))
+		if batches := fixture.revocations.due(now); len(batches) != 0 {
+			t.Fatalf("watch error bypassed the five-second retry delay after %ds", i+1)
+		}
+	}
+	now = now.Add(time.Second)
+	if batches := fixture.revocations.due(now); len(batches) != 1 {
+		t.Fatalf("retry batches at the five-second boundary = %d, want 1", len(batches))
+	}
+}
+
+func TestQueuedAuditSkipsClosedAndExpiredSessions(t *testing.T) {
+	for _, reason := range []string{"closed", "expired"} {
+		t.Run(reason, func(t *testing.T) {
+			fixture := newAuditorFixture(t)
+			fixture.revocations.freshness = DefaultAuthorizationFreshness
+			var clock atomic.Int64
+			clock.Store(time.Now().UnixNano())
+			now := func() time.Time { return time.Unix(0, clock.Load()) }
+			fixture.authenticator.Now = now
+			fixture.revocations.now = now
+			_, state := fixture.addIdentity("tenant", "skupper-router", "one")
+			session := fixture.session(state)
+			defer session.Close()
+			fixture.revocations.AuthorizationWatchFailed(errors.New("watch unavailable"))
+			batch := fixture.revocations.due(now())[0]
+			if reason == "closed" {
+				session.Close()
+			} else {
+				clock.Add(int64(DefaultAuthorizationFreshness))
+			}
+			fixture.client.ClearActions()
+			results := fixture.authenticator.audit(context.Background(), batch)
+			if len(results) != 0 || len(fixture.client.Actions()) != 0 {
+				t.Fatalf("queued audit of %s session produced %d results and %d API requests", reason, len(results), len(fixture.client.Actions()))
+			}
+		})
+	}
+}
+
 func TestAuditorUsesRealDistinctIdentityReadsAcrossPeriods(t *testing.T) {
 	fixture := newAuditorFixture(t)
 	var clock atomic.Int64
@@ -174,12 +246,22 @@ func TestAuditorDeduplicatesSharedHAIdentityDependencies(t *testing.T) {
 	_, first := fixture.addIdentity("tenant", "skupper-router", "one")
 	_, second := fixture.addIdentity("tenant", "skupper-router-2", "one")
 	one, two := fixture.session(first), fixture.session(second)
+	defer one.Close()
+	defer two.Close()
+	now := time.Now()
+	fixture.revocations.mu.Lock()
+	fixture.revocations.sessions[one].nextAudit = now
+	fixture.revocations.sessions[two].nextAudit = now.Add(30 * time.Second)
+	fixture.revocations.mu.Unlock()
 	fixture.client.ClearActions()
-	if got := fixture.auditRound(); got != 11 {
+	batches := fixture.revocations.due(now)
+	if len(batches) != 1 || len(batches[0].sessions) != 2 {
+		t.Fatalf("staggered HA sessions did not join one namespace audit: %#v", batches)
+	}
+	fixture.revocations.complete(batches[0], fixture.authenticator.audit(context.Background(), batches[0]))
+	if got := len(fixture.client.Actions()); got != 11 {
 		t.Fatalf("shared HA audit observed %d GETs, want 11 unique dependencies", got)
 	}
-	one.Close()
-	two.Close()
 }
 
 func TestAuditorConcurrencyIsBounded(t *testing.T) {
@@ -189,6 +271,7 @@ func TestAuditorConcurrencyIsBounded(t *testing.T) {
 	fixture.revocations.concurrency = 2
 	var active, maximum atomic.Int32
 	release := make(chan struct{})
+	defer close(release)
 	for i := 0; i < 6; i++ {
 		_, state := fixture.addIdentity(fmt.Sprintf("tenant-%d", i), "skupper-router", "one")
 		fixture.session(state)
@@ -206,6 +289,7 @@ func TestAuditorConcurrencyIsBounded(t *testing.T) {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- fixture.authenticator.RunAuditor(ctx) }()
 	deadline := time.After(time.Second)
@@ -219,9 +303,13 @@ func TestAuditorConcurrencyIsBounded(t *testing.T) {
 	if maximum.Load() > 2 {
 		t.Fatalf("audit concurrency = %d, want at most 2", maximum.Load())
 	}
-	close(release)
 	cancel()
 	<-done
+	fixture.revocations.mu.Lock()
+	defer fixture.revocations.mu.Unlock()
+	if len(fixture.revocations.inFlight) != 0 {
+		t.Fatal("auditor shutdown left namespace batches in flight")
+	}
 }
 
 func TestPersistentRevocationClosesWithoutWatchDelivery(t *testing.T) {

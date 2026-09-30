@@ -263,6 +263,7 @@ func newSessionFixture(t *testing.T) *sessionFixture {
 		t.Fatal(err)
 	}
 	fixture := &sessionFixture{client: client, install: installation, identity: enrollment.Identity, leaf: leaf, gate: &testGate{done: make(chan struct{})}, revocations: NewSessionRevocations()}
+	fixture.revocations.now = func() time.Time { return testNow }
 	fixture.authorized.Store(true)
 	return fixture
 }

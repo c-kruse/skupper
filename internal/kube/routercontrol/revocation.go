@@ -49,23 +49,24 @@ type authorizationAuditBatch struct {
 // authorization deadline; watches reduce revocation latency but are not trusted
 // as the only freshness mechanism.
 type SessionRevocations struct {
-	mu          sync.Mutex
-	global      uint64
-	namespaces  map[string]uint64
-	sessions    map[*Session]*auditedSession
-	inFlight    map[string]bool
-	early       chan struct{}
-	now         func() time.Time
-	freshness   time.Duration
-	interval    time.Duration
-	retry       time.Duration
-	tick        time.Duration
-	concurrency int
+	mu             sync.Mutex
+	global         uint64
+	namespaces     map[string]uint64
+	sessions       map[*Session]*auditedSession
+	inFlight       map[string]bool
+	auditNotBefore map[string]time.Time
+	early          chan struct{}
+	now            func() time.Time
+	freshness      time.Duration
+	interval       time.Duration
+	retry          time.Duration
+	tick           time.Duration
+	concurrency    int
 }
 
 func NewSessionRevocations() *SessionRevocations {
 	return &SessionRevocations{
-		namespaces: map[string]uint64{}, sessions: map[*Session]*auditedSession{}, inFlight: map[string]bool{}, early: make(chan struct{}, 1),
+		namespaces: map[string]uint64{}, sessions: map[*Session]*auditedSession{}, inFlight: map[string]bool{}, auditNotBefore: map[string]time.Time{}, early: make(chan struct{}, 1),
 		now: time.Now, freshness: DefaultAuthorizationFreshness, interval: defaultAuditInterval, retry: defaultAuditRetry, tick: defaultAuditTick, concurrency: defaultAuditConcurrency,
 	}
 }
@@ -140,15 +141,19 @@ func (r *SessionRevocations) due(now time.Time) []authorizationAuditBatch {
 	defer r.mu.Unlock()
 	byNamespace := map[string]*authorizationAuditBatch{}
 	for session, state := range r.sessions {
-		if r.inFlight[session.Identity.Namespace] || state.nextAudit.After(now) || session.Context().Err() != nil {
+		if r.inFlight[session.Identity.Namespace] || r.auditNotBefore[session.Identity.Namespace].After(now) || state.nextAudit.After(now) || session.Context().Err() != nil || !now.Before(session.authorizationExpiry()) {
 			continue
 		}
-		batch := byNamespace[session.Identity.Namespace]
-		if batch == nil {
-			batch = &authorizationAuditBatch{namespace: session.Identity.Namespace, revision: authorizationRevision{global: r.global, namespace: r.namespaces[session.Identity.Namespace]}, evidenceStart: now, sessions: map[Identity][]*Session{}}
-			byNamespace[session.Identity.Namespace] = batch
+		if byNamespace[session.Identity.Namespace] == nil {
+			byNamespace[session.Identity.Namespace] = &authorizationAuditBatch{namespace: session.Identity.Namespace, revision: authorizationRevision{global: r.global, namespace: r.namespaces[session.Identity.Namespace]}, evidenceStart: now, sessions: map[Identity][]*Session{}}
 		}
-		batch.sessions[session.Identity] = append(batch.sessions[session.Identity], session)
+	}
+	// Audit a due namespace together even if its HA sessions were admitted at
+	// different times, so shared reads and subsequent schedules stay shared.
+	for session := range r.sessions {
+		if batch := byNamespace[session.Identity.Namespace]; batch != nil && session.Context().Err() == nil && now.Before(session.authorizationExpiry()) {
+			batch.sessions[session.Identity] = append(batch.sessions[session.Identity], session)
+		}
 	}
 	result := make([]authorizationAuditBatch, 0, len(byNamespace))
 	for namespace, batch := range byNamespace {
@@ -162,6 +167,8 @@ func (r *SessionRevocations) complete(batch authorizationAuditBatch, results map
 	now := r.now()
 	r.mu.Lock()
 	delete(r.inFlight, batch.namespace)
+	// Repeated watch errors must not bypass the audit retry limit.
+	r.auditNotBefore[batch.namespace] = now.Add(r.retry)
 	revisionCurrent := batch.revision.global == r.global && batch.revision.namespace == r.namespaces[batch.namespace]
 	var reject []*Session
 	for identity, included := range batch.sessions {
@@ -200,9 +207,9 @@ func auditSpread(namespace string, interval time.Duration) time.Duration {
 	if interval <= 0 {
 		return 0
 	}
-	hash := fnv.New32a()
+	hash := fnv.New64a()
 	_, _ = hash.Write([]byte(namespace))
-	return time.Duration(uint64(hash.Sum32()) % uint64(interval))
+	return time.Duration(hash.Sum64() % uint64(interval))
 }
 
 func authorizationMatches(identity Identity, kind AuthorizationKind, namespace, name string) bool {
@@ -249,6 +256,7 @@ func (a *Authenticator) RunAuditor(ctx context.Context) error {
 				case semaphore <- struct{}{}:
 					defer func() { <-semaphore }()
 				case <-ctx.Done():
+					r.complete(batch, nil)
 					return
 				}
 				r.complete(batch, a.audit(ctx, batch))
@@ -270,8 +278,16 @@ func (a *Authenticator) RunAuditor(ctx context.Context) error {
 func (a *Authenticator) audit(ctx context.Context, batch authorizationAuditBatch) map[Identity]error {
 	results := map[Identity]error{}
 	batchContext := withAuthorizationReadCache(ctx)
-	for identity := range batch.sessions {
-		results[identity] = a.authorizeWithin(batchContext, identity)
+	for identity, sessions := range batch.sessions {
+		if ctx.Err() != nil {
+			break
+		}
+		for _, session := range sessions {
+			if session.Check() == nil {
+				results[identity] = a.authorizeWithin(batchContext, identity)
+				break
+			}
+		}
 	}
 	return results
 }

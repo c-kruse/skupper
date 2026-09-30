@@ -52,8 +52,8 @@ type ObservationSource interface {
 }
 
 // AuthorizationInvalidator receives only changes to objects used by live
-// router-control authorization. Implementations cancel affected sessions; a
-// watch error must invalidate every session because cache freshness is unknown.
+// router-control authorization. Implementations cancel affected sessions and
+// request authoritative audits on watch errors; session deadlines bound freshness.
 type AuthorizationInvalidator interface {
 	InvalidateAuthorization(kind auth.AuthorizationKind, namespace, name string)
 	AuthorizationWatchFailed(error)
