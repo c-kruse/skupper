@@ -62,6 +62,20 @@ func (p *Publisher) SetUnavailable(target TargetIdentity) {
 	p.mu.Unlock()
 }
 
+// PublishedIntents returns an isolated view of this publisher's current desired
+// state. A new leader's empty publisher has no evidence of earlier publication.
+func (p *Publisher) PublishedIntents(namespaceUID string) map[TargetIdentity]Publication {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make(map[TargetIdentity]Publication)
+	for target, state := range p.states {
+		if target.NamespaceUID == namespaceUID {
+			result[target] = Publication{Digest: state.digest, Available: state.available, Revision: state.revision}
+		}
+	}
+	return result
+}
+
 func (p *Publisher) notifyLocked(target TargetIdentity) {
 	for subscriber := range p.subscribers[target] {
 		select {

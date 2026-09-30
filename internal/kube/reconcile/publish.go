@@ -40,6 +40,12 @@ func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Pl
 	sort.Slice(targets, func(i, j int) bool { return targets[i].RouterGroup < targets[j].RouterGroup })
 	for _, target := range targets {
 		intent := desired.Intents[target]
+		if published := snapshot.PublishedIntents[target]; published.Available {
+			_, digest, err := routercontrol.CanonicalIntent(intent)
+			if err == nil && published.Digest == digest {
+				continue
+			}
+		}
 		dependencies := []OperationID(nil)
 		if allocationChanged {
 			dependencies = []OperationID{allocationID}
@@ -57,12 +63,17 @@ func (p PublicationPlanner) Plan(snapshot Snapshot, desired DesiredNamespace) Pl
 			return err
 		}})
 	}
-	for target := range snapshot.Observations {
+	// Published state is authoritative even when no adaptor is connected. An
+	// Applied observation cannot prove that this leader still holds an intent.
+	for target, published := range snapshot.PublishedIntents {
+		if !published.Available {
+			continue
+		}
 		if _, stillDesired := desired.Intents[target]; stillDesired {
 			continue
 		}
 		target := target
-		plan.Operations = append(plan.Operations, Operation{ID: OperationID("unavailable/" + target.RouterGroup), Kind: "SetIntentUnavailable", Run: func(ctx context.Context) error {
+		plan.Operations = append(plan.Operations, Operation{ID: OperationID("unavailable/" + target.NamespaceUID + "/" + target.SiteUID + "/" + target.RouterGroup), Kind: "SetIntentUnavailable", Run: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

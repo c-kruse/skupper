@@ -65,6 +65,9 @@ func (p *workloadOrderPublisher) Publish(intent routercontrol.RouterIntent) (rou
 }
 
 func (*workloadOrderPublisher) SetUnavailable(routercontrol.TargetIdentity) {}
+func (*workloadOrderPublisher) PublishedIntents(string) map[routercontrol.TargetIdentity]routercontrol.Publication {
+	return nil
+}
 
 type workloadOrderEnsurer struct {
 	events              *[]string

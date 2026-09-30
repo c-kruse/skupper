@@ -78,6 +78,7 @@ type NamespaceController struct {
 	informers              namespaceInformers
 	queue                  *reconcile.Queue
 	observations           ObservationSource
+	publisher              routercontrol.IntentPublisher
 	requireExplicitControl bool
 	bootstrap              reconcile.RouterControlBootstrap
 	disableSecurityContext bool
@@ -182,6 +183,7 @@ func NewNamespaceController(clients internalclient.Clients, options NamespaceCon
 		accessConfig = reconcile.AccessConfig{EnabledTypes: append([]string(nil), options.SecuredAccess.EnabledAccessTypes...), DefaultType: options.SecuredAccess.DefaultAccessType, ClusterHost: options.SecuredAccess.ClusterHost, IngressDomain: options.SecuredAccess.IngressDomain, IngressClassName: options.SecuredAccess.IngressClassName, HTTPProxyDomain: options.SecuredAccess.HttpProxyDomain, GatewayPort: options.SecuredAccess.GatewayPort, GatewayClass: options.SecuredAccess.GatewayClass, GatewayDomain: options.SecuredAccess.GatewayDomain, ControllerNamespace: controllerNamespace, GatewayOwner: options.GatewayOwner}
 	}
 	c := &NamespaceController{clients: clients, controllerID: options.ControllerID, coreFactory: coreFactory, skupperFactory: skupperFactory, observations: observations, authorization: options.Authorization, requireExplicitControl: options.RequireExplicitControl, bootstrap: options.Bootstrap, disableSecurityContext: options.DisableSecurityContext, sizing: options.Sizing, labelling: options.Labelling, controllerNamespace: controllerNamespace, defaultAccessType: options.DefaultAccessType, clusterHost: options.ClusterHost, accessConfig: accessConfig}
+	c.publisher = publisher
 	if c.sizing == nil {
 		registry := sizing.NewRegistry()
 		c.sizing = registry
@@ -878,6 +880,7 @@ func (c *NamespaceController) Collect(ctx context.Context, namespace string) (re
 	} else {
 		snapshot.Observations = map[routercontrol.TargetIdentity][]reconcile.Observation{}
 	}
+	snapshot.PublishedIntents = c.publisher.PublishedIntents(string(ns.UID))
 	return snapshot, nil
 }
 

@@ -167,6 +167,15 @@ type RouterIntent struct {
 type IntentPublisher interface {
 	Publish(intent RouterIntent) (Digest, error)
 	SetUnavailable(target TargetIdentity)
+	PublishedIntents(namespaceUID string) map[TargetIdentity]Publication
+}
+
+// Publication describes the desired intent currently held for a target, not
+// whether a router has accepted or applied it. Values contain no mutable state.
+type Publication struct {
+	Digest    Digest
+	Available bool
+	Revision  uint64
 }
 
 // SessionIdentity is established by authentication, never by Hello claims. A

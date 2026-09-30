@@ -92,6 +92,7 @@ type Snapshot struct {
 	Gateway           *unstructured.Unstructured
 	Secrets           []*corev1.Secret
 	Observations      map[RouterTarget][]Observation
+	PublishedIntents  map[RouterTarget]routercontrol.Publication
 	Allocations       AllocationState
 	Bootstrap         RouterControlBootstrap
 	DefaultAccessType string

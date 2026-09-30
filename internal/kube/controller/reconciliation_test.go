@@ -221,6 +221,10 @@ func (p *testIntentPublisher) SetUnavailable(target routercontrol.TargetIdentity
 	p.real.SetUnavailable(target)
 }
 
+func (p *testIntentPublisher) PublishedIntents(namespaceUID string) map[routercontrol.TargetIdentity]routercontrol.Publication {
+	return p.real.PublishedIntents(namespaceUID)
+}
+
 func newTestIntentPublisher() *testIntentPublisher {
 	return &testIntentPublisher{published: make(chan routercontrol.RouterIntent, 1), real: routercontrol.NewPublisher()}
 }
