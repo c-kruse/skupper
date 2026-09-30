@@ -36,8 +36,8 @@ func TestEnrollValidatesAudienceOwnershipCSRAndLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !enrollment.NotAfter.Equal(testNow.Add(7 * time.Minute)) {
-		t.Fatalf("certificate expiry = %v, want token expiry", enrollment.NotAfter)
+	if !enrollment.NotAfter.Equal(testNow.Add(DefaultCertTTL)) {
+		t.Fatalf("certificate expiry = %v, want %v independent of bootstrap token expiry", enrollment.NotAfter, testNow.Add(DefaultCertTTL))
 	}
 	leaf, err := x509.ParseCertificate(enrollment.Certificate[0])
 	if err != nil {
@@ -60,6 +60,19 @@ func TestEnrollValidatesAudienceOwnershipCSRAndLifetime(t *testing.T) {
 	})
 	if _, err := enroller.Enroll(context.Background(), token, csr); err == nil || !strings.Contains(err.Error(), "enrollment audience") {
 		t.Fatalf("wrong audience error = %v", err)
+	}
+}
+
+func TestEnrollCapsLifetimeAtClientIssuer(t *testing.T) {
+	_, installation, enroller := enrollmentFixture(t)
+	installation.ClientCA.NotAfter = testNow.Add(45 * time.Minute)
+	enrollment, err := enroller.Enroll(context.Background(), testToken(testNow.Add(7*time.Minute)), testCSR(t, pkix.Name{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := installation.ClientCA.NotAfter.UTC().Truncate(time.Second)
+	if !enrollment.NotAfter.Equal(want) {
+		t.Fatalf("certificate expiry = %v, want issuer cap %v", enrollment.NotAfter, want)
 	}
 }
 

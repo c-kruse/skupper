@@ -52,11 +52,9 @@ type ObservationSource interface {
 }
 
 // AuthorizationInvalidator receives only changes to objects used by live
-// router-control authorization. Implementations cancel affected sessions and
-// request authoritative audits on watch errors; session deadlines bound freshness.
+// router-control authorization. Implementations cancel affected sessions.
 type AuthorizationInvalidator interface {
 	InvalidateAuthorization(kind auth.AuthorizationKind, namespace, name string)
-	AuthorizationWatchFailed(error)
 }
 
 const (
@@ -424,8 +422,7 @@ func (c *NamespaceController) registerAuthorizationInvalidations() error {
 	informers := []cache.SharedIndexInformer{c.informers.namespaces, c.informers.configMaps, c.informers.pods, c.informers.serviceAccounts, c.informers.replicaSets, c.informers.deployments, c.informers.sites}
 	for _, informer := range informers {
 		if err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-			slog.Error("Router authorization watch failed; requesting an early authoritative audit", "error", err)
-			c.authorization.AuthorizationWatchFailed(err)
+			slog.Error("Router authorization watch failed; certificate expiry is the revocation fallback", "error", err)
 		}); err != nil {
 			return fmt.Errorf("configure authorization watch failure handler: %w", err)
 		}

@@ -40,7 +40,6 @@ type noOperationsPlanner struct{}
 type recordedAuthorizationInvalidator struct {
 	mu     sync.Mutex
 	events []string
-	errors int
 	notify chan string
 }
 
@@ -55,12 +54,6 @@ func (r *recordedAuthorizationInvalidator) InvalidateAuthorization(kind auth.Aut
 		default:
 		}
 	}
-}
-
-func (r *recordedAuthorizationInvalidator) AuthorizationWatchFailed(error) {
-	r.mu.Lock()
-	r.errors++
-	r.mu.Unlock()
 }
 
 func (r *recordedAuthorizationInvalidator) take() []string {

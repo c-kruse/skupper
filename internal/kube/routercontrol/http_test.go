@@ -65,6 +65,29 @@ func TestEnrollmentClientAppliesRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestEnrollmentClientReloadsProjectedTokenForEveryAttempt(t *testing.T) {
+	tokenPath := writeTestToken(t)
+	var headers []string
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		headers = append(headers, request.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("denied")), Header: make(http.Header)}, nil
+	})
+	client := &EnrollmentClient{URL: "https://controller.example/enroll", TokenPath: tokenPath, HTTP: &http.Client{Transport: transport}, RequestTimeout: time.Second}
+	if _, err := client.Enroll(context.Background()); err == nil {
+		t.Fatal("first denied enrollment unexpectedly succeeded")
+	}
+	if err := os.WriteFile(tokenPath, []byte("rotated-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Enroll(context.Background()); err == nil {
+		t.Fatal("second denied enrollment unexpectedly succeeded")
+	}
+	want := []string{"Bearer sensitive-token", "Bearer rotated-token"}
+	if len(headers) != len(want) || headers[0] != want[0] || headers[1] != want[1] {
+		t.Fatalf("enrollment authorization headers = %q, want %q", headers, want)
+	}
+}
+
 func TestEnrollmentResponseExpiryMustMatchLeaf(t *testing.T) {
 	leaf := &x509.Certificate{NotAfter: time.Date(2026, 9, 29, 12, 15, 0, 0, time.UTC)}
 	if err := validateEnrollmentExpiry(leaf.NotAfter.Format(time.RFC3339Nano), leaf); err != nil {

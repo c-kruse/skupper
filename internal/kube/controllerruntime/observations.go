@@ -41,6 +41,7 @@ type cachedScope struct {
 type cachedSession struct {
 	id          string
 	incarnation string
+	handoff     bool
 	accepted    protocol.Accepted
 	application *protocol.ApplicationReport
 	scopes      map[string]*cachedScope
@@ -75,13 +76,17 @@ func (c *observationCache) NoteNamespace(uid, name string) {
 
 func (c *observationCache) Connected(key protocol.SessionKey, sessionID string, hello protocol.Hello) {
 	c.mu.Lock()
-	c.sessions[key] = &cachedSession{
+	next := &cachedSession{
 		id: sessionID, incarnation: hello.RouterIncarnation,
 		scopes: map[string]*cachedScope{
 			protocol.ObservationScopeResources: {},
 			protocol.ObservationScopeAddresses: {},
 		},
 	}
+	if previous := c.sessions[key]; previous != nil && previous.incarnation == hello.RouterIncarnation && previous.accepted.Digest != "" {
+		next = copySessionForHandoff(previous, sessionID)
+	}
+	c.sessions[key] = next
 	namespace := c.namespaces[key.Target.NamespaceUID]
 	c.mu.Unlock()
 	c.changed(namespace)
@@ -90,7 +95,33 @@ func (c *observationCache) Connected(key protocol.SessionKey, sessionID string, 
 func (c *observationCache) Accepted(key protocol.SessionKey, accepted protocol.Accepted) {
 	c.mu.Lock()
 	session := c.sessions[key]
-	if session == nil || session.id != accepted.SessionID || accepted.Sequence <= session.accepted.Sequence {
+	if session == nil || session.id != accepted.SessionID {
+		c.mu.Unlock()
+		return
+	}
+	if session.handoff {
+		session.handoff = false
+		if accepted.Digest == session.accepted.Digest {
+			session.accepted = accepted
+			if session.application != nil {
+				session.application.SessionID = accepted.SessionID
+				session.application.Sequence = accepted.Sequence
+			}
+			for _, scope := range session.scopes {
+				scope.snapshot.SessionID = accepted.SessionID
+			}
+			c.mu.Unlock()
+			return
+		}
+		session.accepted = accepted
+		session.application = nil
+		session.invalidateScopes()
+		namespace := c.namespaces[key.Target.NamespaceUID]
+		c.mu.Unlock()
+		c.changed(namespace)
+		return
+	}
+	if accepted.Sequence <= session.accepted.Sequence {
 		c.mu.Unlock()
 		return
 	}
@@ -306,4 +337,29 @@ func copyObservation(observation protocol.ObservationSnapshot) protocol.Observat
 	observation.Resources = append([]protocol.LocalResourceObservation(nil), observation.Resources...)
 	observation.Addresses = append([]protocol.LocalAddressObservation(nil), observation.Addresses...)
 	return observation
+}
+
+func copySessionForHandoff(previous *cachedSession, sessionID string) *cachedSession {
+	next := &cachedSession{
+		id:          sessionID,
+		incarnation: previous.incarnation,
+		handoff:     true,
+		accepted:    previous.accepted,
+		application: copyApplication(previous.application),
+		scopes:      map[string]*cachedScope{},
+	}
+	next.accepted.SessionID = sessionID
+	if next.application != nil {
+		next.application.SessionID = sessionID
+	}
+	for name, previousScope := range previous.scopes {
+		scope := *previousScope
+		scope.sequence = 0
+		scope.snapshot = copyObservation(previousScope.snapshot)
+		scope.snapshot.SessionID = sessionID
+		scope.pending = nil
+		scope.nextRefresh = time.Time{}
+		next.scopes[name] = &scope
+	}
+	return next
 }

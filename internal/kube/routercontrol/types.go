@@ -13,7 +13,7 @@ import (
 
 const (
 	DefaultAudience = "skupper-controller-enrollment"
-	DefaultCertTTL  = 15 * time.Minute
+	DefaultCertTTL  = 2 * time.Hour
 	GroupLabel      = "skupper.io/group"
 )
 

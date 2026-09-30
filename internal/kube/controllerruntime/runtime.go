@@ -238,7 +238,6 @@ func serveLeader(ctx context.Context, clients internalclient.Clients, config *co
 	group.Go(func() error { return enrollmentServer.ServeTLS(prepared.enrollment, "", "") })
 	group.Go(func() error { observations.Run(ctx, controlServer); return ctx.Err() })
 	group.Go(func() error { return namespaces.RunLeader(ctx) })
-	group.Go(func() error { return authenticator.RunAuditor(ctx) })
 	slog.Info("Controller leader is serving", "controller", config.Namespace+"/"+config.Name)
 	return group.Wait()
 }

@@ -97,8 +97,8 @@ func TestKindEnrollment(t *testing.T) {
 	if credential.Identity.PodUID != router.UID || credential.Identity.ServiceAccount != router.Spec.ServiceAccountName || credential.Leaf.IsCA || credential.Leaf.Subject.String() != "" || len(credential.Leaf.DNSNames) != 0 || len(credential.Leaf.URIs) != 1 {
 		t.Fatal("enrollment did not return the server-built identity and client-only leaf")
 	}
-	if remaining := time.Until(credential.Leaf.NotAfter); remaining <= 0 || remaining > 10*time.Minute {
-		t.Fatalf("certificate did not respect bound token lifetime: %s", remaining)
+	if remaining := time.Until(credential.Leaf.NotAfter); remaining < 119*time.Minute || remaining > auth.DefaultCertTTL {
+		t.Fatalf("certificate did not use the two-hour policy independent of token lifetime: %s", remaining)
 	}
 	second, err := client.Enroll(ctx)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestKindEnrollment(t *testing.T) {
 	if bytes.Equal(credential.Leaf.RawSubjectPublicKeyInfo, second.Leaf.RawSubjectPublicKeyInfo) || credential.Leaf.SerialNumber.Cmp(second.Leaf.SerialNumber) == 0 {
 		t.Fatal("renewal reused the in-process key or leaf")
 	}
-	t.Log("valid Pod-bound TokenReview enrollment, server-built identity, token-bounded expiry, and fresh-key renewal passed")
+	t.Log("valid Pod-bound TokenReview enrollment, server-built identity, two-hour expiry, and fresh-key renewal passed")
 
 	t.Run("wrong audience is rejected after token file rotation", func(t *testing.T) {
 		writeToken(router, "not-the-enrollment-audience", true)

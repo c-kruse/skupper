@@ -15,9 +15,7 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -88,10 +86,6 @@ func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*En
 	if e.Now != nil {
 		now = e.Now()
 	}
-	tokenExpiry, err := jwtExpiry(token)
-	if err != nil {
-		return nil, fmt.Errorf("authenticated projected token has no usable expiry: %w", err)
-	}
 	ttl := e.TTL
 	if ttl <= 0 || ttl > DefaultCertTTL {
 		ttl = DefaultCertTTL
@@ -99,9 +93,9 @@ func (e *Enroller) Enroll(ctx context.Context, token string, csrDER []byte) (*En
 	// X.509 DER encodes certificate validity at whole-second precision. Use the
 	// signed precision for both the leaf and response metadata so clients can
 	// compare them exactly without rejecting a legitimate TTL-bounded issuance.
-	notAfter := minTime(now.Add(ttl), minTime(tokenExpiry, e.Installation.ClientCA.NotAfter)).UTC().Truncate(time.Second)
+	notAfter := minTime(now.Add(ttl), e.Installation.ClientCA.NotAfter).UTC().Truncate(time.Second)
 	if !notAfter.After(now.Add(time.Minute)) {
-		return nil, fmt.Errorf("authenticated token or client issuer expires too soon")
+		return nil, fmt.Errorf("client issuer expires too soon")
 	}
 	uri, err := identityURI(identity)
 	if err != nil {
@@ -132,27 +126,21 @@ func (e *Enroller) checkGate() error {
 }
 
 func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount string, serviceAccountUID types.UID, podName string, podUID types.UID) (Identity, error) {
-	pod, err := AuthorizationRead(ctx, "pods/"+namespace+"/"+podName, func(ctx context.Context) (*corev1.Pod, error) {
-		return e.Kube.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-	})
+	pod, err := e.Kube.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return Identity{}, authorizationReadFailure("bound Pod", err)
 	}
 	if pod.UID != podUID || pod.DeletionTimestamp != nil || pod.Spec.ServiceAccountName != serviceAccount {
 		return Identity{}, fmt.Errorf("%w: bound Pod was replaced, deleted, or uses another ServiceAccount", ErrUnauthenticated)
 	}
-	sa, err := AuthorizationRead(ctx, "serviceaccounts/"+namespace+"/"+serviceAccount, func(ctx context.Context) (*corev1.ServiceAccount, error) {
-		return e.Kube.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
-	})
+	sa, err := e.Kube.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
 	if err != nil {
 		return Identity{}, authorizationReadFailure("bound ServiceAccount", err)
 	}
 	if sa.UID != serviceAccountUID || sa.DeletionTimestamp != nil {
 		return Identity{}, fmt.Errorf("%w: bound ServiceAccount was replaced or deleted", ErrUnauthenticated)
 	}
-	ns, err := AuthorizationRead(ctx, "namespaces/"+namespace, func(ctx context.Context) (*corev1.Namespace, error) {
-		return e.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-	})
+	ns, err := e.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	if err != nil {
 		return Identity{}, authorizationReadFailure("namespace identity", err)
 	}
@@ -163,9 +151,7 @@ func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount s
 	if err != nil {
 		return Identity{}, fmt.Errorf("Pod ownership: %w", err)
 	}
-	rs, err := AuthorizationRead(ctx, "replicasets/"+namespace+"/"+rsOwner.Name, func(ctx context.Context) (*appsv1.ReplicaSet, error) {
-		return e.Kube.AppsV1().ReplicaSets(namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
-	})
+	rs, err := e.Kube.AppsV1().ReplicaSets(namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
 	if err != nil {
 		return Identity{}, authorizationReadFailure("owning ReplicaSet", err)
 	}
@@ -176,9 +162,7 @@ func (e *Enroller) liveIdentity(ctx context.Context, namespace, serviceAccount s
 	if err != nil {
 		return Identity{}, fmt.Errorf("ReplicaSet ownership: %w", err)
 	}
-	deployment, err := AuthorizationRead(ctx, "deployments/"+namespace+"/"+deploymentOwner.Name, func(ctx context.Context) (*appsv1.Deployment, error) {
-		return e.Kube.AppsV1().Deployments(namespace).Get(ctx, deploymentOwner.Name, metav1.GetOptions{})
-	})
+	deployment, err := e.Kube.AppsV1().Deployments(namespace).Get(ctx, deploymentOwner.Name, metav1.GetOptions{})
 	if err != nil {
 		return Identity{}, authorizationReadFailure("owning Deployment", err)
 	}
@@ -264,30 +248,6 @@ func controllerOwner(refs []metav1.OwnerReference, apiVersion, kind string) (met
 		return metav1.OwnerReference{}, fmt.Errorf("expected %s %s controller owner", apiVersion, kind)
 	}
 	return *found, nil
-}
-
-func jwtExpiry(token string) (time.Time, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}, fmt.Errorf("token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return time.Time{}, err
-	}
-	var claims struct {
-		Exp json.Number `json:"exp"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&claims); err != nil {
-		return time.Time{}, err
-	}
-	exp, err := claims.Exp.Int64()
-	if err != nil || exp <= 0 {
-		return time.Time{}, fmt.Errorf("missing exp claim")
-	}
-	return time.Unix(exp, 0), nil
 }
 
 func identityURI(identity Identity) (*url.URL, error) {

@@ -44,7 +44,7 @@ Recommended choices below, rather than additional settled requirements, include:
 | Transport | TLS enrollment endpoint and an adaptor-initiated bidirectional gRPC stream, on separate ports of one controller Service. |
 | Router intent | One complete logical snapshot per router target; domain resources rather than serialized QDR entities. |
 | Content identity | SHA-256 over a versioned, normalized canonical JSON payload; explicit delta base/result digests. |
-| RPC client certificates | Start with a 15-minute maximum lifetime and early, jittered renewal; tune with scale tests. |
+| RPC client certificates | Two-hour maximum lifetime with renewal near one hour using bounded jitter. |
 | Leader election | Start with LeaseDuration 30s, RenewDeadline 20s, RetryPeriod 5s; measure end-to-end recovery. |
 | Partial execution | Retain successful effects, block dependents, and retry from fresh observations. No general rollback. |
 | Invalid traffic intent | Fail closed for that contribution; acquisition failures instead hold operations requiring missing evidence. |
@@ -411,8 +411,8 @@ Enrollment proceeds as follows:
 5. Verify CSR signature/key parameters, then construct the certificate identity
    server-side: controller installation, namespace UID, Site UID, group, Pod UID,
    and ServiceAccount UID. Ignore requested identity SANs and reject CA/escalated
-   usages. Issue client-auth-only credentials with the approved short lifetime,
-   bounded by remaining token validity and issuer lifetime.
+   usages. Issue client-auth-only credentials for at most two hours, bounded by
+   issuer lifetime but not by the remaining bootstrap-token lifetime.
 6. Return the certificate chain; the private key never leaves the adaptor or goes
    into a Secret, shared volume, config file, RPC response, or log.
 
@@ -425,37 +425,35 @@ At stream establishment, verify chain, validity, client-auth usage, and identity
 then authorize the current namespace/Site/Pod assignment. Bind the stream to that
 target; reject message-level target substitution. Watch identity deletion and
 assignment changes to close sessions. Bound authorization freshness during API
-outages and stop accepting reports/sending changes when it cannot be established.
-Short-lived certificates alone do not instantly revoke a deleted Pod's access.
+outages at certificate expiry and stop accepting reports/sending changes after
+expiry. A missed watch can therefore leave issued access valid for up to two hours;
+this is an explicit availability/security tradeoff, not immediate revocation.
 
-Do not repeat the complete live Kubernetes authorization walk independently for
-every connected stream. Admission performs authoritative reads of the Pod,
+Do not repeat the complete live Kubernetes authorization walk continuously for
+connected streams. Each admission performs authoritative reads of the Pod,
 ServiceAccount, Namespace, ReplicaSet, Deployment, Site, assignment, and allocation
 objects. After admission, shared synchronized informers revoke only sessions
 affected by authorization-relevant field changes. Synchronize both informer stores
 and their authorization handlers before serving. A namespace-scoped generation
 barrier spanning the admission reads and registry insertion prevents an event in
 that interval from being missed. Pod status and allocation-port-only updates are
-not authorization changes.
+not authorization changes. Remember certificates canceled by a semantic watch
+event until their signed expiry, so the same credential cannot reconnect after
+watch-driven denial. New admission still repeats the complete authoritative check
+and fails closed on API uncertainty. Do not run a periodic authorization auditor.
+Watch failures are diagnostic; certificate expiry is the fallback when a semantic
+revocation event is missed.
 
-Because informer synchronization is only an initial latch and watch-error hooks do
-not observe every disconnected or retrying watch, give each session a hard
-authorization deadline no more than two minutes after the oldest contributing
-authoritative read. A leader-owned auditor refreshes active identities every minute,
-spread across that interval, using bounded concurrency and request-scoped
-deduplication of shared namespace/Site/assignment reads. It does not scan unrelated
-Pods or perform full-cluster LISTs. Extend only the exact sessions and identities
-included in a completely successful audit whose invalidation revision is unchanged;
-a late result cannot revive expired authority or refresh a reconnect omitted from
-the batch. API failures and timeouts retry without extending the prior deadline.
-Watch errors request a coalesced early audit but neither prove nor disprove cache
-freshness. Leadership fencing, certificate expiry, and authorization expiry remain
-independent of informer and API work, and every message checks the deadlines
-synchronously.
-
-Renew early with jitter using a fresh token review and preferably a new in-memory
-key, then reconnect. Close streams at certificate expiry; TLS handshakes alone do
-not expire existing connections. Controller failover does not rotate the CA.
+Renew near the certificate half-life with jitter using a freshly read projected
+token, a new TokenReview, and a new in-memory key. Acquire and authenticate the
+replacement while the old valid stream continues; transient enrollment failures do
+not tear down usable control. An ordinary replacement stream then cancels the old
+one. Preserve still-fresh operational evidence only for an overlapping replacement
+with the exact target/Pod/ServiceAccount identity, router incarnation, accepted
+intent, and realization. Preserve its original freshness deadline, clear pending
+refreshes, and fence old-session callbacks. Close streams at certificate expiry;
+TLS handshakes alone do not expire existing connections. Controller failover does
+not rotate the CA.
 Trust rotation needs overlapping bundles and an explicit rollout. RPC credential
 expiry prevents control communication, not automatic deletion of live traffic
 configuration. A compromised bearer token remains a bearer credential: use narrow

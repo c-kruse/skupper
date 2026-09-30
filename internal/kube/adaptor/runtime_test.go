@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,24 @@ import (
 type blockingEventReceiver struct {
 	ctx   context.Context
 	calls atomic.Int32
+}
+
+type recordingRuntimeMetrics struct {
+	NoopRuntimeMetrics
+	mu      sync.Mutex
+	streams []bool
+}
+
+func (m *recordingRuntimeMetrics) SetControlStreamUp(up bool) {
+	m.mu.Lock()
+	m.streams = append(m.streams, up)
+	m.mu.Unlock()
+}
+
+func (m *recordingRuntimeMetrics) streamStates() []bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]bool(nil), m.streams...)
 }
 
 func (r *blockingEventReceiver) NextEvent() (routercontrol.ServerEvent, error) {
@@ -37,11 +56,11 @@ func TestCertificateRenewalDelayUsesRemainingLifetime(t *testing.T) {
 		jitter    float64
 		want      time.Duration
 	}{
-		{name: "default fifteen minute certificate", remaining: 15 * time.Minute, want: 10 * time.Minute},
-		{name: "short token limited certificate", remaining: 90 * time.Second, want: 60 * time.Second},
-		{name: "long certificate bounded margin", remaining: 24 * time.Hour, want: 24*time.Hour - 15*time.Minute},
-		{name: "negative jitter", remaining: 15 * time.Minute, jitter: -1, want: 10*time.Minute + 30*time.Second},
-		{name: "positive jitter", remaining: 15 * time.Minute, jitter: 1, want: 9*time.Minute + 30*time.Second},
+		{name: "default two hour certificate", remaining: 2 * time.Hour, want: time.Hour},
+		{name: "short test certificate", remaining: 90 * time.Second, want: 45 * time.Second},
+		{name: "long certificate", remaining: 24 * time.Hour, want: 12 * time.Hour},
+		{name: "negative jitter", remaining: 2 * time.Hour, jitter: -1, want: 54 * time.Minute},
+		{name: "positive jitter", remaining: 2 * time.Hour, jitter: 1, want: 66 * time.Minute},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -52,6 +71,80 @@ func TestCertificateRenewalDelayUsesRemainingLifetime(t *testing.T) {
 	}
 	if got := certificateRenewalDelay(now, now.Add(-time.Second), 0); got != 0 {
 		t.Fatalf("expired certificate delay %s, want immediate", got)
+	}
+}
+
+func TestCredentialRenewalKeepsUsableSessionAcrossTransientEnrollmentFailure(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Now()
+	newControl := func(name string, expiry time.Time) *connectedControlSession {
+		ctx, stop := context.WithCancel(parent)
+		return &connectedControlSession{ctx: ctx, cancel: stop, expiry: expiry, incarnation: name}
+	}
+	initial := newControl("initial", now.Add(40*time.Millisecond))
+	started := make(chan string, 3)
+	firstFailure := make(chan struct{})
+	var attempts atomic.Int32
+	metrics := &recordingRuntimeMetrics{}
+	manager := controlSessionManager{
+		now: func() time.Time { return now }, jitter: func() float64 { return 0 }, retryBase: 5 * time.Millisecond,
+		metrics: metrics,
+		serve: func(control *connectedControlSession) error {
+			started <- control.incarnation
+			<-control.ctx.Done()
+			return control.ctx.Err()
+		},
+		connect: func(context.Context) (*connectedControlSession, error) {
+			if attempts.Add(1) == 1 {
+				close(firstFailure)
+				return nil, errors.New("temporary enrollment failure")
+			}
+			return newControl("replacement", now.Add(2*time.Hour)), nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- manager.run(parent, initial) }()
+	if name := <-started; name != "initial" {
+		t.Fatalf("first served session = %q", name)
+	}
+	select {
+	case <-firstFailure:
+	case <-time.After(time.Second):
+		t.Fatal("renewal attempt did not run")
+	}
+	select {
+	case <-initial.ctx.Done():
+		t.Fatal("transient enrollment failure dropped the still-usable session")
+	default:
+	}
+	select {
+	case name := <-started:
+		if name != "replacement" {
+			t.Fatalf("replacement served session = %q", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful renewal did not hand off to replacement")
+	}
+	select {
+	case <-initial.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("successful replacement did not retire old session")
+	}
+	if states := metrics.streamStates(); len(states) != 1 || !states[0] {
+		t.Fatalf("healthy renewal changed transport health during handoff: %v", states)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("manager shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session manager did not stop")
+	}
+	if states := metrics.streamStates(); len(states) != 2 || !states[0] || states[1] {
+		t.Fatalf("transport health transitions = %v, want [true false]", states)
 	}
 }
 

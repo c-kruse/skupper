@@ -130,8 +130,14 @@ func TestRolloutPodsCoexistAndReplacedSessionsAreFenced(t *testing.T) {
 	newPod := key
 	newPod.Identity.PodUID = "new-pod"
 	c.Connected(newPod, "session-2", protocol.Hello{RouterIncarnation: "router-2"})
-	if len(c.Snapshot("tenant", time.Now())[key.Target]) != 2 {
+	rollout := c.Snapshot("tenant", time.Now())[key.Target]
+	if len(rollout) != 2 {
 		t.Fatal("new rollout Pod evicted the old Pod's distinct realization")
+	}
+	for _, observation := range rollout {
+		if observation.Key == newPod && (observation.Application != nil || observation.Scopes[protocol.ObservationScopeResources].Fresh) {
+			t.Fatal("replacement Pod inherited old Pod evidence")
+		}
 	}
 	c.Connected(key, "session-3", protocol.Hello{RouterIncarnation: "router-3"})
 	c.Disconnected(key, "session-1")
@@ -149,6 +155,110 @@ func TestRolloutPodsCoexistAndReplacedSessionsAreFenced(t *testing.T) {
 	}
 	if len(c.Snapshot("other-tenant", time.Now())) != 0 {
 		t.Fatal("snapshot leaked another namespace's observations")
+	}
+}
+
+func TestHealthyCredentialHandoffPreservesEvidenceWithoutExtendingFreshness(t *testing.T) {
+	c, key := testObservationCache()
+	now := time.Unix(2500, 0)
+	c.now = func() time.Time { return now }
+	c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "intent", Sequence: 7})
+	report := protocol.ApplicationReport{SessionID: "session-1", RouterIncarnation: "router-1", IntentDigest: "intent", Sequence: 7, State: protocol.ApplicationApplied, RealizationID: "realization-1"}
+	if err := c.Application(context.Background(), key, report); err != nil {
+		t.Fatal(err)
+	}
+	requests := map[string]string{}
+	c.refresh(refreshFunc(func(_ protocol.SessionKey, _, request, scope string) error {
+		requests[scope] = request
+		return nil
+	}))
+	for _, scope := range []string{protocol.ObservationScopeResources, protocol.ObservationScopeAddresses} {
+		if err := c.Observation(context.Background(), key, protocol.ObservationSnapshot{SessionID: "session-1", RouterIncarnation: "router-1", Scope: scope, SampleSequence: 4, Knowledge: protocol.KnowledgeComplete, RefreshRequestID: requests[scope]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	originalDeadline := now.Add(observationFreshFor)
+	c.Connected(key, "session-2", protocol.Hello{RouterIncarnation: "router-1"})
+	c.Disconnected(key, "session-1")
+	c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "wrong", Sequence: 99})
+	if err := c.Application(context.Background(), key, report); err == nil {
+		t.Fatal("old stream application disturbed the successor")
+	}
+	beforeAcceptance := c.Snapshot("tenant", now)[key.Target][0]
+	if beforeAcceptance.SessionID != "session-2" || beforeAcceptance.AcceptedDigest != "intent" || beforeAcceptance.Application == nil || !beforeAcceptance.Scopes[protocol.ObservationScopeResources].Fresh || !beforeAcceptance.Scopes[protocol.ObservationScopeAddresses].Fresh {
+		t.Fatalf("healthy overlap dropped evidence before successor acceptance: %#v", beforeAcceptance)
+	}
+	c.Accepted(key, protocol.Accepted{SessionID: "session-2", Digest: "intent", Sequence: 1})
+	afterAcceptance := c.Snapshot("tenant", now)[key.Target][0]
+	if afterAcceptance.Application == nil || afterAcceptance.Application.RealizationID != "realization-1" || afterAcceptance.Application.Sequence != 1 {
+		t.Fatalf("unchanged successor did not retain realization: %#v", afterAcceptance.Application)
+	}
+	requests = map[string]string{}
+	c.refresh(refreshFunc(func(_ protocol.SessionKey, _, request, scope string) error {
+		requests[scope] = request
+		return nil
+	}))
+	if err := c.Observation(context.Background(), key, protocol.ObservationSnapshot{SessionID: "session-2", RouterIncarnation: "router-1", Scope: protocol.ObservationScopeResources, SampleSequence: 1, Knowledge: protocol.KnowledgeComplete, RefreshRequestID: requests[protocol.ObservationScopeResources]}); err != nil {
+		t.Fatalf("successor could not restart its sample sequence: %v", err)
+	}
+	if sample := c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Snapshot.SampleSequence; sample != 1 {
+		t.Fatalf("successor sample sequence = %d, want restarted sequence 1", sample)
+	}
+	now = originalDeadline.Add(-time.Nanosecond)
+	if !c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+		t.Fatal("carried evidence expired before its original deadline")
+	}
+	now = originalDeadline
+	if c.Snapshot("tenant", now)[key.Target][0].Scopes[protocol.ObservationScopeResources].Fresh {
+		t.Fatal("credential handoff extended observation freshness")
+	}
+}
+
+func TestCredentialHandoffDoesNotCarryAcrossIntentRouterOrRealizationChange(t *testing.T) {
+	for _, change := range []string{"intent", "router", "realization"} {
+		t.Run(change, func(t *testing.T) {
+			c, key := testObservationCache()
+			now := time.Unix(2700, 0)
+			c.now = func() time.Time { return now }
+			c.Accepted(key, protocol.Accepted{SessionID: "session-1", Digest: "intent", Sequence: 2})
+			report := protocol.ApplicationReport{SessionID: "session-1", RouterIncarnation: "router-1", IntentDigest: "intent", Sequence: 2, State: protocol.ApplicationApplied, RealizationID: "realization-1"}
+			if err := c.Application(context.Background(), key, report); err != nil {
+				t.Fatal(err)
+			}
+			var request string
+			c.refresh(refreshFunc(func(_ protocol.SessionKey, _, id, scope string) error {
+				if scope == protocol.ObservationScopeResources {
+					request = id
+				}
+				return nil
+			}))
+			if err := c.Observation(context.Background(), key, protocol.ObservationSnapshot{SessionID: "session-1", RouterIncarnation: "router-1", Scope: protocol.ObservationScopeResources, SampleSequence: 1, Knowledge: protocol.KnowledgeComplete, RefreshRequestID: request}); err != nil {
+				t.Fatal(err)
+			}
+			incarnation := "router-1"
+			if change == "router" {
+				incarnation = "router-2"
+			}
+			c.Connected(key, "session-2", protocol.Hello{RouterIncarnation: incarnation})
+			if change == "intent" {
+				c.Accepted(key, protocol.Accepted{SessionID: "session-2", Digest: "next-intent", Sequence: 1})
+			} else {
+				c.Accepted(key, protocol.Accepted{SessionID: "session-2", Digest: "intent", Sequence: 1})
+			}
+			if change == "realization" {
+				next := protocol.ApplicationReport{SessionID: "session-2", RouterIncarnation: "router-1", IntentDigest: "intent", Sequence: 1, State: protocol.ApplicationApplied, RealizationID: "realization-2"}
+				if err := c.Application(context.Background(), key, next); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot := c.Snapshot("tenant", now)[key.Target][0]
+			if snapshot.Application != nil && change != "realization" {
+				t.Fatalf("%s change retained old application", change)
+			}
+			if snapshot.Scopes[protocol.ObservationScopeResources].Fresh {
+				t.Fatalf("%s change retained old operational evidence", change)
+			}
+		})
 	}
 }
 

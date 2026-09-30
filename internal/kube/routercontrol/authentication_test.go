@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,34 +196,55 @@ func TestSharedRevocationsCoverCompleteIdentityAndAssignmentChain(t *testing.T) 
 	}
 }
 
-func TestWatchFailureRequestsAuditButFreshnessStillBoundsSession(t *testing.T) {
+func TestWatchRevocationPreventsCertificateReadmission(t *testing.T) {
 	fixture := newSessionFixture(t)
-	fixture.revocations.freshness = 30 * time.Millisecond
 	session := fixture.session(t, time.Hour)
-	fixture.revocations.AuthorizationWatchFailed(fmt.Errorf("watch closed"))
-	if batches := fixture.revocations.due(fixture.revocations.now()); len(batches) != 1 {
-		t.Fatalf("watch failure scheduled %d audit batches, want 1", len(batches))
-	}
+	fixture.revocations.InvalidateAuthorization(AuthorizationAssignment, "site-ns", "skupper")
 	select {
 	case <-session.Context().Done():
 	case <-time.After(time.Second):
-		t.Fatal("session exceeded its authorization freshness deadline")
+		t.Fatal("watch revocation did not close active session")
+	}
+	leaf := *fixture.leaf
+	leaf.NotAfter = testNow.Add(time.Hour)
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(context.Context, Identity) error { return nil }}
+	if _, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{&leaf, fixture.install.ClientCA}}}); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked certificate readmission error = %v", err)
 	}
 }
 
-func TestAdmissionDuringBrokenWatchStillRequiresLiveReadsAndExpires(t *testing.T) {
+func TestSixtyFourIdleSessionsHaveNoPeriodicAuthorizationReads(t *testing.T) {
 	fixture := newSessionFixture(t)
-	fixture.revocations.freshness = 30 * time.Millisecond
-	fixture.revocations.AuthorizationWatchFailed(fmt.Errorf("watch unavailable"))
 	fixture.client.ClearActions()
-	session := fixture.session(t, time.Hour)
-	if got := len(fixture.client.Actions()); got != 5 {
-		t.Fatalf("admission during watch failure made %d workload reads, want 5", got)
+	authenticator := &Authenticator{Kube: fixture.client, Installation: fixture.install, Gate: fixture.gate, Revocations: fixture.revocations, Now: func() time.Time { return testNow }, Authorize: func(ctx context.Context, identity Identity) error {
+		for i := 0; i < 3; i++ {
+			if _, err := fixture.client.CoreV1().Namespaces().Get(ctx, identity.Namespace, metav1.GetOptions{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	leaf := *fixture.leaf
+	leaf.NotAfter = testNow.Add(time.Hour)
+	var sessions []*Session
+	for i := 0; i < 64; i++ {
+		session, err := authenticator.Session(context.Background(), tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{&leaf, fixture.install.ClientCA}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, session)
 	}
-	select {
-	case <-session.Context().Done():
-	case <-time.After(time.Second):
-		t.Fatal("post-failure admission exceeded its fresh authorization bound")
+	afterAdmission := len(fixture.client.Actions())
+	if afterAdmission != 64*8 {
+		t.Fatalf("admission requests = %d, want %d", afterAdmission, 64*8)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if afterIdle := len(fixture.client.Actions()); afterIdle != afterAdmission {
+		t.Fatalf("idle sessions made %d periodic authorization requests", afterIdle-afterAdmission)
+	}
+	t.Logf("observed %d admission GETs and zero steady-state authorization GETs for 64 idle sessions", afterAdmission)
+	for _, session := range sessions {
+		session.Close()
 	}
 }
 

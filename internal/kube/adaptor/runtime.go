@@ -64,6 +64,15 @@ type receivedControlEvent struct {
 	err   error
 }
 
+type controlSessionManager struct {
+	connect   func(context.Context) (*connectedControlSession, error)
+	serve     func(*connectedControlSession) error
+	metrics   RuntimeMetrics
+	now       func() time.Time
+	jitter    func() float64
+	retryBase time.Duration
+}
+
 type controlEventReceiver interface {
 	NextEvent() (routercontrol.ServerEvent, error)
 }
@@ -205,12 +214,8 @@ func certificateRenewalDelay(now, expiry time.Time, jitter float64) time.Duratio
 	} else if jitter > 1 {
 		jitter = 1
 	}
-	margin := remaining / 3
-	margin += time.Duration(float64(margin) * 0.1 * jitter)
-	if margin > 15*time.Minute {
-		margin = 15 * time.Minute
-	}
-	delay := remaining - margin
+	delay := remaining / 2
+	delay += time.Duration(float64(delay) * 0.1 * jitter)
 	if delay <= 0 {
 		return remaining / 2
 	}
@@ -400,12 +405,15 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 			continue
 		}
 		runtime.config.Metrics.ConnectionAttempt("success", time.Since(started))
-		runtime.config.Metrics.SetControlStreamUp(true)
 		backoff = time.Second
-		err = runtime.runSession(control.ctx, control.cancel, control.session, control.expiry, control.incarnation)
-		runtime.config.Metrics.SetControlStreamUp(false)
-		runtime.config.Metrics.SetApplicationState("unknown")
-		_ = control.connection.Close()
+		manager := controlSessionManager{
+			connect: runtime.connectBounded,
+			serve: func(control *connectedControlSession) error {
+				return runtime.runSession(control.ctx, control.cancel, control.session, control.incarnation)
+			},
+			metrics: runtime.config.Metrics, now: time.Now, jitter: renewalJitter, retryBase: time.Second,
+		}
+		err = manager.run(ctx, control)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -418,9 +426,124 @@ func RunSidecar(ctx context.Context, config ControlConfig, secrets corev1client.
 	return ctx.Err()
 }
 
-func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFunc, session *routercontrol.ClientSession, expiry time.Time, sessionIncarnation string) error {
-	defer r.config.Metrics.SetControlStreamUp(false)
-	defer r.config.Metrics.SetApplicationState("unknown")
+func (m controlSessionManager) run(ctx context.Context, current *connectedControlSession) error {
+	if m.now == nil {
+		m.now = time.Now
+	}
+	if m.jitter == nil {
+		m.jitter = renewalJitter
+	}
+	if m.retryBase <= 0 {
+		m.retryBase = time.Second
+	}
+	if m.metrics == nil {
+		m.metrics = NoopRuntimeMetrics{}
+	}
+	m.metrics.SetControlStreamUp(true)
+	defer func() {
+		closeConnectedControl(current)
+		m.metrics.SetControlStreamUp(false)
+		m.metrics.SetApplicationState("unknown")
+	}()
+	backoff := m.retryBase
+	for {
+		done := make(chan error, 1)
+		go func(control *connectedControlSession) { done <- m.serve(control) }(current)
+		renew := time.NewTimer(certificateRenewalDelay(m.now(), current.expiry, m.jitter()))
+		var retry *time.Timer
+		var retryC <-chan time.Time
+		var replacement <-chan struct {
+			control *connectedControlSession
+			err     error
+		}
+		startReplacement := func() {
+			result := make(chan struct {
+				control *connectedControlSession
+				err     error
+			}, 1)
+			replacement = result
+			go func() {
+				control, err := m.connect(ctx)
+				result <- struct {
+					control *connectedControlSession
+					err     error
+				}{control: control, err: err}
+			}()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				current.cancel()
+				<-done
+				if replacement != nil {
+					outcome := <-replacement
+					closeConnectedControl(outcome.control)
+				}
+				renew.Stop()
+				if retry != nil {
+					retry.Stop()
+				}
+				return ctx.Err()
+			case err := <-done:
+				renew.Stop()
+				if retry != nil {
+					retry.Stop()
+				}
+				if replacement != nil {
+					outcome := <-replacement
+					if outcome.err == nil {
+						closeConnectedControl(current)
+						current = outcome.control
+						backoff = m.retryBase
+						goto replacementReady
+					}
+				}
+				return err
+			case <-renew.C:
+				startReplacement()
+			case <-retryC:
+				retryC = nil
+				startReplacement()
+			case outcome := <-replacement:
+				replacement = nil
+				if outcome.err != nil {
+					delay := reconnectBackoffDelay(backoff, m.jitter())
+					slog.Warn("router-control credential renewal", slog.String("reason", boundedErrorReason(outcome.err)), slog.Duration("retryAfter", delay))
+					retry = time.NewTimer(delay)
+					retryC = retry.C
+					if backoff < 30*time.Second {
+						backoff *= 2
+						if backoff > 30*time.Second {
+							backoff = 30 * time.Second
+						}
+					}
+					continue
+				}
+				current.cancel()
+				<-done
+				closeConnectedControl(current)
+				current = outcome.control
+				backoff = m.retryBase
+				goto replacementReady
+			}
+		}
+	replacementReady:
+	}
+}
+
+func closeConnectedControl(control *connectedControlSession) {
+	if control == nil {
+		return
+	}
+	if control.cancel != nil {
+		control.cancel()
+	}
+	if control.connection != nil {
+		_ = control.connection.Close()
+	}
+}
+
+func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFunc, session *routercontrol.ClientSession, sessionIncarnation string) error {
 	events, receiverDone := startControlReceiver(ctx, session)
 	defer func() {
 		cancel()
@@ -428,8 +551,6 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 			<-receiverDone
 		}
 	}()
-	renew := time.NewTimer(certificateRenewalDelay(time.Now(), expiry, renewalJitter()))
-	defer renew.Stop()
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 	reconcile := time.NewTicker(10 * time.Second)
@@ -459,8 +580,6 @@ func (r *controlRuntime) runSession(ctx context.Context, cancel context.CancelFu
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-renew.C:
-			return errors.New("router-control credential renewal due")
 		case <-receiveInactivity.C:
 			return fmt.Errorf("router-control receive inactive for %s", controlReceiveInactivityTimeout)
 		case <-heartbeat.C:
