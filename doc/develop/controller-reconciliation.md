@@ -218,6 +218,13 @@ evidence conservatively selects an apply. Access objects preserve the same API
 allocations/defaults during comparison and execution. Optional access collections
 must be known complete before they authorize retirement.
 
+Objects created through the create-only API initially have `Update` ownership.
+A one-time, resource-version-fenced managed-fields migration transfers only
+`skupper-controller` main-resource ownership into its `Apply` entry before SSA.
+The planner selects this migration even if an Apply entry already exists, so
+creation-time fields omitted from current intent can actually be removed. Once
+migrated, converged objects require neither a migration nor an apply.
+
 Detecting drift does not authorize taking a field from another SSA manager.
 Even a strategic-merge patch can transfer ownership of a desired label: planning
 detects the difference, but the no-force apply reports a conflict until that

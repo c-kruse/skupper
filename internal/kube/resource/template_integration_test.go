@@ -79,7 +79,7 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < 10; attempt++ {
-		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, currentDeployment.ResourceVersion)
+		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, currentDeployment)
 		if err == nil {
 			break
 		}
@@ -130,7 +130,7 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 		t.Fatal("ownership transfer hid desired-label drift")
 	}
 	// Isolate ownership from unrelated Deployment status/RV changes here.
-	_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, "")
+	_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, nil)
 	if !apierrors.IsConflict(err) || !apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
 		t.Fatalf("expected a field-ownership conflict, not forced adoption or an RV conflict: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 		t.Fatal("missing desired label was treated as converged")
 	}
 	for attempt := 0; attempt < 10; attempt++ {
-		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, currentDeployment.ResourceVersion)
+		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: deploymentObject}, currentDeployment)
 		if err == nil {
 			break
 		}
@@ -178,7 +178,7 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < 10; attempt++ {
-		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: withoutReplicasObject}, currentDeployment.ResourceVersion)
+		_, err = ApplyRendered(dynamicClient, ctx, DeploymentResource(), &unstructured.Unstructured{Object: withoutReplicasObject}, currentDeployment)
 		if err == nil {
 			break
 		}
@@ -217,7 +217,7 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyRendered(dynamicClient, ctx, schema.GroupVersionResource{Version: "v1", Resource: "services"}, &unstructured.Unstructured{Object: serviceObject}, currentService.ResourceVersion); err != nil {
+	if _, err := ApplyRendered(dynamicClient, ctx, schema.GroupVersionResource{Version: "v1", Resource: "services"}, &unstructured.Unstructured{Object: serviceObject}, currentService); err != nil {
 		t.Fatal(err)
 	}
 	currentService, err = client.CoreV1().Services(namespace).Get(ctx, service.Name, metav1.GetOptions{})
@@ -226,5 +226,99 @@ func TestRealAPIServerCreateOwnershipAndDefaultsConverge(t *testing.T) {
 	}
 	if !ServiceApplyEqual(currentService, service) {
 		t.Fatal("apiserver-defaulted Service did not converge after SSA established ownership")
+	}
+
+	for _, fixture := range []struct {
+		name     string
+		resource schema.GroupVersionResource
+		object   map[string]interface{}
+		equal    func(*unstructured.Unstructured, *unstructured.Unstructured) bool
+	}{
+		{"deployment", DeploymentResource(), deploymentObject, func(current, desired *unstructured.Unstructured) bool {
+			var a, b appsv1.Deployment
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(current.Object, &a); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(desired.Object, &b); err != nil {
+				t.Fatal(err)
+			}
+			return DeploymentApplyEqual(&a, &b)
+		}},
+		{"service", schema.GroupVersionResource{Version: "v1", Resource: "services"}, serviceObject, func(current, desired *unstructured.Unstructured) bool {
+			var a, b corev1.Service
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(current.Object, &a); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(desired.Object, &b); err != nil {
+				t.Fatal(err)
+			}
+			return ServiceApplyEqual(&a, &b)
+		}},
+	} {
+		for _, alreadyApplied := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/creation-field-removal/previous-apply=%t", fixture.name, alreadyApplied), func(t *testing.T) {
+				desired := (&unstructured.Unstructured{Object: fixture.object}).DeepCopy()
+				desired.SetName(fmt.Sprintf("migration-%s-%t", fixture.name, alreadyApplied))
+				created := desired.DeepCopy()
+				paths := [][]string{{"metadata", "labels"}, {"metadata", "annotations"}}
+				if fixture.name == "deployment" {
+					paths = append(paths, []string{"spec", "template", "metadata", "labels"}, []string{"spec", "template", "metadata", "annotations"})
+				}
+				for _, path := range paths {
+					if err := unstructured.SetNestedField(created.Object, "remove-me", append(path, "creation.example/old")...); err != nil {
+						t.Fatal(err)
+					}
+				}
+				objects := dynamicClient.Resource(fixture.resource).Namespace(namespace)
+				current, err := objects.Create(ctx, created, metav1.CreateOptions{FieldManager: FieldManager})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if alreadyApplied {
+					// Reproduce the old Create -> SSA path, including objects that
+					// already look converged to an Apply-only field extraction.
+					data, err := json.Marshal(desired)
+					if err != nil {
+						t.Fatal(err)
+					}
+					current, err = objects.Patch(ctx, desired.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: FieldManager})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if fixture.equal(current, desired) {
+					t.Fatal("creation-time ownership was ignored when selecting migration/repair")
+				}
+				stale := current.DeepCopy()
+				current, err = objects.Patch(ctx, desired.GetName(), types.MergePatchType, []byte(`{"metadata":{"labels":{"foreign.example/label":"retained"}}}`), metav1.PatchOptions{FieldManager: "foreign-owner"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ApplyRendered(dynamicClient, ctx, fixture.resource, desired, stale); !apierrors.IsConflict(err) {
+					t.Fatalf("stale ownership migration must conflict: %v", err)
+				}
+				for attempt := 0; attempt < 10; attempt++ {
+					current, err = objects.Get(ctx, desired.GetName(), metav1.GetOptions{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					current, err = ApplyRendered(dynamicClient, ctx, fixture.resource, desired, current)
+					if !apierrors.IsConflict(err) {
+						break
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range paths {
+					if _, found, err := unstructured.NestedFieldNoCopy(current.Object, append(path, "creation.example/old")...); err != nil || found {
+						t.Errorf("creation-time field survived desired removal at %v: %v", path, err)
+					}
+				}
+				if current.GetUID() != stale.GetUID() || current.GetLabels()["foreign.example/label"] != "retained" || !fixture.equal(current, desired) {
+					t.Fatal("migration failed to preserve identity/foreign metadata and converge")
+				}
+			})
+		}
 	}
 }

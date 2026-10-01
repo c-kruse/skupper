@@ -10,14 +10,18 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	applyappsv1 "k8s.io/client-go/applyconfigurations/apps/v1"
 	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/csaupgrade"
 )
 
 const FieldManager = "skupper-controller"
@@ -64,20 +68,39 @@ func (t Template) Apply(client dynamic.Interface, ctx context.Context, namespace
 	if err != nil {
 		return nil, err
 	}
-	return ApplyRendered(client, ctx, t.Resource, obj, "")
+	return ApplyRendered(client, ctx, t.Resource, obj, nil)
 }
 
 // ApplyRendered performs the same no-force server-side apply as Template.Apply.
-// resourceVersion is an update precondition; an empty value retains SSA create
-// behavior for legacy callers.
-func ApplyRendered(client dynamic.Interface, ctx context.Context, resource schema.GroupVersionResource, obj *unstructured.Unstructured, resourceVersion string) (*unstructured.Unstructured, error) {
+// A current object supplies the update precondition and migrates only our own
+// Create/Update ownership into Apply ownership, so omitted fields can be removed.
+// Both writes are RV-fenced; nil retains SSA create behavior for legacy callers.
+func ApplyRendered(client dynamic.Interface, ctx context.Context, resource schema.GroupVersionResource, obj *unstructured.Unstructured, current runtime.Object) (*unstructured.Unstructured, error) {
 	obj = obj.DeepCopy()
-	obj.SetResourceVersion(resourceVersion)
+	objects := client.Resource(resource).Namespace(obj.GetNamespace())
+	if current != nil {
+		metadata, err := meta.Accessor(current)
+		if err != nil {
+			return nil, err
+		}
+		obj.SetResourceVersion(metadata.GetResourceVersion())
+		patch, err := csaupgrade.UpgradeManagedFieldsPatch(current, sets.New(FieldManager), FieldManager)
+		if err != nil {
+			return nil, err
+		}
+		if patch != nil {
+			migrated, err := objects.Patch(ctx, obj.GetName(), types.JSONPatchType, patch, metav1.PatchOptions{})
+			if err != nil {
+				return nil, err
+			}
+			obj.SetResourceVersion(migrated.GetResourceVersion())
+		}
+	}
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err
 	}
-	return client.Resource(resource).Namespace(obj.GetNamespace()).Patch(ctx, obj.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{
+	return objects.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{
 		FieldManager: FieldManager,
 	})
 }
@@ -131,12 +154,19 @@ func ServiceApplyEqual(current, desired *corev1.Service) bool {
 }
 
 func hasManagedFields(entries []metav1.ManagedFieldsEntry) bool {
+	applied := false
 	for _, entry := range entries {
-		if entry.Manager == FieldManager && entry.Operation == metav1.ManagedFieldsOperationApply && entry.Subresource == "" {
-			return true
+		if entry.Manager != FieldManager || entry.Subresource != "" {
+			continue
 		}
+		if entry.Operation == metav1.ManagedFieldsOperationUpdate {
+			// Creation-time fields can remain solely in an Update entry even
+			// after an Apply. Select the one-time migration before comparing.
+			return false
+		}
+		applied = applied || entry.Operation == metav1.ManagedFieldsOperationApply
 	}
-	return false
+	return applied
 }
 
 func decodeApply(object, configuration interface{}) bool {

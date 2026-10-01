@@ -35,6 +35,15 @@ func TestDeploymentApplyEqualUsesOwnedFieldsAndDetectsRemoval(t *testing.T) {
 		decodeApply(desired, wanted)
 		t.Fatalf("unowned admission metadata made an owned-field comparison unequal\nowned=%#v\nwanted=%#v", canonicalApply(owned, "Deployment"), canonicalApply(wanted, "Deployment"))
 	}
+	unmigrated := current.DeepCopy()
+	unmigrated.ManagedFields = append(unmigrated.ManagedFields, metav1.ManagedFieldsEntry{Manager: FieldManager, Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "apps/v1"})
+	if DeploymentApplyEqual(unmigrated, desired) {
+		t.Fatal("an Apply entry hid creation-time ownership requiring migration")
+	}
+	unmigrated.ManagedFields[1].Subresource = "status"
+	if !DeploymentApplyEqual(unmigrated, desired) {
+		t.Fatal("status ownership triggered main-resource migration")
+	}
 	driftedMetadata := current.DeepCopy()
 	driftedMetadata.Labels["application"] = "external-value"
 	if DeploymentApplyEqual(driftedMetadata, desired) {

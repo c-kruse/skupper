@@ -1276,7 +1276,7 @@ func (c *NamespaceController) EnsureDeployment(ctx context.Context, namespace re
 	if err != nil {
 		return err
 	}
-	_, err = kuberesource.ApplyRendered(c.clients.GetDynamicClient(), ctx, kuberesource.DeploymentResource(), &unstructured.Unstructured{Object: object}, current.ResourceVersion)
+	_, err = kuberesource.ApplyRendered(c.clients.GetDynamicClient(), ctx, kuberesource.DeploymentResource(), &unstructured.Unstructured{Object: object}, current)
 	return classifyWriteError(err)
 }
 
@@ -1301,7 +1301,7 @@ func (c *NamespaceController) EnsureLocalService(ctx context.Context, namespace 
 		return err
 	}
 	serviceResource := schema.GroupVersionResource{Version: "v1", Resource: "services"}
-	_, err = kuberesource.ApplyRendered(c.clients.GetDynamicClient(), ctx, serviceResource, &unstructured.Unstructured{Object: object}, current.ResourceVersion)
+	_, err = kuberesource.ApplyRendered(c.clients.GetDynamicClient(), ctx, serviceResource, &unstructured.Unstructured{Object: object}, current)
 	return classifyWriteError(err)
 }
 
