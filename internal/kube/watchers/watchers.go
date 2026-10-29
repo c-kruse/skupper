@@ -245,6 +245,13 @@ func (c *EventProcessor) Stop() {
 	c.queue.ShutDown()
 }
 
+// Enqueue coalesces notifications sharing a handler and scope key.
+func (c *EventProcessor) Enqueue(handler ResourceChangeHandler, key string) {
+	event := ResourceChange{Handler: handler, Key: key}
+	c.metrics.add(event)
+	c.queue.Add(event)
+}
+
 // Creates an event handler that will take handle events from an
 // informer by constructing an appropriate ResourceChange instance and
 // adding it to the EventProcessor's work queue.

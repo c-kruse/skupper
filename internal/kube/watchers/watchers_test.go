@@ -332,6 +332,10 @@ func TestProcessRequeueLimit(t *testing.T) {
 	stubHandler := stubErrResourceChangeHandler{}
 	eventsIn := processor.newEventHandler(&stubHandler)
 	eventsIn.AddFunc(node("test"))
+	// Notifications from multiple resources mapping to one scope coalesce with
+	// the original event, and retries retain that same handler/key identity.
+	processor.Enqueue(&stubHandler, "test")
+	processor.Enqueue(&stubHandler, "test")
 	callCount := 0 // set upper bound on how long test will run
 	for processor.queue.Len() > 0 && callCount < 1_000 {
 		processor.TestProcess()

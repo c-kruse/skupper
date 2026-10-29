@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/skupperproject/skupper/internal/certs"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
+	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"gotest.tools/v3/assert"
@@ -336,11 +337,10 @@ func TestCertificateManager(t *testing.T) {
 			}
 			mgr.Watch(metav1.NamespaceAll)
 			stopCh := make(chan struct{})
+			t.Cleanup(func() { close(stopCh); processor.Stop() })
 			processor.StartWatchers(stopCh)
 			processor.WaitForCacheSync(stopCh)
-			mgr.Recover()
-
-			processor.TestProcessAll()
+			settle(processor)
 			for _, c := range tt.calls {
 				callErr := c.invoke(mgr)
 				if c.expectErr {
@@ -348,10 +348,7 @@ func TestCertificateManager(t *testing.T) {
 				} else {
 					assert.Assert(t, callErr, "unexpected call error")
 				}
-				for i := 0; i < c.events; i++ {
-					processor.TestProcess()
-					processor.TestProcess()
-				}
+				settle(processor)
 			}
 
 			for _, desired := range tt.expectedSecrets {
@@ -387,6 +384,14 @@ func TestCertificateManager(t *testing.T) {
 			assert.Assert(t, err)
 			assert.Equal(t, len(tt.expectedCertificates), len(certificates.Items), "wrong number of certificates")
 		})
+	}
+}
+
+// Drain asynchronous informer notifications as well as the scope work they enqueue.
+func settle(processor *watchers.EventProcessor) {
+	for i := 0; i < 20; i++ {
+		processor.TestProcessAll()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -535,6 +540,16 @@ func (c *FakeContext) annotate(key, value string) *FakeContext {
 
 func (c *FakeContext) IsControlled(namespace string) bool {
 	return c.controlled[namespace]
+}
+
+func (c *FakeContext) SnapshotMetadata(namespace string) *labels.LabelsAndAnnotations {
+	policy := labels.NewLabelsAndAnnotations(namespace)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-policy", Labels: map[string]string{"skupper.io/label-template": "true"}, Annotations: c.annotations}}
+	for k, v := range c.labels {
+		cm.Labels[k] = v
+	}
+	_ = policy.Update(namespace+"/test-policy", cm)
+	return policy.Snapshot(namespace)
 }
 
 func (c *FakeContext) SetLabels(namespace string, name string, kind string, labels map[string]string) bool {
