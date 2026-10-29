@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -36,16 +37,28 @@ type CertificateManagerImpl struct {
 	processor          *watchers.EventProcessor
 	context            ControllerContext
 	logger             *slog.Logger
+	// Authoring-only write-through view. A nil entry requires a live refresh;
+	// an absent entry uses the informer. Reconciliation never reads this map.
+	authored map[string]*skupperv2alpha1.Certificate
 }
 
 func NewCertificateManager(processor *watchers.EventProcessor) *CertificateManagerImpl {
-	return &CertificateManagerImpl{processor: processor, logger: slog.Default().With("component", "kube.certificates.manager")}
+	return &CertificateManagerImpl{processor: processor, logger: slog.Default().With("component", "kube.certificates.manager"), authored: map[string]*skupperv2alpha1.Certificate{}}
 }
 
 func (m *CertificateManagerImpl) SetControllerContext(context ControllerContext) { m.context = context }
 
 func (m *CertificateManagerImpl) Watch(namespace string) {
-	m.certificateWatcher = m.processor.WatchCertificates(namespace, func(key string, _ *skupperv2alpha1.Certificate) error {
+	m.certificateWatcher = m.processor.WatchCertificates(namespace, func(key string, observed *skupperv2alpha1.Certificate) error {
+		if written, ok := m.authored[key]; ok {
+			if observed == nil || (written != nil && reflect.DeepEqual(written, observed)) {
+				delete(m.authored, key)
+			} else {
+				// This may be an external change or an intermediate observation
+				// predating our latest write. Do not guess which from opaque RVs.
+				m.authored[key] = nil
+			}
+		}
 		m.processor.Enqueue(m, key)
 		return nil
 	})
@@ -98,11 +111,31 @@ func (m *CertificateManagerImpl) Ensure(namespace, name, ca, subject string, hos
 
 var compareSpecUnordered = []cmp.Option{cmpopts.EquateEmpty(), cmpopts.SortSlices(func(a, b string) bool { return a < b })}
 
-// Authoring is synchronous and reads the API so successive owners cannot lose
-// each other's changes while the informer is catching up.
+// Authoring reads its own writes until informer notifications acknowledge them.
+// Cache misses and ambiguous notifications use the API; settled no-ops do not.
+func (m *CertificateManagerImpl) authoringCertificate(namespace, name string) (*skupperv2alpha1.Certificate, error) {
+	key := namespace + "/" + name
+	if written, ok := m.authored[key]; ok {
+		if written != nil {
+			return written.DeepCopy(), nil
+		}
+	} else if m.certificateWatcher != nil {
+		observed, err := m.certificateWatcher.Get(key)
+		if err != nil || observed != nil {
+			return observed.DeepCopy(), err
+		}
+	}
+	current, err := m.processor.GetSkupperClient().SkupperV2alpha1().Certificates(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err == nil {
+		m.authored[key] = current.DeepCopy()
+	}
+	return current, err
+}
+
 func (m *CertificateManagerImpl) ensure(namespace, name string, spec skupperv2alpha1.CertificateSpec, refs []metav1.OwnerReference) error {
+	key := namespace + "/" + name
 	client := m.processor.GetSkupperClient().SkupperV2alpha1().Certificates(namespace)
-	current, err := client.Get(context.Background(), name, metav1.GetOptions{})
+	current, err := m.authoringCertificate(namespace, name)
 	if apierrors.IsNotFound(err) {
 		cert := &skupperv2alpha1.Certificate{
 			TypeMeta: metav1.TypeMeta{APIVersion: "skupper.io/v2alpha1", Kind: "Certificate"},
@@ -112,7 +145,11 @@ func (m *CertificateManagerImpl) ensure(namespace, name string, spec skupperv2al
 		}
 		newOwnerMapping(refs, spec.Hosts).ApplyMetadata(cert)
 		m.applyMetadata(namespace, name, "Certificate", &cert.ObjectMeta)
-		_, err = client.Create(context.Background(), cert, metav1.CreateOptions{})
+		created, err := client.Create(context.Background(), cert, metav1.CreateOptions{})
+		m.authored[key] = nil
+		if err == nil {
+			m.authored[key] = created.DeepCopy()
+		}
 		return err
 	}
 	if err != nil {
@@ -143,7 +180,11 @@ func (m *CertificateManagerImpl) ensure(namespace, name string, spec skupperv2al
 	if !changed {
 		return nil
 	}
-	_, err = client.Update(context.Background(), current, metav1.UpdateOptions{})
+	updated, err := client.Update(context.Background(), current, metav1.UpdateOptions{})
+	m.authored[key] = nil
+	if err == nil {
+		m.authored[key] = updated.DeepCopy()
+	}
 	return err
 }
 

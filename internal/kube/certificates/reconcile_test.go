@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -203,6 +204,92 @@ func TestScopeLifecycle(t *testing.T) {
 	})
 	assert.NilError(t, definitions.Delete(ctx, "leaf", metav1.DeleteOptions{}))
 	until(func() bool { _, err := secrets.Get(ctx, "leaf", metav1.GetOptions{}); return apierrors.IsNotFound(err) })
+}
+
+func TestEnsureCachedAuthoring(t *testing.T) {
+	ctx := context.Background()
+	alice := []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "alice", UID: "alice"}}
+	bob := []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "bob", UID: "bob"}}
+	seed := certificate("leaf", "test", "ca", "server", []string{"a.example"}, false, true, nil, nil)
+	seed.OwnerReferences = alice
+	newOwnerMapping(alice, seed.Spec.Hosts).ApplyMetadata(seed)
+	client, err := fakeclient.NewFakeClient("test", nil, []runtime.Object{seed}, "")
+	assert.NilError(t, err)
+	sk := client.GetSkupperClient().(*skupperfake.Clientset)
+	// Freeze watch delivery, so successful writes cannot accidentally become
+	// visible through the informer before the following Ensure call.
+	sk.PrependWatchReactor("certificates", func(clienttesting.Action) (bool, watch.Interface, error) {
+		return true, watch.NewRaceFreeFake(), nil
+	})
+	start := func() *CertificateManagerImpl {
+		p := watchers.NewEventProcessor("authoring", client)
+		m := NewCertificateManager(p)
+		m.Watch(metav1.NamespaceAll)
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop); p.Stop() })
+		p.StartWatchers(stop)
+		assert.Assert(t, p.WaitForCacheSync(stop))
+		return m
+	}
+	m := start()
+	ensure := func(m *CertificateManagerImpl, hosts []string, refs []metav1.OwnerReference) error {
+		return m.Ensure("test", "leaf", "ca", "server", hosts, false, true, refs)
+	}
+	assertNoAPI := func(m *CertificateManagerImpl, hosts []string, refs []metav1.OwnerReference) {
+		t.Helper()
+		sk.ClearActions()
+		for i := 0; i < 3; i++ {
+			assert.NilError(t, ensure(m, hosts, refs))
+		}
+		assert.Equal(t, len(sk.Actions()), 0, "satisfied Ensure must perform no API reads or writes")
+	}
+	assert.NilError(t, m.EnsureCA("test", "new-ca", "issuer", alice))
+	sk.ClearActions()
+	assert.NilError(t, m.EnsureCA("test", "new-ca", "issuer", alice))
+	assert.Equal(t, len(sk.Actions()), 0, "successful creation must be visible before watch delivery")
+	assertNoAPI(m, []string{"a.example"}, alice)
+	assert.NilError(t, ensure(m, []string{"b.example"}, alice))
+	assertNoAPI(m, []string{"b.example"}, alice)
+	assert.NilError(t, ensure(m, []string{"a.example"}, alice))
+	actual, err := sk.SkupperV2alpha1().Certificates("test").Get(ctx, "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual.Spec.Hosts, []string{"a.example"})
+	// Deliver an older queued observation after another successful write. The
+	// next call must refresh rather than treating that stale snapshot as current.
+	assert.NilError(t, ensure(m, []string{"b.example"}, alice))
+	assert.NilError(t, m.certificateWatcher.Handle(watchers.ResourceChange{Key: "test/leaf"}))
+	assert.NilError(t, ensure(m, []string{"a.example"}, alice))
+	assert.NilError(t, ensure(m, []string{"z.example"}, bob))
+	actual, err = sk.SkupperV2alpha1().Certificates("test").Get(ctx, "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual.Spec.Hosts, []string{"a.example", "z.example"})
+	assert.Equal(t, len(actual.OwnerReferences), 2)
+	// Failed writes, including clients returning a non-nil result with an error,
+	// cannot poison the authoring view and suppress a subsequent retry.
+	fail := true
+	sk.PrependReactor("update", "certificates", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if fail {
+			fail = false
+			return true, a.(clienttesting.UpdateAction).GetObject(), fmt.Errorf("temporary write failure")
+		}
+		return false, nil, nil
+	})
+	assert.Error(t, ensure(m, []string{"c.example"}, alice), "temporary write failure")
+	assert.NilError(t, ensure(m, []string{"c.example"}, alice))
+	actual, err = sk.SkupperV2alpha1().Certificates("test").Get(ctx, "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual.Spec.Hosts, []string{"c.example", "z.example"})
+	assertNoAPI(m, []string{"c.example"}, alice)
+	// Deletion is another ambiguous notification. Do not retain a successful
+	// write forever: refresh and recreate instead of reporting a false no-op.
+	assert.NilError(t, sk.SkupperV2alpha1().Certificates("test").Delete(ctx, "leaf", metav1.DeleteOptions{}))
+	assert.NilError(t, m.certificateWatcher.Handle(watchers.ResourceChange{Key: "test/leaf"}))
+	assert.NilError(t, ensure(m, []string{"c.example"}, alice))
+	actual, err = sk.SkupperV2alpha1().Certificates("test").Get(ctx, "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual.Spec.Hosts, []string{"c.example"})
+	// A fresh manager has no write-through view; a synced informer suffices.
+	assertNoAPI(start(), []string{"c.example"}, alice)
 }
 
 func TestExplicitSecretOwnership(t *testing.T) {
