@@ -3,136 +3,147 @@ package securedaccess
 import (
 	"errors"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers/internalinterfaces"
-
-	routev1interfaces "github.com/openshift/client-go/route/informers/externalversions/internalinterfaces"
-
+	routev1 "github.com/openshift/api/route/v1"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/cache"
 )
 
 type SecuredAccessResourceWatcher struct {
-	accessMgr            *SecuredAccessManager
-	serviceWatcher       *watchers.ServiceWatcher
-	routeWatcher         *watchers.RouteWatcher
-	ingressWatcher       *watchers.IngressWatcher
-	httpProxyWatcher     *watchers.DynamicWatcher
-	tlsRouteWatcher      *watchers.DynamicWatcher
-	securedAccessWatcher *watchers.SecuredAccessWatcher
+	accessMgr                                         *SecuredAccessManager
+	processor                                         *watchers.EventProcessor
+	serviceWatcher                                    *watchers.ServiceWatcher
+	routeWatcher                                      *watchers.RouteWatcher
+	ingressWatcher                                    *watchers.IngressWatcher
+	httpProxyWatcher, tlsRouteWatcher, gatewayWatcher *watchers.DynamicWatcher
+	securedAccessWatcher                              *watchers.SecuredAccessWatcher
+	certificateWatcher                                *watchers.CertificateWatcher
 }
 
-func NewSecuredAccessResourceWatcher(accessMgr *SecuredAccessManager) *SecuredAccessResourceWatcher {
-	return &SecuredAccessResourceWatcher{
-		accessMgr: accessMgr,
+func NewSecuredAccessResourceWatcher(m *SecuredAccessManager) *SecuredAccessResourceWatcher {
+	w := &SecuredAccessResourceWatcher{accessMgr: m}
+	m.watcher = w
+	return w
+}
+
+func (w *SecuredAccessResourceWatcher) WatchResources(p *watchers.EventProcessor, namespace string) {
+	w.processor = p
+	// Unfiltered inventories detect name camping and discover legacy outputs even
+	// when labels have drifted (including the old securedaccess TLSRoute label).
+	w.serviceWatcher = p.WatchServices(nil, namespace, func(key string, _ *corev1.Service) error { return w.resourceChanged(key) })
+	w.ingressWatcher = p.WatchIngresses(nil, namespace, func(key string, _ *networkingv1.Ingress) error { return w.resourceChanged(key) })
+	w.routeWatcher = p.WatchRoutes(nil, namespace, func(key string, _ *routev1.Route) error { return w.resourceChanged(key) })
+	w.httpProxyWatcher = p.WatchContourHttpProxies(nil, namespace, func(key string, _ *unstructured.Unstructured) error { return w.resourceChanged(key) })
+	w.tlsRouteWatcher = p.WatchTlsRoutes(nil, namespace, func(key string, _ *unstructured.Unstructured) error { return w.resourceChanged(key) })
+	w.certificateWatcher = p.WatchCertificates(namespace, func(key string, _ *skupperv2alpha1.Certificate) error { return w.resourceChanged(key) })
+}
+
+func (w *SecuredAccessResourceWatcher) WatchGateway(p *watchers.EventProcessor, namespace string) {
+	if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) {
+		p.Enqueue(w.accessMgr.gateway, namespace+"/skupper")
 	}
-}
-
-func (m *SecuredAccessResourceWatcher) WatchResources(processor *watchers.EventProcessor, namespace string) {
-	m.serviceWatcher = processor.WatchServices(coreSecuredAccess(), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckService))
-	m.ingressWatcher = processor.WatchIngresses(coreSecuredAccess(), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckIngress))
-	m.routeWatcher = processor.WatchRoutes(routeSecuredAccess(), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckRoute))
-	m.httpProxyWatcher = processor.WatchContourHttpProxies(dynamicSecuredAccess(), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckHttpProxy))
-	m.tlsRouteWatcher = processor.WatchTlsRoutes(dynamicSecuredAccess(), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckTlsRoute))
-}
-
-func (m *SecuredAccessResourceWatcher) WatchGateway(processor *watchers.EventProcessor, namespace string) {
-	processor.WatchGateways(dynamicByName("skupper"), namespace, watchers.FilterByNamespace(m.isControlledResource, m.accessMgr.CheckGateway))
-}
-
-func (m *SecuredAccessResourceWatcher) WatchSecuredAccesses(processor *watchers.EventProcessor, namespace string, handler watchers.SecuredAccessHandler) {
-	var wrappedHandler = m.handleSecuredAccess
-	if handler != nil {
-		wrappedHandler = func(key string, sa *skupperv2alpha1.SecuredAccess) error {
-			return errors.Join(handler(key, sa), m.handleSecuredAccess(key, sa))
+	w.gatewayWatcher = p.WatchGateways(nil, namespace, func(_ string, _ *unstructured.Unstructured) error {
+		if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) {
+			p.Enqueue(w.accessMgr.gateway, namespace+"/skupper")
 		}
-	}
-	m.securedAccessWatcher = processor.WatchSecuredAccesses(namespace, watchers.FilterByNamespace(m.isControlledResource, wrappedHandler))
+		w.EnqueueNamespace("")
+		return nil
+	})
 }
 
-func (m *SecuredAccessResourceWatcher) handleSecuredAccess(key string, sa *skupperv2alpha1.SecuredAccess) error {
-	if sa == nil {
-		return m.accessMgr.SecuredAccessDeleted(key)
-	}
-	return m.accessMgr.SecuredAccessChanged(key, sa)
-}
-
-func (m *SecuredAccessResourceWatcher) Recover() {
-	for _, service := range m.serviceWatcher.List() {
-		if !m.isControlledResource(service.Namespace) {
-			continue
+func (w *SecuredAccessResourceWatcher) WatchSecuredAccesses(p *watchers.EventProcessor, namespace string, handler watchers.SecuredAccessHandler) {
+	w.processor = p
+	w.securedAccessWatcher = p.WatchSecuredAccesses(namespace, func(key string, sa *skupperv2alpha1.SecuredAccess) error {
+		ns, _, err := cache.SplitMetaNamespaceKey(key)
+		if err != nil || !w.accessMgr.isControlled(ns) {
+			return err
 		}
-		m.accessMgr.RecoverService(service)
+		p.Enqueue(w.accessMgr, key)
+		w.EnqueueNamespace(ns)
+		if handler != nil {
+			return errors.Join(err, handler(key, sa))
+		}
+		return err
+	})
+}
+
+func (w *SecuredAccessResourceWatcher) resourceChanged(key string) error {
+	ns, _, err := cache.SplitMetaNamespaceKey(key)
+	if err == nil {
+		w.EnqueueNamespace(ns)
 	}
-	if m.routeWatcher != nil {
-		for _, route := range m.routeWatcher.List() {
-			if !m.isControlledResource(route.Namespace) {
-				continue
+	return err
+}
+
+// EnqueueNamespace closes dependencies for observed definitions and surviving
+// outputs, on initial list, deletion and periodic informer resync alike. It is
+// intentionally conservative while Site/Grant still use resource callbacks.
+func (w *SecuredAccessResourceWatcher) EnqueueNamespace(namespace string) {
+	if w.processor == nil || w.securedAccessWatcher == nil {
+		return
+	}
+	if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) && w.accessMgr.context != nil {
+		w.processor.Enqueue(w.accessMgr.gateway, w.accessMgr.context.Namespace()+"/skupper")
+	}
+	for _, sa := range w.securedAccessWatcher.List() {
+		if (namespace == "" || sa.Namespace == namespace) && w.accessMgr.isControlled(sa.Namespace) {
+			w.processor.Enqueue(w.accessMgr, sa.Key())
+			if target := certificateTarget(sa); target != "" {
+				w.processor.Enqueue(w.accessMgr.certificates, sa.Namespace+"/"+target)
 			}
-			m.accessMgr.RecoverRoute(route)
 		}
 	}
-	if m.ingressWatcher != nil {
-		for _, ingress := range m.ingressWatcher.List() {
-			if !m.isControlledResource(ingress.Namespace) {
-				continue
+	for _, obj := range w.inventory() {
+		if (namespace == "" || obj.GetNamespace() == namespace) && w.accessMgr.isControlled(obj.GetNamespace()) {
+			for _, ref := range obj.GetOwnerReferences() {
+				if accessReference(ref) {
+					w.processor.Enqueue(w.accessMgr, obj.GetNamespace()+"/"+ref.Name)
+					if _, ok := obj.(*skupperv2alpha1.Certificate); ok {
+						// Old targets survive retargeting, issuer removal and
+						// definition deletion; their own key routes cleanup.
+						w.processor.Enqueue(w.accessMgr.certificates, obj.GetNamespace()+"/"+obj.GetName())
+					}
+				}
 			}
-			m.accessMgr.RecoverIngress(ingress)
 		}
 	}
-	if m.httpProxyWatcher != nil {
-		for _, httpProxy := range m.httpProxyWatcher.List() {
-			if !m.isControlledResource(httpProxy.GetNamespace()) {
-				continue
-			}
-			m.accessMgr.RecoverHttpProxy(httpProxy)
+}
+
+func (w *SecuredAccessResourceWatcher) inventory() []metav1.Object {
+	var result []metav1.Object
+	if w.serviceWatcher != nil {
+		for _, o := range w.serviceWatcher.List() {
+			result = append(result, o)
 		}
 	}
-	if m.tlsRouteWatcher != nil {
-		for _, route := range m.tlsRouteWatcher.List() {
-			if !m.isControlledResource(route.GetNamespace()) {
-				continue
-			}
-			m.accessMgr.RecoverTlsRoute(route)
+	if w.ingressWatcher != nil {
+		for _, o := range w.ingressWatcher.List() {
+			result = append(result, o)
 		}
 	}
-	//once all resources are recovered, can process definitions
-	for _, sa := range m.securedAccessWatcher.List() {
-		if !m.isControlledResource(sa.Namespace) {
-			continue
+	if w.routeWatcher != nil {
+		for _, o := range w.routeWatcher.List() {
+			result = append(result, o)
 		}
-		m.accessMgr.SecuredAccessChanged(sa.Namespace+"/"+sa.Name, sa)
 	}
-}
-
-func (m *SecuredAccessResourceWatcher) isControlledResource(namespace string) bool {
-	if m.accessMgr.context != nil {
-		return m.accessMgr.context.IsControlled(namespace)
+	if w.httpProxyWatcher != nil {
+		for _, o := range w.httpProxyWatcher.List() {
+			result = append(result, o)
+		}
 	}
-	return true
-}
-
-func coreSecuredAccess() internalinterfaces.TweakListOptionsFunc {
-	return func(options *metav1.ListOptions) {
-		options.LabelSelector = "internal.skupper.io/secured-access"
+	if w.tlsRouteWatcher != nil {
+		for _, o := range w.tlsRouteWatcher.List() {
+			result = append(result, o)
+		}
 	}
-}
-
-func routeSecuredAccess() routev1interfaces.TweakListOptionsFunc {
-	return func(options *metav1.ListOptions) {
-		options.LabelSelector = "internal.skupper.io/secured-access"
+	if w.certificateWatcher != nil {
+		for _, o := range w.certificateWatcher.List() {
+			result = append(result, o)
+		}
 	}
-}
-
-func dynamicSecuredAccess() dynamicinformer.TweakListOptionsFunc {
-	return func(options *metav1.ListOptions) {
-		options.LabelSelector = "internal.skupper.io/secured-access"
-	}
-}
-
-func dynamicByName(name string) dynamicinformer.TweakListOptionsFunc {
-	return func(options *metav1.ListOptions) {
-		options.FieldSelector = "metadata.name=" + name
-	}
+	return result
 }

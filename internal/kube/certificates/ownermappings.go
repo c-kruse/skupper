@@ -13,6 +13,10 @@ var (
 	exprAnnotationKeyCertHosts = regexp.MustCompile(`^internal\.skupper\.io/hosts-(?P<refid>.+)$`)
 )
 
+// SecuredAccessCertificateAnnotation delegates host-contribution authoring to
+// the SecuredAccess Certificate scope, including after GC removes Access owners.
+const SecuredAccessCertificateAnnotation = "internal.skupper.io/secured-access-certificate"
+
 const (
 	annotationKeyPrefixCertHosts   = "internal.skupper.io/hosts-"
 	annotationKeySkupperControlled = "internal.skupper.io/controlled"

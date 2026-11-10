@@ -997,6 +997,43 @@ func TestOwnerContributionPruning(t *testing.T) {
 	assert.DeepEqual(t, actual.Status, c.Status)
 }
 
+func TestAccessAuthorRetainsContributionsAfterOwnerGC(t *testing.T) {
+	access := metav1.OwnerReference{APIVersion: "skupper.io/v2alpha1", Kind: "SecuredAccess", Name: "edge", UID: "access-uid"}
+	foreign := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "keeper", UID: "keeper-uid"}
+	c := managedWithOwnerHosts(t, certificate("leaf", "test", "issuer", "server", []string{"edge.example"}, false, true, nil, nil), access, "edge.example")
+	c.Annotations[SecuredAccessCertificateAnnotation] = "true"
+	c.OwnerReferences = append(c.OwnerReferences, foreign)
+	client, err := fakeclient.NewFakeClient("test", []runtime.Object{fixtureCASecret(t, "issuer", "test")}, []runtime.Object{c}, "")
+	assert.NilError(t, err)
+	m := newScopeTest(t, client)
+	definitions := client.GetSkupperClient().SkupperV2alpha1().Certificates("test")
+	secrets := client.GetKubeClient().CoreV1().Secrets("test")
+	assert.NilError(t, m.Handle(watchers.ResourceChange{Key: c.Key()}))
+	m.observe(c.Key())
+	assert.NilError(t, m.Handle(watchers.ResourceChange{Key: c.Key()}))
+	before, err := secrets.Get(context.Background(), "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	current, err := definitions.Get(context.Background(), "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	// Kubernetes GC removes the deleted Access owner while the live foreign
+	// co-owner retains the Certificate. Its original author marker survives.
+	current.OwnerReferences = []metav1.OwnerReference{foreign}
+	_, err = definitions.Update(context.Background(), current, metav1.UpdateOptions{})
+	assert.NilError(t, err)
+	for i := 0; i < 3; i++ {
+		m.observe(c.Key())
+		assert.NilError(t, m.Handle(watchers.ResourceChange{Key: c.Key()}))
+	}
+	actual, err := definitions.Get(context.Background(), "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual.Spec, c.Spec)
+	assert.DeepEqual(t, actual.Annotations, c.Annotations)
+	assert.DeepEqual(t, actual.OwnerReferences, []metav1.OwnerReference{foreign})
+	after, err := secrets.Get(context.Background(), "leaf", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, after, before)
+}
+
 func TestOwnerCleanupAwaitsObservation(t *testing.T) {
 	c := managedWithOwnerHosts(t, certificate("ca", "test", "issuer", "server", []string{"obsolete.example"}, false, true, nil, nil), metav1.OwnerReference{UID: "gone"}, "obsolete.example")
 	c.OwnerReferences = nil

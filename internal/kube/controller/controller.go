@@ -262,7 +262,6 @@ func (c *Controller) init(stopCh <-chan struct{}) error {
 		c.labelling.Update(config.Namespace+"/"+config.Name, config)
 		labellingCount++
 	}
-	c.accessRecovery.Recover()
 	// get observed services prior to restoring listeners
 	for _, svc := range c.serviceWatcher.List() {
 		c.observedServices[svc.Namespace+"/"+svc.ObjectMeta.Name] = svc.ObjectMeta.Name
