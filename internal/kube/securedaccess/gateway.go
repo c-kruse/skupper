@@ -2,14 +2,12 @@ package securedaccess
 
 import (
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -52,8 +50,9 @@ func (g *gatewayScope) Handle(e watchers.ResourceChange) (err error) {
 	phase = "execute"
 	for _, a := range actions {
 		start := time.Now()
-		err = m.executeAction(a)
-		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: ns, name: name, duration: time.Since(start), err: err})
+		var unchanged bool
+		unchanged, err = m.executeAction(a)
+		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: ns, name: name, duration: time.Since(start), err: err, unchanged: unchanged})
 		if err != nil {
 			break
 		}
@@ -62,7 +61,6 @@ func (g *gatewayScope) Handle(e watchers.ResourceChange) (err error) {
 }
 
 func planGateway(observed, desired *unstructured.Unstructured, policy *labels.LabelsAndAnnotations) ([]accessAction, error) {
-	var actions []accessAction
 	authority := desired.GetAnnotations()[gatewayOwner]
 	if observed != nil {
 		// Old Gateways had no durable owner metadata. Matching name/spec or an
@@ -73,24 +71,19 @@ func planGateway(observed, desired *unstructured.Unstructured, policy *labels.La
 		if observed.GetDeletionTimestamp() != nil {
 			return nil, nil
 		}
-		updated := observed.DeepCopy()
-		updated.Object["spec"] = runtime.DeepCopyJSONValue(desired.Object["spec"])
-		applyPolicy(policy, "Gateway", updated)
-		annotations := updated.GetAnnotations()
-		annotations[gatewayOwner] = authority
-		updated.SetAnnotations(annotations)
-		if !reflect.DeepEqual(observed, updated) {
-			actions = append(actions, accessAction{verb: "update", kind: "Gateway", object: updated})
-		}
-	} else {
-		desired = desired.DeepCopy()
-		applyPolicy(policy, "Gateway", desired)
-		annotations := desired.GetAnnotations()
-		annotations[gatewayOwner] = authority
-		desired.SetAnnotations(annotations)
-		actions = append(actions, accessAction{verb: "create", kind: "Gateway", object: desired})
 	}
-	return actions, nil
+	configuration, err := applyConfiguration(observed, desired, policy, "Gateway")
+	if err != nil {
+		return nil, err
+	}
+	annotations := configuration.GetAnnotations()
+	annotations[gatewayOwner] = authority
+	configuration.SetAnnotations(annotations)
+	verb := "create"
+	if observed != nil {
+		verb = "update"
+	}
+	return []accessAction{{verb: verb, kind: "Gateway", object: configuration}}, nil
 }
 
 func desiredGateway(namespace, controller string, c Config) *unstructured.Unstructured {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"reflect"
 	"sort"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 const accessLabel = "internal.skupper.io/secured-access"
@@ -58,12 +60,14 @@ type accessPlan struct {
 	access        *skupperv2alpha1.SecuredAccess
 	endpoints     []skupperv2alpha1.Endpoint
 	validationErr error
+	retryErr      error
 }
 type accessResult struct {
 	verb, kind, namespace, name string
 	duration                    time.Duration
 	err                         error
 	conditions                  []metav1.Condition
+	unchanged                   bool
 }
 
 func (m *SecuredAccessManager) Kind() string { return "AccessScope" }
@@ -168,22 +172,69 @@ func outputForScope(obj metav1.Object, name string) bool {
 	return len(refs) == 1 && accessReference(refs[0]) && refs[0].Name == name && refs[0].UID != ""
 }
 
-func applyPolicy(policy *labels.LabelsAndAnnotations, kind string, obj metav1.Object) {
+func applyPolicy(policy *labels.LabelsAndAnnotations, kind string, obj metav1.Object) metav1.ObjectMeta {
 	if policy == nil {
-		return
+		return metav1.ObjectMeta{}
 	}
 	// Preserve the spelling used by existing TLSRoute metadata templates.
 	if kind == "TLSRoute" {
 		kind = "TlsRoute"
 	}
 	metadata := metav1.ObjectMeta{Labels: obj.GetLabels(), Annotations: obj.GetAnnotations()}
-	policy.SetObjectMetadata(obj.GetNamespace(), obj.GetName(), kind, &metadata)
+	authored := policy.ApplyObjectMetadata(obj.GetNamespace(), obj.GetName(), kind, &metadata)
 	if len(metadata.Labels) > 0 || obj.GetLabels() != nil {
 		obj.SetLabels(metadata.Labels)
 	}
 	if len(metadata.Annotations) > 0 || obj.GetAnnotations() != nil {
 		obj.SetAnnotations(metadata.Annotations)
 	}
+	return authored
+}
+
+// Build the apply request independently of the full observed policy input.
+// Policy may read external labels, but only its outputs belong in the request.
+func applyConfiguration(observed, desired *unstructured.Unstructured, policy *labels.LabelsAndAnnotations, kind string) (*unstructured.Unstructured, error) {
+	context := desired.DeepCopy()
+	if observed != nil {
+		context = observed.DeepCopy()
+	}
+	values := context.GetLabels()
+	if values == nil {
+		values = map[string]string{}
+	}
+	maps.Copy(values, desired.GetLabels())
+	context.SetLabels(values)
+	values = context.GetAnnotations()
+	if values == nil {
+		values = map[string]string{}
+	}
+	maps.Copy(values, desired.GetAnnotations())
+	context.SetAnnotations(values)
+	authored := applyPolicy(policy, kind, context)
+	fields, err := resource.AppliedFields(context, "skupper-controller", desired.GetAPIVersion())
+	if err != nil {
+		return nil, err
+	}
+	result := desired.DeepCopy()
+	result.SetResourceVersion(context.GetResourceVersion())
+	result.SetLabels(applyMetadataValues(context.GetLabels(), desired.GetLabels(), authored.Labels, fields, "labels"))
+	result.SetAnnotations(applyMetadataValues(context.GetAnnotations(), desired.GetAnnotations(), authored.Annotations, fields, "annotations"))
+	return result, nil
+}
+
+func applyMetadataValues(observed, builtins, policy map[string]string, fields *fieldpath.Set, section string) map[string]string {
+	var result map[string]string
+	for key, value := range observed {
+		_, builtin := builtins[key]
+		_, authored := policy[key]
+		if builtin || authored || fields.Has(fieldpath.MakePathOrDie("metadata", section, key)) {
+			if result == nil {
+				result = map[string]string{}
+			}
+			result[key] = value
+		}
+	}
+	return result
 }
 
 // planOutput guards ownership before deriving a mutation. Metadata is evaluated
@@ -197,6 +248,10 @@ func (p *accessPlan) planOutput(s accessSnapshot, kind string, observed, desired
 			return
 		}
 		if om.GetDeletionTimestamp() != nil {
+			return
+		}
+		if kind == "TLSRoute" {
+			p.planApply(s, kind, observed.(*unstructured.Unstructured), desired.(*unstructured.Unstructured))
 			return
 		}
 		// Preserve external metadata and API identity; only built-ins and policy
@@ -257,8 +312,25 @@ func (p *accessPlan) planOutput(s accessSnapshot, kind string, observed, desired
 		}
 		return
 	}
+	if kind == "TLSRoute" {
+		p.planApply(s, kind, nil, desired.(*unstructured.Unstructured))
+		return
+	}
 	applyPolicy(s.policy, kind, dm)
 	p.actions = append(p.actions, accessAction{verb: "create", kind: kind, object: desired})
+}
+
+func (p *accessPlan) planApply(s accessSnapshot, kind string, observed, desired *unstructured.Unstructured) {
+	configuration, err := applyConfiguration(observed, desired, s.policy, kind)
+	if err != nil {
+		p.retryErr = errors.Join(p.retryErr, err)
+		return
+	}
+	verb := "create"
+	if observed != nil {
+		verb = "update"
+	}
+	p.actions = append(p.actions, accessAction{verb: verb, kind: kind, object: configuration})
 }
 
 func planAccess(s accessSnapshot) accessPlan {
@@ -382,7 +454,7 @@ func planAccess(s accessSnapshot) accessPlan {
 			}
 		}
 		// Never publish endpoints or certificate hosts of an ownership conflict.
-		if p.validationErr != nil {
+		if p.validationErr != nil || p.retryErr != nil {
 			p.endpoints = nil
 		}
 	}
@@ -422,17 +494,21 @@ func planAccess(s accessSnapshot) accessPlan {
 			p.actions = append(p.actions, accessAction{verb: "update", kind: "SecuredAccess", object: d})
 		}
 	}
+	if p.retryErr != nil {
+		// An invalid apply configuration cannot authorize partial output writes.
+		p.actions = nil
+	}
 	return p
 }
 
 func (m *SecuredAccessManager) executeAccess(p accessPlan) ([]accessResult, error) {
 	var results []accessResult
-	var executionErr error
+	executionErr := p.retryErr
 	for _, a := range p.actions {
 		start := time.Now()
-		err := m.executeAction(a)
+		unchanged, err := m.executeAction(a)
 		om, _ := meta.Accessor(a.object)
-		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: om.GetNamespace(), name: om.GetName(), duration: time.Since(start), err: err})
+		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: om.GetNamespace(), name: om.GetName(), duration: time.Since(start), err: err, unchanged: unchanged})
 		executionErr = errors.Join(executionErr, err)
 		if err != nil {
 			break
@@ -463,13 +539,14 @@ func (m *SecuredAccessManager) executeAccess(p accessPlan) ([]accessResult, erro
 	return results, executionErr
 }
 
-func (m *SecuredAccessManager) executeAction(a accessAction) error {
+// unchanged reports a successful request with no stored mutation, not a skipped
+// request. SSA updates are classified against their resourceVersion precondition.
+func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, err error) {
 	ctx := context.Background()
 	om, _ := meta.Accessor(a.object)
 	ns, name := om.GetNamespace(), om.GetName()
 	uid, rv := om.GetUID(), om.GetResourceVersion()
 	del := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv}}
-	var err error
 	switch o := a.object.(type) {
 	case *corev1.Service:
 		c := m.clients.GetKubeClient().CoreV1().Services(ns)
@@ -551,21 +628,23 @@ func (m *SecuredAccessManager) executeAction(a accessAction) error {
 			d.SetOwnerReferences(o.GetOwnerReferences())
 			data, e := json.Marshal(d)
 			if e != nil {
-				return e
+				return false, e
 			}
-			_, err = c.Patch(ctx, name, types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: "skupper-controller"})
+			var written *unstructured.Unstructured
+			written, err = c.Patch(ctx, name, types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: "skupper-controller"})
+			unchanged = err == nil && a.verb == "update" && rv != "" && written.GetResourceVersion() == rv
 		}
 	default:
-		return fmt.Errorf("unknown access action object %T", a.object)
+		return false, fmt.Errorf("unknown access action object %T", a.object)
 	}
 	if a.verb == "delete" && apierrors.IsNotFound(err) {
-		return nil
+		return true, nil
 	}
-	return err
+	return unchanged, err
 }
 
 func (m *SecuredAccessManager) logResults(scope, key, phase string, results []accessResult, err error) {
-	failed := 0
+	failed, unchanged := 0, 0
 	for _, r := range results {
 		outcome := "succeeded"
 		level := slog.LevelInfo
@@ -573,6 +652,10 @@ func (m *SecuredAccessManager) logResults(scope, key, phase string, results []ac
 			outcome = "failed"
 			level = slog.LevelError
 			failed++
+		} else if r.unchanged {
+			outcome = "unchanged"
+			level = slog.LevelDebug
+			unchanged++
 		}
 		attributes := []any{"scope", scope, "key", key, "action", r.verb, "kind", r.kind, "namespace", r.namespace, "name", r.name, "outcome", outcome, "duration", r.duration}
 		if r.err != nil {
@@ -591,7 +674,7 @@ func (m *SecuredAccessManager) logResults(scope, key, phase string, results []ac
 	if err != nil {
 		outcome = "failed"
 	}
-	m.logger.Debug("Reconciled "+scope+" scope", "scope", scope, "key", key, "phase", phase, "actions", len(results), "failed_actions", failed, "unchanged_actions", 0, "outcome", outcome)
+	m.logger.Debug("Reconciled "+scope+" scope", "scope", scope, "key", key, "phase", phase, "actions", len(results), "failed_actions", failed, "unchanged_actions", unchanged, "changed_actions", len(results)-failed-unchanged, "outcome", outcome)
 }
 
 func (r accessResult) logMessage() string {
@@ -613,6 +696,9 @@ func (r accessResult) logMessage() string {
 	}
 	if r.err != nil {
 		return "Failed to " + operation + " " + target
+	}
+	if r.unchanged {
+		return "Unchanged " + target
 	}
 	message := completed + " " + target
 	if r.verb == "status" {

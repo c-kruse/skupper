@@ -47,6 +47,42 @@ import (
 type WaitFunction func(t *testing.T, clients internalclient.Clients) bool
 type ControllerFunction func(t *testing.T, controller *Controller) bool
 
+func TestControllerAuthorityAcrossPodNames(t *testing.T) {
+	for _, configured := range []string{"", "operator-selected"} {
+		for _, pod := range []string{"skupper-controller-bccd6f5c-7thwg", "skupper-controller-64d6774b44-7thwg"} {
+			t.Run(configured+"/"+pod, func(t *testing.T) {
+				t.Setenv("HOSTNAME", pod)
+				config, err := BoundConfig(&flag.FlagSet{})
+				assert.NilError(t, err)
+				config.Namespace, config.Name = "test", configured
+				deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "skupper-controller", Namespace: "test", UID: "controller-uid"}}
+				clients, err := fakeclient.NewFakeClient("test", []runtime.Object{deployment}, nil, "")
+				assert.NilError(t, err)
+				controller, err := NewController(clients, config)
+				assert.NilError(t, err)
+				expected := configured
+				if expected == "" {
+					expected = "skupper-controller"
+				}
+				assert.Equal(t, controller.Name(), expected)
+				assert.Equal(t, controller.UID(), "controller-uid")
+			})
+		}
+	}
+	t.Run("explicit identity without deployment discovery", func(t *testing.T) {
+		t.Setenv("HOSTNAME", "standalone-pod")
+		config, err := BoundConfig(&flag.FlagSet{})
+		assert.NilError(t, err)
+		config.Namespace, config.Name = "test", "operator-selected"
+		clients, err := fakeclient.NewFakeClient("test", nil, nil, "")
+		assert.NilError(t, err)
+		controller, err := NewController(clients, config)
+		assert.NilError(t, err)
+		assert.Equal(t, controller.Name(), "operator-selected")
+		assert.Equal(t, controller.UID(), "")
+	})
+}
+
 func TestGeneral(t *testing.T) {
 	fakeNetworkStatus := f.fakeNetworkStatusInfo("test")
 	testTable := []struct {
