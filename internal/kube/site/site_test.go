@@ -41,10 +41,12 @@ func TestListenerAccessServiceCollision(t *testing.T) {
 				assert.NilError(t, s.Expose(exposed))
 			}
 			access := securedaccess.NewSecuredAccessManager(s.clients, nil, &securedaccess.Config{EnabledAccessTypes: []string{"local"}}, nil)
-			w := securedaccess.NewSecuredAccessResourceWatcher(access)
-			w.WatchResources(s.clients, "test")
-			w.WatchSecuredAccesses(s.clients, "test", nil)
 			accessCache := s.clients.WatchSecuredAccesses("test", nil)
+			access.BindCaches(&securedaccess.ResourceCaches{
+				Services:     s.clients.WatchServices(nil, "test", nil),
+				Accesses:     accessCache,
+				Certificates: s.clients.WatchCertificates("test", nil),
+			})
 			_, err = s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test").Create(ctx, &skupperv2alpha1.SecuredAccess{
 				ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test", UID: "access-uid"},
 				Spec:       skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "backend"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "access", Port: 8080, TargetPort: 8181}}},

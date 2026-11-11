@@ -16,7 +16,6 @@ import (
 
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
 	"github.com/skupperproject/skupper/internal/kube/resource"
-	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -725,85 +724,7 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			})
 		}
 	})
-	t.Run("real informers converge between periodic resyncs", func(t *testing.T) {
-		m := NewSecuredAccessManager(clients, nil, ptrConfig(testConfig()), &testContext{policy: labels.NewLabelsAndAnnotations("controller")})
-		w := NewSecuredAccessResourceWatcher(m)
-		p := watchers.NewEventProcessor("AccessSSAIntegration", clients)
-		p.SetResync(2 * time.Second)
-		p.SetResyncShort(2 * time.Second)
-		w.WatchResources(p, "")
-		w.WatchSecuredAccesses(p, "", nil)
-		w.WatchGateway(p, "controller")
-		stop := make(chan struct{})
-		t.Cleanup(func() { close(stop); p.Stop() })
-		p.StartWatchers(stop)
-		assert.Assert(t, p.WaitForCacheSync(stop))
-		// The earlier "occupied" Gateway exists in this namespace too. It must
-		// not enter the shared-Gateway watch or wake either scope.
-		gateways := w.gatewayWatcher.List()
-		assert.Equal(t, len(gateways), 1)
-		assert.Equal(t, gateways[0].GetName(), "skupper")
-		p.Start(stop)
-		sa := testAccess("gateway")
-		sa.Name, sa.UID = "watch-access", ""
-		_, err := clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Create(ctx, sa, metav1.CreateOptions{})
-		assert.NilError(t, err)
-		assert.NilError(t, wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 30*time.Second, true, func(context.Context) (bool, error) {
-			current, err := clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Get(ctx, sa.Name, metav1.GetOptions{})
-			return err == nil && current.IsReady(), err
-		}))
-		// No manual Handle/observe calls: API watch events and real informer
-		// resyncs must drain rather than continuously feeding their own writes.
-		quiet := func(after int64) int64 {
-			last, changed := writes.Load(), time.Now()
-			assert.NilError(t, wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 30*time.Second, true, func(context.Context) (bool, error) {
-				now := writes.Load()
-				if now != last {
-					last, changed = now, time.Now()
-				}
-				return now > after && time.Since(changed) >= 500*time.Millisecond, nil
-			}))
-			return last
-		}
-		last := quiet(-1)
-		versions := func() map[string]string {
-			result := map[string]string{}
-			gateway, err := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller").Get(ctx, "skupper", metav1.GetOptions{})
-			assert.NilError(t, err)
-			result["Gateway"] = gateway.GetResourceVersion()
-			routes, err := clients.Dynamic.Resource(resource.TlsRouteResource()).Namespace("test").List(ctx, metav1.ListOptions{})
-			assert.NilError(t, err)
-			for _, route := range routes.Items {
-				result[route.GetName()] = route.GetResourceVersion()
-			}
-			current, err := clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Get(ctx, sa.Name, metav1.GetOptions{})
-			assert.NilError(t, err)
-			assert.Assert(t, current.IsReady())
-			result["SecuredAccess"] = current.ResourceVersion
-			return result
-		}
-		before := versions()
-		for i := 0; i < 3; i++ {
-			next := quiet(last)
-			assert.Assert(t, next-last < 100, "unbounded request feedback: %d attempts", next-last)
-			t.Logf("periodic resync %d: %d mutation requests, followed by a quiet interval", i+1, next-last)
-			last = next
-			assert.DeepEqual(t, versions(), before)
-		}
-		// Deletion of the shared Gateway itself must still recreate it without
-		// an Access or output event to wake its scope.
-		gatewayClient := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
-		original, err := gatewayClient.Get(ctx, "skupper", metav1.GetOptions{})
-		assert.NilError(t, err)
-		assert.NilError(t, gatewayClient.Delete(ctx, "skupper", metav1.DeleteOptions{}))
-		assert.NilError(t, wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 30*time.Second, true, func(context.Context) (bool, error) {
-			current, err := gatewayClient.Get(ctx, "skupper", metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			return err == nil && current.GetUID() != original.GetUID() && current.GetAnnotations()[gatewayOwner] == m.context.Name(), err
-		}))
-		quiet(-1) // Drain recreation's dependent Access work before API teardown.
-	})
+	// Actual informer/queue convergence is covered by controller's routing
+	// integration test, where static registration and invalidation now live.
 	assert.Equal(t, openAPIReads.Load(), int64(0), "reconciliation must not require OpenAPI discovery")
 }

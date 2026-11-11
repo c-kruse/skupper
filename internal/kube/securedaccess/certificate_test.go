@@ -119,7 +119,7 @@ func TestForeignCertificateNotAdoptedOrDeleted(t *testing.T) {
 	}
 }
 
-func TestCertificatePendingHostsAndSurvivingTargetRouting(t *testing.T) {
+func TestCertificatePendingHostsAndSurvivingTargets(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
 	sa := testAccess("ingress")
@@ -142,15 +142,12 @@ func TestCertificatePendingHostsAndSurvivingTargetRouting(t *testing.T) {
 	sa.Spec.Certificate = "replacement"
 	_, err = h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, sa, metav1.UpdateOptions{})
 	assert.NilError(t, err)
-	// Only a fresh manager, cache and ordinary namespace routing remain. The
-	// old target must be discovered through the surviving output's owners.
+	// A fresh manager must derive both old and current aggregate intent. Actual
+	// informer routing of surviving targets is covered in controller tests.
 	h = newHarness(t, h.clients)
 	h.m.config.EnabledAccessTypes = []string{"local", "ingress"}
 	h.observe()
-	p := watchers.NewEventProcessor("CertificateRouting", h.clients)
-	h.m.watcher.processor = p
-	h.m.watcher.EnqueueNamespace("test")
-	p.TestProcessAll()
+	assert.NilError(t, h.runCertificates())
 	_, err = certs.Get(ctx, "shared", metav1.GetOptions{})
 	assert.Assert(t, apierrors.IsNotFound(err))
 	got, err = certs.Get(ctx, "replacement", metav1.GetOptions{})
@@ -161,8 +158,7 @@ func TestCertificatePendingHostsAndSurvivingTargetRouting(t *testing.T) {
 	_, err = h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, sa, metav1.UpdateOptions{})
 	assert.NilError(t, err)
 	h.observe()
-	h.m.watcher.EnqueueNamespace("test")
-	p.TestProcessAll()
+	assert.NilError(t, h.runCertificates())
 	_, err = certs.Get(ctx, "replacement", metav1.GetOptions{})
 	assert.Assert(t, apierrors.IsNotFound(err))
 }

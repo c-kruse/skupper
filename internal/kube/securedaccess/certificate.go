@@ -67,13 +67,13 @@ func (c *accessCertificateScope) snapshot(key string) (accessCertificateSnapshot
 		return s, err
 	}
 	w := c.manager.watcher
-	observed, err := w.certificateWatcher.Get(key)
+	observed, err := w.Certificates.Get(key)
 	if err != nil {
 		return s, err
 	}
 	s.certificate = observed.DeepCopy()
-	for _, sa := range w.securedAccessWatcher.List() {
-		if sa.Namespace == ns && certificateTarget(sa) == name {
+	for _, sa := range w.Accesses.List() {
+		if sa.Namespace == ns && CertificateTarget(sa) == name {
 			s.accesses = append(s.accesses, sa.DeepCopy())
 		}
 	}
@@ -84,7 +84,8 @@ func (c *accessCertificateScope) snapshot(key string) (accessCertificateSnapshot
 	return s, nil
 }
 
-func certificateTarget(sa *skupperv2alpha1.SecuredAccess) string {
+// CertificateTarget is shared by aggregate planning and controller routing.
+func CertificateTarget(sa *skupperv2alpha1.SecuredAccess) string {
 	if sa == nil || sa.DeletionTimestamp != nil || sa.Spec.Issuer == "" {
 		return ""
 	}

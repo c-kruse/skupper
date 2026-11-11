@@ -101,15 +101,15 @@ func (m *SecuredAccessManager) snapshot(key string) (accessSnapshot, error) {
 		return s, err
 	}
 	w := m.watcher
-	s.routeAvailable = w.routeWatcher != nil
-	sa, err := w.securedAccessWatcher.Get(key)
+	s.routeAvailable = w.Routes != nil
+	sa, err := w.Accesses.Get(key)
 	if err != nil {
 		return s, err
 	}
 	s.access = sa.DeepCopy()
 	if sa != nil {
 		s.accessType = m.actualAccessType(sa)
-		if target := certificateTarget(sa); target != "" {
+		if target := CertificateTarget(sa); target != "" {
 			s.certificate, err = m.certificates.snapshot(ns + "/" + target)
 			if err != nil {
 				return s, err
@@ -118,15 +118,15 @@ func (m *SecuredAccessManager) snapshot(key string) (accessSnapshot, error) {
 	}
 	// Keep name-camping objects for authorization and surviving owned outputs
 	// for cleanup, including old UIDs. Copy only selected informer inputs.
-	if w.serviceWatcher != nil {
-		observed, err := w.serviceWatcher.Get(key)
+	if w.Services != nil {
+		observed, err := w.Services.Get(key)
 		if err != nil {
 			return s, err
 		}
 		s.service = observed.DeepCopy()
 	}
-	if w.ingressWatcher != nil {
-		observed, err := w.ingressWatcher.Get(key)
+	if w.Ingresses != nil {
+		observed, err := w.Ingresses.Get(key)
 		if err != nil {
 			return s, err
 		}
@@ -138,22 +138,22 @@ func (m *SecuredAccessManager) snapshot(key string) (accessSnapshot, error) {
 			portNames[name+"-"+port.Name] = true
 		}
 	}
-	if w.routeWatcher != nil {
-		for _, o := range w.routeWatcher.List() {
+	if w.Routes != nil {
+		for _, o := range w.Routes.List() {
 			if o.Namespace == ns && ((s.accessType == ACCESS_TYPE_ROUTE && portNames[o.Name]) || outputForScope(o, name)) {
 				s.routes[o.Name] = o.DeepCopy()
 			}
 		}
 	}
-	if w.httpProxyWatcher != nil {
-		for _, o := range w.httpProxyWatcher.List() {
+	if w.HTTPProxies != nil {
+		for _, o := range w.HTTPProxies.List() {
 			if o.GetNamespace() == ns && ((s.accessType == ACCESS_TYPE_CONTOUR_HTTP_PROXY && portNames[o.GetName()]) || outputForScope(o, name)) {
 				s.proxies[o.GetName()] = o.DeepCopy()
 			}
 		}
 	}
-	if w.tlsRouteWatcher != nil {
-		for _, o := range w.tlsRouteWatcher.List() {
+	if w.TLSRoutes != nil {
+		for _, o := range w.TLSRoutes.List() {
 			if o.GetNamespace() == ns && ((s.accessType == ACCESS_TYPE_GATEWAY && portNames[o.GetName()]) || outputForScope(o, name)) {
 				s.tlsRoutes[o.GetName()] = o.DeepCopy()
 			}
@@ -164,8 +164,8 @@ func (m *SecuredAccessManager) snapshot(key string) (accessSnapshot, error) {
 		s.gatewayNamespace = m.context.Namespace()
 		s.gatewayController = m.context.Name()
 	}
-	if w.gatewayWatcher != nil {
-		g, err := w.gatewayWatcher.Get(s.gatewayNamespace + "/skupper")
+	if w.Gateways != nil {
+		g, err := w.Gateways.Get(s.gatewayNamespace + "/skupper")
 		if err != nil {
 			return s, err
 		}

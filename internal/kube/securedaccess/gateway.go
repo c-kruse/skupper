@@ -32,10 +32,10 @@ func (g *gatewayScope) Handle(e watchers.ResourceChange) (err error) {
 		return nil
 	}
 	phase = "snapshot"
-	if m.watcher.gatewayWatcher == nil {
+	if m.watcher.Gateways == nil {
 		return fmt.Errorf("Gateway API is unavailable")
 	}
-	observed, err := m.watcher.gatewayWatcher.Get(e.Key)
+	observed, err := m.watcher.Gateways.Get(e.Key)
 	if err != nil {
 		return err
 	}

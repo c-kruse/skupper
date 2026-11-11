@@ -16,7 +16,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-func TestScopeRoutingInventoriesSurvivingOutputs(t *testing.T) {
+func TestScopeCleanupInventoriesSurvivingOutputs(t *testing.T) {
 	h := newHarness(t, nil)
 	sa := testAccess("local")
 	sa.Spec.Issuer = "issuer"
@@ -47,12 +47,11 @@ func TestScopeRoutingInventoriesSurvivingOutputs(t *testing.T) {
 	k.ReactionChain = k.ReactionChain[1:]
 	h = newHarness(t, h.clients)
 	h.observe()
-	p := watchers.NewEventProcessor("AccessTest", h.clients)
 	h.m.config.EnabledAccessTypes = []string{"local"}
-	h.m.watcher.processor = p
-	// No definition remains. The resource callback still routes its owner scope.
-	assert.NilError(t, h.m.watcher.resourceChanged("test/edge"))
-	p.TestProcessAll()
+	// Domain cleanup from fresh caches; controller tests cover the actual
+	// surviving-output informer route to these scope handlers.
+	assert.NilError(t, h.run("test/edge"))
+	assert.NilError(t, h.runCertificates())
 	svcs, err := h.clients.Kube.CoreV1().Services("test").List(context.Background(), metav1.ListOptions{})
 	assert.NilError(t, err)
 	assert.Equal(t, len(svcs.Items), 0)
@@ -78,15 +77,11 @@ func TestUncontrolledScopeDoesNotReadOrWrite(t *testing.T) {
 	assert.NilError(t, h.m.certificates.Handle(watchers.ResourceChange{Key: "test/edge"}))
 }
 
-func TestAccessWakeupsDoNotApplyGateway(t *testing.T) {
+func TestAccessScopeDoesNotApplyGateway(t *testing.T) {
 	h := newHarness(t, nil)
 	h.put(testAccess("gateway"))
 	h.observe()
-	p := watchers.NewEventProcessor("AccessTest", h.clients)
-	h.m.watcher.processor = p
-	h.m.watcher.EnqueueNamespace("test")
-	assert.NilError(t, h.m.watcher.resourceChanged("test/edge"))
-	p.TestProcessAll()
+	assert.NilError(t, h.run("test/edge"))
 	// Access dependencies still reconcile, but do not wake the independent
 	// shared-Gateway writer, even for a Gateway-backed Access.
 	_, err := h.clients.Kube.CoreV1().Services("test").Get(context.Background(), "edge", metav1.GetOptions{})
@@ -96,26 +91,21 @@ func TestAccessWakeupsDoNotApplyGateway(t *testing.T) {
 	}
 }
 
-func TestControlAndPolicyWakeups(t *testing.T) {
+func TestControlAndPolicySnapshots(t *testing.T) {
 	h := newHarness(t, nil)
 	h.put(testAccess("local"))
 	h.m.config.EnabledAccessTypes = []string{"local"}
 	c := h.m.context.(*testContext)
 	c.excluded = "test"
-	p := watchers.NewEventProcessor("AccessTest", h.clients)
-	h.m.watcher.processor = p
-	h.m.watcher.EnqueueNamespace("test")
-	p.TestProcessAll()
+	assert.NilError(t, h.run("test/edge"))
 	_, err := h.clients.Kube.CoreV1().Services("test").Get(context.Background(), "edge", metav1.GetOptions{})
 	assert.Assert(t, apierrors.IsNotFound(err))
 	c.excluded = ""
-	h.m.watcher.EnqueueNamespace("test")
-	p.TestProcessAll()
+	assert.NilError(t, h.run("test/edge"))
 	h.observe()
 	assert.Assert(t, h.status("edge").IsReady())
 	assert.NilError(t, c.policy.Update("controller/template", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "controller", Labels: map[string]string{"skupper.io/label-template": "true", "policy": "updated"}}}))
-	h.m.watcher.EnqueueNamespace("")
-	p.TestProcessAll()
+	assert.NilError(t, h.run("test/edge"))
 	svc, err := h.clients.Kube.CoreV1().Services("test").Get(context.Background(), "edge", metav1.GetOptions{})
 	assert.NilError(t, err)
 	assert.Equal(t, svc.Labels["policy"], "updated")
