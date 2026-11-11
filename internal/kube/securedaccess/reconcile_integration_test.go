@@ -5,6 +5,7 @@ package securedaccess
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -178,6 +179,48 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	untouched, err := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller").Get(ctx, "occupied", metav1.GetOptions{})
 	assert.NilError(t, err)
 	assert.Equal(t, untouched.GetAnnotations()[gatewayOwner], "unrelated-controller")
+	t.Run("CRD create guards reject existing objects even with equal values", func(t *testing.T) {
+		for _, kind := range []string{"Gateway", "TLSRoute"} {
+			for i, manager := range []string{"skupper-controller", "external-controller"} {
+				gvr := resource.GatewayResource()
+				configuration := desiredGateway("test", "skupper-controller", testConfig())
+				if kind == "TLSRoute" {
+					gvr = resource.TlsRouteResource()
+					sa := testAccess("gateway")
+					configuration = desiredTLSRoute(sa, sa.Spec.Ports[0], "controller", "gateway.example")
+				}
+				configuration.SetName(fmt.Sprintf("create-guard-%d", i))
+				client := clients.Dynamic.Resource(gvr).Namespace("test")
+				data, err := json.Marshal(configuration)
+				assert.NilError(t, err)
+				_, err = client.Patch(ctx, configuration.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: manager})
+				assert.NilError(t, err)
+				t.Cleanup(func() {
+					assert.NilError(t, client.Delete(ctx, configuration.GetName(), metav1.DeleteOptions{}))
+				})
+				before, err := client.Get(ctx, configuration.GetName(), metav1.GetOptions{})
+				assert.NilError(t, err)
+				// Equal values avoid an SSA ownership conflict hiding a broken
+				// create guard. New metadata tests a write without such a conflict.
+				for _, changed := range []bool{false, true} {
+					desired := configuration.DeepCopy()
+					if changed {
+						annotations := desired.GetAnnotations()
+						annotations["example.com/create-guard"] = "must-not-be-written"
+						desired.SetAnnotations(annotations)
+					}
+					unchanged, err := h.m.executeAction(accessAction{verb: "create", kind: kind, object: desired})
+					assert.Assert(t, apierrors.IsInvalid(err), "%s manager=%s changed=%t: %v", kind, manager, changed, err)
+					assert.ErrorContains(t, err, "metadata.resourceVersion")
+					assert.Assert(t, !unchanged)
+					t.Logf("%s manager=%s added-metadata=%t rejected: %v", kind, manager, changed, err)
+					after, err := client.Get(ctx, configuration.GetName(), metav1.GetOptions{})
+					assert.NilError(t, err)
+					assert.DeepEqual(t, after, before)
+				}
+			}
+		}
+	})
 	// Metadata policy may decorate an authorized Gateway, not transfer the
 	// controller's authority. Check both creation and an actual metadata update.
 	authorityPolicy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "gateway-authority", Namespace: "controller", Labels: map[string]string{"skupper.io/label-template": "true"}, Annotations: map[string]string{gatewayOwner: "policy-override", "decoration": "created"}}, Data: map[string]string{"kind": "Gateway", "name": "skupper"}}
@@ -695,6 +738,11 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		t.Cleanup(func() { close(stop); p.Stop() })
 		p.StartWatchers(stop)
 		assert.Assert(t, p.WaitForCacheSync(stop))
+		// The earlier "occupied" Gateway exists in this namespace too. It must
+		// not enter the shared-Gateway watch or wake either scope.
+		gateways := w.gatewayWatcher.List()
+		assert.Equal(t, len(gateways), 1)
+		assert.Equal(t, gateways[0].GetName(), "skupper")
 		p.Start(stop)
 		sa := testAccess("gateway")
 		sa.Name, sa.UID = "watch-access", ""
@@ -742,6 +790,20 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			last = next
 			assert.DeepEqual(t, versions(), before)
 		}
+		// Deletion of the shared Gateway itself must still recreate it without
+		// an Access or output event to wake its scope.
+		gatewayClient := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
+		original, err := gatewayClient.Get(ctx, "skupper", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.NilError(t, gatewayClient.Delete(ctx, "skupper", metav1.DeleteOptions{}))
+		assert.NilError(t, wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 30*time.Second, true, func(context.Context) (bool, error) {
+			current, err := gatewayClient.Get(ctx, "skupper", metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return err == nil && current.GetUID() != original.GetUID() && current.GetAnnotations()[gatewayOwner] == m.context.Name(), err
+		}))
+		quiet(-1) // Drain recreation's dependent Access work before API teardown.
 	})
 	assert.Equal(t, openAPIReads.Load(), int64(0), "reconciliation must not require OpenAPI discovery")
 }

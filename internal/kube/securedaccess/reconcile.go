@@ -116,26 +116,45 @@ func (m *SecuredAccessManager) snapshot(key string) (accessSnapshot, error) {
 			}
 		}
 	}
-	// Every informer pointer crossing this boundary is copied, including metadata.
-	for _, o := range w.inventory() {
-		if o.GetNamespace() != ns {
-			continue
+	// Keep name-camping objects for authorization and surviving owned outputs
+	// for cleanup, including old UIDs. Copy only selected informer inputs.
+	if w.serviceWatcher != nil {
+		observed, err := w.serviceWatcher.Get(key)
+		if err != nil {
+			return s, err
 		}
-		switch o := o.(type) {
-		case *corev1.Service:
-			if o.Name == name {
-				s.service = o.DeepCopy()
+		s.service = observed.DeepCopy()
+	}
+	if w.ingressWatcher != nil {
+		observed, err := w.ingressWatcher.Get(key)
+		if err != nil {
+			return s, err
+		}
+		s.ingress = observed.DeepCopy()
+	}
+	portNames := map[string]bool{}
+	if sa != nil {
+		for _, port := range sa.Spec.Ports {
+			portNames[name+"-"+port.Name] = true
+		}
+	}
+	if w.routeWatcher != nil {
+		for _, o := range w.routeWatcher.List() {
+			if o.Namespace == ns && ((s.accessType == ACCESS_TYPE_ROUTE && portNames[o.Name]) || outputForScope(o, name)) {
+				s.routes[o.Name] = o.DeepCopy()
 			}
-		case *networkingv1.Ingress:
-			if o.Name == name {
-				s.ingress = o.DeepCopy()
-			}
-		case *routev1.Route:
-			s.routes[o.Name] = o.DeepCopy()
-		case *unstructured.Unstructured:
-			if o.GetKind() == "HTTPProxy" {
+		}
+	}
+	if w.httpProxyWatcher != nil {
+		for _, o := range w.httpProxyWatcher.List() {
+			if o.GetNamespace() == ns && ((s.accessType == ACCESS_TYPE_CONTOUR_HTTP_PROXY && portNames[o.GetName()]) || outputForScope(o, name)) {
 				s.proxies[o.GetName()] = o.DeepCopy()
-			} else if o.GetKind() == "TLSRoute" {
+			}
+		}
+	}
+	if w.tlsRouteWatcher != nil {
+		for _, o := range w.tlsRouteWatcher.List() {
+			if o.GetNamespace() == ns && ((s.accessType == ACCESS_TYPE_GATEWAY && portNames[o.GetName()]) || outputForScope(o, name)) {
 				s.tlsRoutes[o.GetName()] = o.DeepCopy()
 			}
 		}
@@ -475,18 +494,20 @@ func planAccess(s accessSnapshot) accessPlan {
 	for _, o := range s.tlsRoutes {
 		outputs = append(outputs, accessAction{kind: "TLSRoute", object: o})
 	}
-	sort.Slice(outputs, func(i, j int) bool {
-		a, _ := meta.Accessor(outputs[i].object)
-		b, _ := meta.Accessor(outputs[j].object)
-		return outputs[i].kind+"/"+a.GetName() < outputs[j].kind+"/"+b.GetName()
-	})
+	cleanup := outputs[:0]
 	for _, o := range outputs {
 		om, _ := meta.Accessor(o.object)
 		if !desiredNames[o.kind+"/"+om.GetName()] && outputForScope(om, s.name) && om.GetDeletionTimestamp() == nil {
 			o.verb = "delete"
-			p.actions = append(p.actions, o)
+			cleanup = append(cleanup, o)
 		}
 	}
+	sort.Slice(cleanup, func(i, j int) bool {
+		a, _ := meta.Accessor(cleanup[i].object)
+		b, _ := meta.Accessor(cleanup[j].object)
+		return cleanup[i].kind+"/"+a.GetName() < cleanup[j].kind+"/"+b.GetName()
+	})
+	p.actions = append(p.actions, cleanup...)
 	if sa != nil {
 		d := sa.DeepCopy()
 		applyPolicy(s.policy, "SecuredAccess", d)
@@ -613,9 +634,10 @@ func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, er
 			}
 		} else {
 			// Apply only a complete owned projection. Retain resourceVersion as a
-			// precondition, and never force ownership conflicts. Version 0 permits
-			// creation but is rejected on update: a resource appearing after the
-			// snapshot cannot be silently adopted, even under the same SSA manager.
+			// precondition, and never force ownership conflicts. For Gateway and
+			// TLSRoute CRDs, version 0 permits creation but update validation rejects
+			// it, protecting absent snapshots from adoption races. This is not a
+			// generic SSA create-only guard for native resources.
 			if a.verb == "create" {
 				rv = "0"
 			}

@@ -46,7 +46,9 @@ func (w *SecuredAccessResourceWatcher) WatchGateway(p *watchers.EventProcessor, 
 	if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) {
 		p.Enqueue(w.accessMgr.gateway, namespace+"/skupper")
 	}
-	w.gatewayWatcher = p.WatchGateways(nil, namespace, func(_ string, _ *unstructured.Unstructured) error {
+	w.gatewayWatcher = p.WatchGateways(func(options *metav1.ListOptions) {
+		options.FieldSelector = "metadata.name=skupper"
+	}, namespace, func(_ string, _ *unstructured.Unstructured) error {
 		if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) {
 			p.Enqueue(w.accessMgr.gateway, namespace+"/skupper")
 		}
@@ -85,9 +87,6 @@ func (w *SecuredAccessResourceWatcher) resourceChanged(key string) error {
 func (w *SecuredAccessResourceWatcher) EnqueueNamespace(namespace string) {
 	if w.processor == nil || w.securedAccessWatcher == nil {
 		return
-	}
-	if w.accessMgr.config.isEnabled(ACCESS_TYPE_GATEWAY) && w.accessMgr.context != nil {
-		w.processor.Enqueue(w.accessMgr.gateway, w.accessMgr.context.Namespace()+"/skupper")
 	}
 	for _, sa := range w.securedAccessWatcher.List() {
 		if (namespace == "" || sa.Namespace == namespace) && w.accessMgr.isControlled(sa.Namespace) {
