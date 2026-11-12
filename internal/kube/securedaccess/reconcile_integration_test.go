@@ -29,14 +29,18 @@ import (
 )
 
 type mutationTransport struct {
-	next         http.RoundTripper
-	writes       *atomic.Int64
-	openAPIReads *atomic.Int64
+	next           http.RoundTripper
+	writes         *atomic.Int64
+	openAPIReads   *atomic.Int64
+	gatewayPatches *atomic.Int64
 }
 
 func (r mutationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if strings.HasPrefix(req.URL.Path, "/openapi/") {
 		r.openAPIReads.Add(1)
+	}
+	if req.Method == "PATCH" && strings.Contains(req.URL.Path, "/gateways/") {
+		r.gatewayPatches.Add(1)
 	}
 	switch req.Method {
 	case "POST", "PUT", "PATCH", "DELETE":
@@ -58,9 +62,9 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	cfg, err := env.Start()
 	assert.NilError(t, err)
 	t.Cleanup(func() { assert.NilError(t, env.Stop()) })
-	var writes, openAPIReads atomic.Int64
+	var writes, openAPIReads, gatewayPatches atomic.Int64
 	cfg.WrapTransport = func(next http.RoundTripper) http.RoundTripper {
-		return mutationTransport{next: next, writes: &writes, openAPIReads: &openAPIReads}
+		return mutationTransport{next: next, writes: &writes, openAPIReads: &openAPIReads, gatewayPatches: &gatewayPatches}
 	}
 	clients, err := internalclient.NewClientFromRestConfig(cfg, "controller")
 	assert.NilError(t, err)
@@ -69,7 +73,8 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		_, err = clients.Kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{})
 		assert.NilError(t, err)
 	}
-	// Settled SSA still sends requests, but must not change any stored revision.
+	// Count mutation attempts separately from stored revisions. Successful
+	// receipts suppress settled SSA; cold caches and changed observations reapply.
 	assertUnchanged := func(t *testing.T, h *scopeHarness, requests int64, run func() error) {
 		t.Helper()
 		versions := func() map[string]string {
@@ -96,18 +101,39 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		t.Cleanup(func() { assert.NilError(t, gateways.Delete(ctx, "skupper", metav1.DeleteOptions{})) })
 		beforeInitial, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
 		assert.NilError(t, err)
-		// The first update may persist read-time CRD status defaults. Allow
-		// that convergence pass, then require stable revisions on every apply.
+		// A successful create already establishes a receipt. No follow-up
+		// apply is required just to persist read-time CRD status defaults.
 		bare.observe()
 		assert.NilError(t, bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
 		afterInitial, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
 		assert.NilError(t, err)
 		assert.DeepEqual(t, beforeInitial.Object["spec"], afterInitial.Object["spec"])
 		for i := 0; i < 3; i++ {
-			assertUnchanged(t, bare, 1, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+			assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 		}
 		bare = newHarness(t, clients)
+		// Restart loses only the optimization. The first apply can persist
+		// read-time defaults; record its returned revision, then omit requests.
+		beforeRestart := writes.Load()
+		bare.observe()
+		assert.NilError(t, bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
+		assert.Equal(t, writes.Load()-beforeRestart, int64(1))
+		assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		// Even a status-only RV change invalidates the receipt. Apply exactly
+		// once for each new revision, then remain request-free again.
+		for i := range 2 {
+			patch := []byte(fmt.Sprintf(`{"status":{"addresses":[{"type":"Hostname","value":"status-%d.example"}]}}`, i))
+			_, err := gateways.Patch(ctx, "skupper", types.MergePatchType, patch, metav1.PatchOptions{}, "status")
+			assert.NilError(t, err)
+			bare.observe()
+			before := gatewayPatches.Load()
+			assert.NilError(t, bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
+			assert.Equal(t, gatewayPatches.Load()-before, int64(1))
+			assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		}
+		bare.m.applyCache.Clear()
 		assertUnchanged(t, bare, 1, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 		external := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway", "metadata": map[string]interface{}{"name": "skupper", "namespace": "controller"}}}
 		for _, labels := range []map[string]string{{"external": "first"}, {"external": "second"}, nil} {
 			external.SetLabels(labels)
@@ -117,18 +143,18 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			assert.NilError(t, err, "empty authored metadata must not claim the entire labels map")
 			assert.Equal(t, actual.GetLabels()["external"], labels["external"])
 			assertUnchanged(t, bare, 1, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+			assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 		}
 		output, logs := captureScopeLogs(bare)
-		assertUnchanged(t, bare, 1, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 		records := logs()
-		assert.Equal(t, len(records), 2)
-		assert.Equal(t, records[0]["msg"], "Unchanged Gateway controller/skupper")
+		assert.Equal(t, len(records), 1)
+		assert.Equal(t, records[0]["msg"], "Reconciled Gateway scope")
 		assert.Equal(t, records[0]["level"], "DEBUG")
-		assert.Equal(t, records[0]["outcome"], "unchanged")
-		assert.Equal(t, records[1]["actions"], float64(1))
-		assert.Equal(t, records[1]["unchanged_actions"], float64(1))
-		assert.Equal(t, records[1]["changed_actions"], float64(0))
-		assert.Equal(t, records[1]["failed_actions"], float64(0))
+		assert.Equal(t, records[0]["actions"], float64(0))
+		assert.Equal(t, records[0]["unchanged_actions"], float64(0))
+		assert.Equal(t, records[0]["changed_actions"], float64(0))
+		assert.Equal(t, records[0]["failed_actions"], float64(0))
 		// Equal values can still acquire ownership, changing managedFields/RV.
 		external.SetLabels(map[string]string{"equal-policy": "same"})
 		data, err := json.Marshal(external)
@@ -149,7 +175,7 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		assert.Equal(t, records[0]["level"], "INFO")
 		assert.Equal(t, records[1]["changed_actions"], float64(1))
 		assert.Equal(t, records[1]["unchanged_actions"], float64(0))
-		assertUnchanged(t, bare, 1, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		assertUnchanged(t, bare, 0, func() error { return bare.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 	})
 	policy := h.m.context.(*testContext).policy
 	// Earlier templates change the value transiently; selectors see those
@@ -254,8 +280,14 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	h.observe()
 	assertSettled := func(h *scopeHarness) {
 		t.Helper()
+		// Cold caches or changed revisions require one successful evaluation.
+		h.observe()
+		assert.NilError(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
+		for _, name := range []string{"nodeport", "ingress", "gateway"} {
+			assert.NilError(t, h.run("test/"+name))
+		}
 		for i := 0; i < 4; i++ {
-			assertUnchanged(t, h, 3, func() error {
+			assertUnchanged(t, h, 0, func() error {
 				for _, name := range []string{"nodeport", "ingress", "gateway"} {
 					assert.NilError(t, h.run("test/"+name))
 					current := h.status(name)
@@ -273,6 +305,27 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	assertSettled(h)
 	assert.Equal(t, h.status("ingress").Labels["priority"], "final")
 	t.Log("defaulted Service/Ingress/TLSRoute/Gateway: stable stored revisions across repeated SSA and restart")
+	t.Run("TLSRoute success receipts follow status revisions and cache lifetime", func(t *testing.T) {
+		routes := clients.Dynamic.Resource(resource.TlsRouteResource()).Namespace("test")
+		run := func() error { return h.run("test/gateway") }
+		for i := range 2 {
+			patch := []byte(fmt.Sprintf(`{"status":{"parents":[{"parentRef":{"name":"skupper","namespace":"controller"},"controllerName":"example.com/test-controller","conditions":[{"type":"Accepted","status":"True","reason":"Accepted","message":"status-%d","observedGeneration":1,"lastTransitionTime":"2026-01-01T00:00:00Z"}]}]}}`, i))
+			_, err := routes.Patch(ctx, "gateway-alpha", types.MergePatchType, patch, metav1.PatchOptions{}, "status")
+			assert.NilError(t, err)
+			h.observe()
+			before := writes.Load()
+			assert.NilError(t, run())
+			assert.Equal(t, writes.Load()-before, int64(1), "only the revised TLSRoute must reapply")
+			assertUnchanged(t, h, 0, run)
+		}
+		h.m.applyCache.Clear()
+		assertUnchanged(t, h, 2, run)
+		assertUnchanged(t, h, 0, run)
+		fresh := newHarness(t, clients)
+		fresh.m.context.(*testContext).policy = h.m.context.(*testContext).policy.Snapshot("test")
+		assertUnchanged(t, fresh, 2, func() error { return fresh.run("test/gateway") })
+		assertUnchanged(t, fresh, 0, func() error { return fresh.run("test/gateway") })
+	})
 	policy = h.m.context.(*testContext).policy
 	for _, kind := range []string{"Gateway", "TLSRoute"} {
 		t.Run(kind+" external metadata", func(t *testing.T) {
@@ -283,7 +336,6 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			if kind == "TLSRoute" {
 				apiVersion, namespace, name, templateKind = "gateway.networking.k8s.io/v1alpha2", "test", "gateway-alpha", "TlsRoute"
 				gvr = resource.TlsRouteResource()
-				requests = 2
 				run = func() error { return h.run("test/gateway") }
 			}
 			objects := clients.Dynamic.Resource(gvr).Namespace(namespace)
@@ -355,7 +407,7 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			}
 			h.observe()
 			assert.NilError(t, run())
-			assertUnchanged(t, h, requests, run)
+			assertUnchanged(t, h, 0, run)
 		})
 	}
 	t.Run("stale SSA plans cannot be reported unchanged", func(t *testing.T) {
@@ -398,8 +450,9 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	extraListener := []byte(`{"apiVersion":"gateway.networking.k8s.io/v1","kind":"Gateway","metadata":{"name":"skupper","namespace":"controller"},"spec":{"listeners":[{"name":"extra","protocol":"HTTP","port":8080}]}}`)
 	_, err = gateways.Patch(ctx, "skupper", types.ApplyPatchType, extraListener, metav1.PatchOptions{FieldManager: "external-controller"})
 	assert.NilError(t, err)
+	assertUnchanged(t, h, 1, func() error { return h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 	for i := 0; i < 4; i++ {
-		assertUnchanged(t, h, 1, func() error { return h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+		assertUnchanged(t, h, 0, func() error { return h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
 	}
 	h.m.config.GatewayPort = 8443
 	h.observe()
@@ -503,10 +556,12 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	force := true
 	_, err = tls.Patch(ctx, "gateway-alpha", types.ApplyPatchType, patch, metav1.PatchOptions{FieldManager: "external-controller", Force: &force})
 	assert.NilError(t, err)
-	h.observe()
-	err = h.run("test/gateway")
-	assert.Assert(t, apierrors.IsConflict(err))
-	assert.Assert(t, !h.status("gateway").IsReady())
+	for range 2 {
+		h.observe()
+		err = h.run("test/gateway")
+		assert.Assert(t, apierrors.IsConflict(err), "failed TLSRoute applies must remain retryable")
+		assert.Assert(t, !h.status("gateway").IsReady())
+	}
 	assert.NilError(t, tls.Delete(ctx, "gateway-alpha", metav1.DeleteOptions{}))
 	h.settle("gateway")
 	t.Log("TLSRoute SSA removed stale hosts, rejected ownership conflict, recovered after deletion")
@@ -539,8 +594,12 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	_, err = gateways.Patch(ctx, "skupper", types.ApplyPatchType, patch, metav1.PatchOptions{FieldManager: "external-controller", Force: &force})
 	assert.NilError(t, err)
 	h.observe()
-	err = h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"})
-	assert.Assert(t, apierrors.IsConflict(err))
+	beforeFailedApplies := gatewayPatches.Load()
+	for range 2 {
+		err = h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"})
+		assert.Assert(t, apierrors.IsConflict(err))
+	}
+	assert.Equal(t, gatewayPatches.Load()-beforeFailedApplies, int64(2), "failed applies must never establish a receipt")
 	assert.NilError(t, gateways.Delete(ctx, "skupper", metav1.DeleteOptions{}))
 	h.observe()
 	assert.NilError(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
@@ -718,7 +777,7 @@ func TestRealAPIAccessGateway(t *testing.T) {
 			assert.Equal(t, value, "external")
 		}
 		for i := 0; i < 3; i++ {
-			assertUnchanged(t, h, 3, func() error {
+			assertUnchanged(t, h, 0, func() error {
 				assert.NilError(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
 				return h.run("test/schema-access")
 			})

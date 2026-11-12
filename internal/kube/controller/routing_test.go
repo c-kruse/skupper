@@ -38,7 +38,7 @@ func (m routingMetric) Inc() {
 func (m routingMetric) Dec()            {}
 func (m routingMetric) Observe(float64) { m.Inc() }
 
-type routingMetrics struct{ access, gateway, certificate, accessRetries atomic.Int64 }
+type routingMetrics struct{ access, gateway, certificate, accessRetries, accessNotifications atomic.Int64 }
 
 func (*routingMetrics) NewAddedMetric(string) watchers.CounterMetric      { return routingMetric{} }
 func (*routingMetrics) NewDepthMetric(string) watchers.GaugeMetric        { return routingMetric{} }
@@ -51,6 +51,8 @@ func (m *routingMetrics) NewRetriesMetric(kind string) watchers.CounterMetric {
 }
 func (m *routingMetrics) NewWorkDurationMetric(kind string) watchers.ObservableMetric {
 	switch kind {
+	case skupperv2alpha1.SchemeGroupVersion.String() + " SecuredAccess":
+		return routingMetric{&m.accessNotifications}
 	case "AccessScope":
 		return routingMetric{&m.access}
 	case "GatewayScope":

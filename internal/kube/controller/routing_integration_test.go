@@ -25,13 +25,17 @@ import (
 )
 
 type routingTransport struct {
-	next    http.RoundTripper
-	patches *atomic.Int64
+	next            http.RoundTripper
+	patches, writes *atomic.Int64
 }
 
 func (r routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == "PATCH" {
 		r.patches.Add(1)
+	}
+	switch req.Method {
+	case "POST", "PUT", "PATCH", "DELETE":
+		r.writes.Add(1)
 	}
 	return r.next.RoundTrip(req)
 }
@@ -48,8 +52,8 @@ func TestRealAPIRoutingConvergence(t *testing.T) {
 	cfg, err := env.Start()
 	assert.NilError(t, err)
 	t.Cleanup(func() { assert.NilError(t, env.Stop()) })
-	var patches atomic.Int64
-	cfg.WrapTransport = func(next http.RoundTripper) http.RoundTripper { return routingTransport{next, &patches} }
+	var patches, writes atomic.Int64
+	cfg.WrapTransport = func(next http.RoundTripper) http.RoundTripper { return routingTransport{next, &patches, &writes} }
 	clients, err := internalclient.NewClientFromRestConfig(cfg, "controller")
 	assert.NilError(t, err)
 	ctx := context.Background()
@@ -81,14 +85,14 @@ func TestRealAPIRoutingConvergence(t *testing.T) {
 		}
 		return true
 	})
-	quiet := func(after int64) int64 {
-		last, changed := patches.Load(), time.Now()
+	quiet := func() int64 {
+		last, changed := writes.Load(), time.Now()
 		routingUntil(t, c, "bounded informer feedback followed by quiet interval", func() bool {
-			now := patches.Load()
+			now := writes.Load()
 			if now != last {
 				last, changed = now, time.Now()
 			}
-			return now > after && time.Since(changed) >= 500*time.Millisecond
+			return time.Since(changed) >= 500*time.Millisecond
 		})
 		return last
 	}
@@ -111,15 +115,22 @@ func TestRealAPIRoutingConvergence(t *testing.T) {
 		}
 		return result
 	}
-	last := quiet(-1)
+	last := quiet()
+	lastPatches := patches.Load()
 	before := versions()
 	for i := 0; i < 3; i++ {
+		notificationsBefore := metrics.accessNotifications.Load()
 		accessBefore, gatewayBefore := metrics.access.Load(), metrics.gateway.Load()
-		next := quiet(last)
-		assert.Assert(t, next-last < 100, "unbounded PATCH feedback: %d", next-last)
+		// Prove real informer/resync delivery and both queued scope families
+		// execute even when successful receipts suppress all settled writes.
+		routingUntil(t, c, "resync reaches resource callbacks and queued scopes", func() bool {
+			return metrics.accessNotifications.Load() > notificationsBefore && metrics.access.Load() > accessBefore && metrics.gateway.Load() > gatewayBefore
+		})
+		next := quiet()
+		assert.Equal(t, next, last, "settled resync must attempt zero mutations")
+		assert.Equal(t, patches.Load(), lastPatches, "settled SSA must use success receipts")
 		assert.DeepEqual(t, versions(), before)
-		t.Logf("resync %d: Access scopes=%d Gateway scopes=%d PATCH attempts=%d changed stored RVs=0; >=500ms quiet", i+1, metrics.access.Load()-accessBefore, metrics.gateway.Load()-gatewayBefore, next-last)
-		last = next
+		t.Logf("resync %d: Access callbacks=%d Access scopes=%d Gateway scopes=%d mutation attempts=0 PATCH attempts=0 changed stored RVs=0; >=500ms quiet", i+1, metrics.accessNotifications.Load()-notificationsBefore, metrics.access.Load()-accessBefore, metrics.gateway.Load()-gatewayBefore)
 	}
 	// A foreign Gateway is deliberately outside the named watch.
 	foreign, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
@@ -148,7 +159,7 @@ func TestRealAPIRoutingConvergence(t *testing.T) {
 		current, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
 		return err == nil && current.GetUID() != original.GetUID()
 	})
-	quiet(-1)
+	quiet()
 	// Persist legacy-labeled output, delete its definition while stopped, then
 	// reconstruct cleanup exclusively from the fresh unfiltered inventories.
 	stop()
