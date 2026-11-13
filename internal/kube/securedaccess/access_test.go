@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 
 	routev1 "github.com/openshift/api/route/v1"
@@ -527,6 +528,60 @@ func TestProviderRemoval(t *testing.T) {
 	svcs, err := h.clients.Kube.CoreV1().Services("test").List(ctx, metav1.ListOptions{})
 	assert.NilError(t, err)
 	assert.Equal(t, len(svcs.Items), 0)
+}
+
+func TestProviderNameCamping(t *testing.T) {
+	ctx := context.Background()
+	for _, provider := range []string{"route", "contour-http-proxy", "gateway"} {
+		t.Run(provider, func(t *testing.T) {
+			h := newHarness(t, nil)
+			sa := testAccess(provider)
+			sa.Spec.Ports = sa.Spec.Ports[:1]
+			h.put(sa)
+			var original runtime.Object
+			gvr := httpProxyResource
+			switch provider {
+			case "route":
+				route := desiredRouteForPort(sa, sa.Spec.Ports[0])
+				route.OwnerReferences = nil
+				_, err := h.clients.Route.RouteV1().Routes("test").Create(ctx, route, metav1.CreateOptions{})
+				assert.NilError(t, err)
+				original = route
+			case "contour-http-proxy", "gateway":
+				obj := desiredTLSRoute(sa, sa.Spec.Ports[0], "controller", "gateway.example")
+				if provider == "contour-http-proxy" {
+					obj.SetGroupVersionKind(httpProxyGVK)
+					obj.Object["spec"] = map[string]interface{}{}
+					proxy := desiredHttpProxies("test.proxy.example", sa)[0]
+					assert.NilError(t, proxy.writeToContourProxy(obj))
+				} else {
+					gvr = resource.TlsRouteResource()
+					_, err := h.clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller").Create(ctx, desiredGateway("controller", "skupper-controller", testConfig()), metav1.CreateOptions{})
+					assert.NilError(t, err)
+				}
+				obj.SetOwnerReferences(nil)
+				_, err := h.clients.Dynamic.Resource(gvr).Namespace("test").Create(ctx, obj, metav1.CreateOptions{})
+				assert.NilError(t, err)
+				original = obj
+			}
+			h.observe()
+			assert.NilError(t, h.run(sa.Key()))
+			assert.Assert(t, strings.Contains(h.status(sa.Name).Status.Message, "conflicting ownership"))
+			assert.NilError(t, h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(ctx, sa.Name, metav1.DeleteOptions{}))
+			h = newHarness(t, h.clients)
+			h.observe()
+			assert.NilError(t, h.run(sa.Key()))
+			if provider == "route" {
+				actual, err := h.clients.Route.RouteV1().Routes("test").Get(ctx, "edge-alpha", metav1.GetOptions{})
+				assert.NilError(t, err)
+				assert.DeepEqual(t, actual, original)
+			} else {
+				actual, err := h.clients.Dynamic.Resource(gvr).Namespace("test").Get(ctx, "edge-alpha", metav1.GetOptions{})
+				assert.NilError(t, err)
+				assert.DeepEqual(t, actual, original)
+			}
+		})
+	}
 }
 
 func TestEnsureReplacementBeforeObservation(t *testing.T) {
