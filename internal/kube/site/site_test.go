@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
@@ -22,7 +23,139 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+func TestListenerAccessServiceCollision(t *testing.T) {
+	for _, siteFirst := range []bool{true, false} {
+		name := "Access first"
+		if siteFirst {
+			name = "Site first"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, err := newSiteMocks("test", nil, nil, "", false)
+			assert.NilError(t, err)
+			ctx := context.Background()
+			exposed := &ExposedPortSet{Host: "shared", Ports: map[string]Port{"listener": {Name: "listener", Port: 1234, TargetPort: 2345, Protocol: "TCP"}}}
+			if siteFirst {
+				assert.NilError(t, s.Expose(exposed))
+			}
+			access := securedaccess.NewSecuredAccessManager(s.clients, nil, &securedaccess.Config{EnabledAccessTypes: []string{"local"}}, nil)
+			w := securedaccess.NewSecuredAccessResourceWatcher(access)
+			w.WatchResources(s.clients, "test")
+			w.WatchSecuredAccesses(s.clients, "test", nil)
+			accessCache := s.clients.WatchSecuredAccesses("test", nil)
+			_, err = s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test").Create(ctx, &skupperv2alpha1.SecuredAccess{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test", UID: "access-uid"},
+				Spec:       skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "backend"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "access", Port: 8080, TargetPort: 8181}}},
+			}, metav1.CreateOptions{})
+			assert.NilError(t, err)
+			stop := make(chan struct{})
+			t.Cleanup(func() { close(stop) })
+			s.clients.StartWatchers(stop)
+			assert.Assert(t, s.clients.WaitForCacheSync(stop))
+			err = wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+				if err := access.Handle(watchers.ResourceChange{Key: "test/shared"}); err != nil {
+					return false, err
+				}
+				sa, err := s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test").Get(ctx, "shared", metav1.GetOptions{})
+				if err != nil {
+					return false, err
+				}
+				if siteFirst {
+					return sa.Status.Message == `Service "shared" has conflicting ownership`, nil
+				}
+				return sa.IsReady(), nil
+			})
+			assert.NilError(t, err)
+			svcs := s.clients.GetKubeClient().CoreV1().Services("test")
+			before, err := svcs.Get(ctx, "shared", metav1.GetOptions{})
+			assert.NilError(t, err)
+			if siteFirst {
+				assert.Equal(t, before.OwnerReferences[0].Kind, "Site")
+				assert.Equal(t, before.Spec.Ports[0].Port, int32(1234))
+				assert.NilError(t, access.Delete("test", "shared"))
+				assert.NilError(t, wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+					observed, err := accessCache.Get("test/shared")
+					return observed == nil, err
+				}))
+				assert.NilError(t, access.Handle(watchers.ResourceChange{Key: "test/shared"}))
+			} else {
+				assert.Equal(t, before.OwnerReferences[0].Kind, "SecuredAccess")
+				assert.ErrorContains(t, s.Expose(exposed), "conflicting ownership")
+				assert.NilError(t, s.Unexpose("shared"))
+				// Even a copied generic listener marker cannot authorize deletion.
+				before.Labels["internal.skupper.io/listener"] = "listener"
+				before, err = svcs.Update(ctx, before, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				assert.NilError(t, s.Unexpose("shared"))
+				assert.NilError(t, s.CheckListenerService(before))
+			}
+			after, err := svcs.Get(ctx, "shared", metav1.GetOptions{})
+			assert.NilError(t, err)
+			assert.DeepEqual(t, after, before)
+		})
+	}
+}
+
+func TestListenerServiceLabelDrift(t *testing.T) {
+	for _, owner := range []string{"current Site", "stale Site", "Access", "mixed", "unowned"} {
+		t.Run(owner, func(t *testing.T) {
+			s, err := newSiteMocks("test", nil, nil, "", false)
+			assert.NilError(t, err)
+			ctx := context.Background()
+			exposed := &ExposedPortSet{Host: "drift", Ports: map[string]Port{"listener": {Name: "listener", Port: 8080, TargetPort: 8080, Protocol: "TCP"}}}
+			assert.NilError(t, s.Expose(exposed))
+			services := s.clients.GetKubeClient().CoreV1().Services("test")
+			before, err := services.Get(ctx, "drift", metav1.GetOptions{})
+			assert.NilError(t, err)
+			before.UID = "service-uid" // Fake API does not allocate identity.
+			delete(before.Labels, "internal.skupper.io/listener")
+			switch owner {
+			case "stale Site":
+				before.OwnerReferences[0].UID = "previous-site-uid"
+			case "Access":
+				before.OwnerReferences[0].Kind = "SecuredAccess"
+			case "mixed":
+				before.OwnerReferences = append(before.OwnerReferences, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign-uid"})
+			case "unowned":
+				before.OwnerReferences = nil
+			}
+			before, err = services.Update(ctx, before, metav1.UpdateOptions{})
+			assert.NilError(t, err)
+			// Label-less resources must not be discovered/deleted as stale
+			// listeners, even when the current Site owns them.
+			assert.NilError(t, s.CheckListenerService(before))
+			assert.NilError(t, s.Unexpose("drift"))
+			retained, err := services.Get(ctx, "drift", metav1.GetOptions{})
+			assert.NilError(t, err)
+			assert.DeepEqual(t, retained, before)
+			exposed.Ports["listener"] = Port{Name: "listener", Port: 8081, TargetPort: 8080, Protocol: "TCP"}
+			err = s.Expose(exposed)
+			if owner == "current Site" {
+				assert.NilError(t, err)
+				after, err := services.Get(ctx, "drift", metav1.GetOptions{})
+				assert.NilError(t, err)
+				assert.Equal(t, after.UID, before.UID)
+				assert.Equal(t, after.Labels["internal.skupper.io/listener"], "listener")
+				assert.Equal(t, after.Spec.Ports[0].Port, int32(8081))
+				assert.Equal(t, after.Spec.Ports[0].TargetPort.IntVal, int32(8080))
+				assert.DeepEqual(t, after.OwnerReferences, before.OwnerReferences)
+			} else {
+				assert.ErrorContains(t, err, "conflicting ownership")
+				// A copied label cannot authorize either deletion path.
+				before.Labels["internal.skupper.io/listener"] = "listener"
+				before, err = services.Update(ctx, before, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				assert.NilError(t, s.CheckListenerService(before))
+				assert.NilError(t, s.Unexpose("drift"))
+				after, err := services.Get(ctx, "drift", metav1.GetOptions{})
+				assert.NilError(t, err)
+				assert.DeepEqual(t, after, before)
+			}
+		})
+	}
+}
 
 func TestSite_Recover(t *testing.T) {
 	type args struct {

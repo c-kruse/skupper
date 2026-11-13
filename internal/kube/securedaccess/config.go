@@ -58,7 +58,7 @@ func (c *Config) Verify() error {
 
 func (c *Config) getDefaultAccessType(clients internalclient.Clients) string {
 	if c.DefaultAccessType == "" {
-		if clients.GetRouteClient() != nil && c.isEnabled(ACCESS_TYPE_ROUTE) {
+		if clients.GetRouteInterface() != nil && c.isEnabled(ACCESS_TYPE_ROUTE) {
 			return ACCESS_TYPE_ROUTE
 		}
 		if c.isEnabled(ACCESS_TYPE_LOADBALANCER) {
