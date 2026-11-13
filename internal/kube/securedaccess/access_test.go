@@ -84,16 +84,17 @@ func newHarness(t *testing.T, clients *internalclient.KubeClient) *scopeHarness 
 		assert.NilError(t, err)
 	}
 	m := NewSecuredAccessManager(clients, ptrConfig(testConfig()), &testContext{policy: labels.NewLabelsAndAnnotations("controller")})
-	w := NewSecuredAccessResourceWatcher(m)
+	w := &ResourceCaches{}
+	m.BindCaches(w)
 	h := &scopeHarness{t: t, m: m, clients: clients, stores: map[string]cache.Store{}}
-	w.serviceWatcher = testWatcher[*corev1.Service]("Service", h.stores)
-	w.ingressWatcher = testWatcher[*networkingv1.Ingress]("Ingress", h.stores)
-	w.routeWatcher = testWatcher[*routev1.Route]("Route", h.stores)
-	w.securedAccessWatcher = testWatcher[*saapi.SecuredAccess]("SecuredAccess", h.stores)
-	w.certificateWatcher = testWatcher[*saapi.Certificate]("Certificate", h.stores)
-	w.httpProxyWatcher = testWatcher[*unstructured.Unstructured]("HTTPProxy", h.stores)
-	w.tlsRouteWatcher = testWatcher[*unstructured.Unstructured]("TLSRoute", h.stores)
-	w.gatewayWatcher = testWatcher[*unstructured.Unstructured]("Gateway", h.stores)
+	w.Services = testWatcher[*corev1.Service]("Service", h.stores)
+	w.Ingresses = testWatcher[*networkingv1.Ingress]("Ingress", h.stores)
+	w.Routes = testWatcher[*routev1.Route]("Route", h.stores)
+	w.Accesses = testWatcher[*saapi.SecuredAccess]("SecuredAccess", h.stores)
+	w.Certificates = testWatcher[*saapi.Certificate]("Certificate", h.stores)
+	w.HTTPProxies = testWatcher[*unstructured.Unstructured]("HTTPProxy", h.stores)
+	w.TLSRoutes = testWatcher[*unstructured.Unstructured]("TLSRoute", h.stores)
+	w.Gateways = testWatcher[*unstructured.Unstructured]("Gateway", h.stores)
 	return h
 }
 func ptrConfig(c Config) *Config { return &c }
@@ -153,12 +154,12 @@ func (h *scopeHarness) put(sa *saapi.SecuredAccess) {
 func (h *scopeHarness) run(key string) error { return h.m.Handle(watchers.ResourceChange{Key: key}) }
 func (h *scopeHarness) runCertificates() error {
 	keys := map[string]bool{}
-	for _, sa := range h.m.watcher.securedAccessWatcher.List() {
-		if target := certificateTarget(sa); target != "" {
+	for _, sa := range h.m.watcher.Accesses.List() {
+		if target := CertificateTarget(sa); target != "" {
 			keys[sa.Namespace+"/"+target] = true
 		}
 	}
-	for _, c := range h.m.watcher.certificateWatcher.List() {
+	for _, c := range h.m.watcher.Certificates.List() {
 		keys[c.Namespace+"/"+c.Name] = true
 	}
 	var ordered []string
@@ -363,7 +364,7 @@ func TestScopeEmptyAccessType(t *testing.T) {
 			}
 			h := newHarness(t, clients)
 			if !tc.hasRoute {
-				h.m.watcher.routeWatcher = nil
+				h.m.watcher.Routes = nil
 			}
 			sa := testAccess("")
 			h.put(sa)
@@ -386,7 +387,7 @@ func TestScopeFailuresRetryAndOwnership(t *testing.T) {
 	ctx := context.Background()
 	t.Run("Route API unavailable", func(t *testing.T) {
 		h := newHarness(t, nil)
-		h.m.watcher.routeWatcher = nil
+		h.m.watcher.Routes = nil
 		h.put(testAccess("route"))
 		h.settle("edge")
 		assert.Assert(t, !h.status("edge").IsReady())

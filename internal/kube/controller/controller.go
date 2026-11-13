@@ -47,7 +47,8 @@ type Controller struct {
 	sites                           map[string]*site.Site
 	startGrantServer                func()
 	accessMgr                       *securedaccess.SecuredAccessManager
-	accessRecovery                  *securedaccess.SecuredAccessResourceWatcher
+	accessCaches                    *securedaccess.ResourceCaches
+	certificateWatcher              *watchers.CertificateWatcher
 	certMgr                         *certificates.CertificateManagerImpl
 	siteSizing                      *sizing.Registry
 	siteSizingWatcher               *watchers.ConfigMapWatcher
@@ -131,37 +132,10 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.self.Namespace = config.Namespace
 	controller.self.Version = version.Version
 
-	controller.siteWatcher = controller.eventProcessor.WatchSites(config.WatchNamespace, filter(controller, controller.checkSite))
-	controller.listenerWatcher = controller.eventProcessor.WatchListeners(config.WatchNamespace, filter(controller, controller.checkListener))
-	controller.multiKeyListenerWatcher = controller.eventProcessor.WatchMultiKeyListeners(config.WatchNamespace, filter(controller, controller.checkMultiKeyListener))
-	controller.eventProcessor.WatchServices(listenerServices(), config.WatchNamespace, filter(controller, controller.checkListenerService))
-	controller.serviceWatcher = controller.eventProcessor.WatchServices(sansSkupperListenerServices(), config.WatchNamespace, filter(controller, controller.checkObservedService))
-	controller.connectorWatcher = controller.eventProcessor.WatchConnectors(config.WatchNamespace, filter(controller, controller.checkConnector))
-	controller.linkAccessWatcher = controller.eventProcessor.WatchRouterAccesses(config.WatchNamespace, filter(controller, controller.checkRouterAccess))
-	controller.attachedConnectorWatcher = controller.eventProcessor.WatchAttachedConnectors(config.WatchNamespace, filter(controller, controller.checkAttachedConnector))
-	controller.attachedConnectorBindingWatcher = controller.eventProcessor.WatchAttachedConnectorBindings(config.WatchNamespace, filter(controller, controller.checkAttachedConnectorBinding))
-	controller.eventProcessor.WatchLinks(config.WatchNamespace, filter(controller, controller.checkLink))
-	controller.networkStatusWatcher = controller.eventProcessor.WatchConfigMaps(skupperNetworkStatus(), config.WatchNamespace, filter(controller, controller.networkStatusUpdate))
-	controller.eventProcessor.WatchConfigMaps(skupperRouterConfig(), config.WatchNamespace, filter(controller, controller.routerConfigUpdate))
-	controller.eventProcessor.WatchAccessTokens(config.WatchNamespace, filter(controller, controller.checkAccessToken))
-	controller.eventProcessor.WatchPods("skupper.io/component=router,skupper.io/type=site", config.WatchNamespace, filter(controller, controller.routerPodEvent))
-	controller.siteSizingWatcher = controller.eventProcessor.WatchConfigMaps(skupperSiteSizingConfig(), config.Namespace, filter(controller, controller.siteSizing.Update))
-	controller.namespaces.watch(controller.eventProcessor, config.WatchNamespace)
-	controller.labellingWatcher = controller.eventProcessor.WatchConfigMaps(labelling(), config.WatchNamespace, controller.labelling.Update)
-
 	controller.certMgr = certificates.NewCertificateManager(controller.eventProcessor)
 	controller.certMgr.SetControllerContext(controller)
-	controller.certMgr.Watch(config.WatchNamespace)
-
 	controller.accessMgr = securedaccess.NewSecuredAccessManager(controller.eventProcessor, config.SecuredAccessConfig, controller)
-	controller.accessRecovery = securedaccess.NewSecuredAccessResourceWatcher(controller.accessMgr)
-	controller.accessRecovery.WatchResources(controller.eventProcessor, config.WatchNamespace)
-	controller.accessRecovery.WatchSecuredAccesses(controller.eventProcessor, config.WatchNamespace, controller.checkSecuredAccess)
-	controller.accessRecovery.WatchGateway(controller.eventProcessor, config.Namespace)
-
-	controller.startGrantServer = grants.Initialise(controller.eventProcessor, config.Namespace, config.WatchNamespace, config.GrantConfig, controller.generateLinkConfig, controller.IsControlled)
-
-	controller.eventProcessor.WatchConfigMaps(skupperLogConfig(), config.Namespace, controller.logConfigUpdate)
+	controller.registerRouting(config)
 
 	return controller, nil
 }

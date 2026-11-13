@@ -31,6 +31,33 @@ changed to determine which scope(s) it may effect. For example, a Link in
 namespace "east" concerns the Site scope for namespace "east". Relevant scopes
 are then queued with their handler, and the resource handler returns.
 
+Static registration and Certificate/SecuredAccess dependency routing live in
+`internal/kube/controller/routing.go`, entered through `registerRouting`.
+Informer intake queues a resource handler and namespace/name key; that handler
+reads the **current cache**, including nil after deletion. It acknowledges
+Certificate synchronous authoring observations before enqueueing stable scope
+handlers on the same serial EventProcessor. Domain packages own cache snapshots,
+derivation, plans, execution, authorization and synchronous intent authoring;
+they do not register these scopes' watches or route invalidations.
+
+This is an incremental boundary, not a Site/Grant migration. Legacy Site resource
+callbacks (including Access endpoint propagation to RouterAccess), filtered
+Service watches, recovery's second Pod sync, remembered mappings and dynamic
+subscriptions retain their existing behavior. Grants still register their
+internal watches through one explicit call here. Only the equivalent broad
+Certificate inventories are shared; optional providers are registered at setup
+and require restart after installation. An unavailable cache is not an empty
+synced inventory. Existing shutdown/dynamic subscription lifetimes are unchanged.
+
+Access routing explicitly includes the notified key when its definition is
+absent and discovers old Certificate targets and missing owners from unfiltered
+surviving outputs. After five queue requeues, recovery needs another notification,
+a surviving input/output resync, or restart inventory; deleted definitions do
+not resync. Only startup and the named controller-namespace `skupper` Gateway
+watch wake the singleton Gateway writer. Equal-resourceVersion notifications
+remain enabled for time-based renewal and eventual policy/control propagation;
+this consolidation does not add immediate policy/control fanout.
+
 ### Scope Handlers
 
 Scope handlers follow a structure meant to reduce potential for side effects,

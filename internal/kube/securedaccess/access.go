@@ -32,7 +32,7 @@ type SecuredAccessManager struct {
 	context           ControllerContext
 	config            Config
 	defaultAccessType string
-	watcher           *SecuredAccessResourceWatcher
+	watcher           *ResourceCaches
 	gateway           *gatewayScope
 	certificates      *accessCertificateScope
 	logger            *slog.Logger

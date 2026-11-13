@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"maps"
 	"testing"
-	"time"
 
 	"github.com/skupperproject/skupper/internal/kube/certificates"
 	fakeclient "github.com/skupperproject/skupper/internal/kube/client/fake"
@@ -23,63 +22,82 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestListenerAccessServiceCollision(t *testing.T) {
-	for _, siteFirst := range []bool{true, false} {
-		name := "Access first"
-		if siteFirst {
-			name = "Site first"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		siteFirst bool
+	}{
+		{name: "Site first", siteFirst: true},
+		{name: "Access first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s, err := newSiteMocks("test", nil, nil, "", false)
 			assert.NilError(t, err)
 			ctx := context.Background()
 			exposed := &ExposedPortSet{Host: "shared", Ports: map[string]Port{"listener": {Name: "listener", Port: 1234, TargetPort: 2345, Protocol: "TCP"}}}
-			if siteFirst {
+			if tc.siteFirst {
 				assert.NilError(t, s.Expose(exposed))
 			}
+			// Unstarted informers: observe copies API state into the Access caches.
+			services := cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Service{}, 0, cache.Indexers{})
+			accesses := cache.NewSharedIndexInformer(&cache.ListWatch{}, &skupperv2alpha1.SecuredAccess{}, 0, cache.Indexers{})
+			certificates := cache.NewSharedIndexInformer(&cache.ListWatch{}, &skupperv2alpha1.Certificate{}, 0, cache.Indexers{})
 			access := securedaccess.NewSecuredAccessManager(s.clients, &securedaccess.Config{EnabledAccessTypes: []string{"local"}}, nil)
-			w := securedaccess.NewSecuredAccessResourceWatcher(access)
-			w.WatchResources(s.clients, "test")
-			w.WatchSecuredAccesses(s.clients, "test", nil)
-			accessCache := s.clients.WatchSecuredAccesses("test", nil)
-			_, err = s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test").Create(ctx, &skupperv2alpha1.SecuredAccess{
+			access.BindCaches(&securedaccess.ResourceCaches{
+				Services:     watchers.NewResourceWatcher[*corev1.Service](nil, corev1.SchemeGroupVersion, services),
+				Accesses:     watchers.NewResourceWatcher[*skupperv2alpha1.SecuredAccess](nil, skupperv2alpha1.SchemeGroupVersion, accesses),
+				Certificates: watchers.NewResourceWatcher[*skupperv2alpha1.Certificate](nil, skupperv2alpha1.SchemeGroupVersion, certificates),
+			})
+			svcs := s.clients.GetKubeClient().CoreV1().Services("test")
+			definitions := s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test")
+			observe := func() {
+				t.Helper()
+				svcList, err := svcs.List(ctx, metav1.ListOptions{})
+				assert.NilError(t, err)
+				var observed []interface{}
+				for i := range svcList.Items {
+					observed = append(observed, &svcList.Items[i])
+				}
+				assert.NilError(t, services.GetStore().Replace(observed, ""))
+				saList, err := definitions.List(ctx, metav1.ListOptions{})
+				assert.NilError(t, err)
+				observed = nil
+				for i := range saList.Items {
+					observed = append(observed, &saList.Items[i])
+				}
+				assert.NilError(t, accesses.GetStore().Replace(observed, ""))
+			}
+			reconcile := func() {
+				t.Helper()
+				for i := 0; i < 2; i++ {
+					observe()
+					assert.NilError(t, access.Handle(watchers.ResourceChange{Key: "test/shared"}))
+				}
+			}
+			_, err = definitions.Create(ctx, &skupperv2alpha1.SecuredAccess{
 				ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test", UID: "access-uid"},
-				Spec:       skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "backend"}, Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "access", Port: 8080, TargetPort: 8181}}},
+				Spec: skupperv2alpha1.SecuredAccessSpec{AccessType: "local", Selector: map[string]string{"app": "backend"},
+					Ports: []skupperv2alpha1.SecuredAccessPort{{Name: "access", Port: 8080, TargetPort: 8181}}},
 			}, metav1.CreateOptions{})
 			assert.NilError(t, err)
-			stop := make(chan struct{})
-			t.Cleanup(func() { close(stop) })
-			s.clients.StartWatchers(stop)
-			assert.Assert(t, s.clients.WaitForCacheSync(stop))
-			err = wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
-				if err := access.Handle(watchers.ResourceChange{Key: "test/shared"}); err != nil {
-					return false, err
-				}
-				sa, err := s.clients.GetSkupperClient().SkupperV2alpha1().SecuredAccesses("test").Get(ctx, "shared", metav1.GetOptions{})
-				if err != nil {
-					return false, err
-				}
-				if siteFirst {
-					return sa.Status.Message == `Service "shared" has conflicting ownership`, nil
-				}
-				return sa.IsReady(), nil
-			})
+			reconcile()
+			sa, err := definitions.Get(ctx, "shared", metav1.GetOptions{})
 			assert.NilError(t, err)
-			svcs := s.clients.GetKubeClient().CoreV1().Services("test")
+			if tc.siteFirst {
+				assert.Equal(t, sa.Status.Message, `Service "shared" has conflicting ownership`)
+			} else {
+				assert.Assert(t, sa.IsReady())
+			}
 			before, err := svcs.Get(ctx, "shared", metav1.GetOptions{})
 			assert.NilError(t, err)
-			if siteFirst {
+			if tc.siteFirst {
 				assert.Equal(t, before.OwnerReferences[0].Kind, "Site")
 				assert.Equal(t, before.Spec.Ports[0].Port, int32(1234))
 				assert.NilError(t, access.Delete("test", "shared"))
-				assert.NilError(t, wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
-					observed, err := accessCache.Get("test/shared")
-					return observed == nil, err
-				}))
-				assert.NilError(t, access.Handle(watchers.ResourceChange{Key: "test/shared"}))
+				reconcile()
 			} else {
 				assert.Equal(t, before.OwnerReferences[0].Kind, "SecuredAccess")
 				assert.ErrorContains(t, s.Expose(exposed), "conflicting ownership")
