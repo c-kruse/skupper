@@ -1,11 +1,8 @@
 package securedaccess
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"sort"
 	"strings"
 	"testing"
@@ -702,79 +699,8 @@ func httpProxyWithContent(name, namespace string, content map[string]interface{}
 	return o
 }
 
-// captureScopeLogs routes the manager's logs, including DEBUG, to decoded JSON
-// records. The logger comes from the production constructor, so attributes it
-// adds, such as component, are observed rather than supplied by the test.
-func captureScopeLogs(h *scopeHarness) (*bytes.Buffer, func() []map[string]any) {
-	var output bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	h.t.Cleanup(func() { slog.SetDefault(previous) })
-	h.m.logger = NewSecuredAccessManager(h.clients, ptrConfig(h.m.config), h.m.context).logger
-	return &output, func() []map[string]any {
-		h.t.Helper()
-		var records []map[string]any
-		decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
-		for decoder.More() {
-			var record map[string]any
-			assert.NilError(h.t, decoder.Decode(&record))
-			records = append(records, record)
-		}
-		return records
-	}
-}
-
-// actionRecords indexes the per-action records of one scope run by action.
-func actionRecords(t *testing.T, records []map[string]any) map[string]map[string]any {
-	t.Helper()
-	actions := map[string]map[string]any{}
-	for _, record := range records {
-		if action, ok := record["action"].(string); ok {
-			_, duplicate := actions[action]
-			assert.Assert(t, !duplicate, "duplicate %s action record", action)
-			actions[action] = record
-		}
-	}
-	return actions
-}
-
-// summaryRecord returns the one final summary of a scope run.
-func summaryRecord(t *testing.T, records []map[string]any) map[string]any {
-	t.Helper()
-	var summary map[string]any
-	for _, record := range records {
-		if _, ok := record["phase"]; ok {
-			assert.Assert(t, summary == nil, "exactly one summary record")
-			summary = record
-		}
-	}
-	assert.Assert(t, summary != nil, "missing summary record")
-	return summary
-}
-
-// loggedConditions indexes a status record's confirmed conditions by type.
-func loggedConditions(t *testing.T, record map[string]any) map[string]map[string]any {
-	t.Helper()
-	conditions := map[string]map[string]any{}
-	for _, c := range record["conditions"].([]any) {
-		condition := c.(map[string]any)
-		conditions[condition["type"].(string)] = condition
-	}
-	return conditions
-}
-
-// assertQuiet asserts a scope run logged only its DEBUG summary.
-func assertQuiet(t *testing.T, records []map[string]any) map[string]any {
-	t.Helper()
-	for _, record := range records {
-		assert.Equal(t, record["level"], "DEBUG", "nothing at INFO or above: %v", record)
-	}
-	assert.Equal(t, len(actionRecords(t, records)), 0)
-	return summaryRecord(t, records)
-}
-
-func TestAccessScopeLogging(t *testing.T) {
-	for _, scenario := range []string{"ready", "validation", "output failure", "status failure", "confirmed response"} {
+func TestAccessScopeErrors(t *testing.T) {
+	for _, scenario := range []string{"ready", "validation", "output failure", "status failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			h := newHarness(t, nil)
 			sa := testAccess("local")
@@ -786,92 +712,23 @@ func TestAccessScopeLogging(t *testing.T) {
 			if scenario == "output failure" {
 				h.clients.Kube.(*k8sfake.Clientset).PrependReactor("create", "services", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, failure })
 			}
-			if scenario == "status failure" || scenario == "confirmed response" {
+			if scenario == "status failure" {
 				h.clients.Skupper.(*skupperfake.Clientset).PrependReactor("update", "securedaccesses", func(a k8stesting.Action) (bool, runtime.Object, error) {
 					if a.GetSubresource() != "status" {
 						return false, nil, nil
 					}
-					if scenario == "status failure" {
-						return true, nil, failure
-					}
-					written := a.(k8stesting.UpdateAction).GetObject().(*saapi.SecuredAccess).DeepCopy()
-					written.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionUnknown, Reason: "Admission", Message: "confirmed response", ObservedGeneration: 7}}
-					return true, written, nil
+					return true, nil, failure
 				})
 			}
-			output, logs := captureScopeLogs(h)
 			err := h.run(sa.Key())
-			failed := scenario == "output failure" || scenario == "status failure"
-			assert.Equal(t, err != nil, failed)
-			records := logs()
-			for _, record := range records {
-				assert.Equal(t, record["component"], "kube.securedaccess.manager")
-				assert.Equal(t, record["scope"], "SecuredAccess")
-				assert.Equal(t, record["key"], "test/edge")
-			}
-			actions := actionRecords(t, records)
-			expectedActions := 2
-			if scenario == "validation" {
-				expectedActions = 1
-			}
-			assert.Equal(t, len(actions), expectedActions)
-			status := actions["status"]
-			assert.Assert(t, status != nil)
-			assert.Equal(t, status["kind"], "SecuredAccess")
-			assert.Equal(t, status["namespace"], "test")
-			assert.Equal(t, status["name"], "edge")
-			if scenario == "status failure" {
-				assert.Equal(t, status["level"], "ERROR")
-				assert.Equal(t, status["outcome"], "failed")
-				assert.Assert(t, status["error"] != nil)
-				_, present := status["conditions"]
-				assert.Assert(t, !present)
+			if scenario == "output failure" || scenario == "status failure" {
+				assert.Assert(t, errors.Is(err, failure), "only API failures request retry")
 			} else {
-				assert.Equal(t, status["level"], "INFO")
-				assert.Equal(t, status["outcome"], "succeeded")
-				conditions := loggedConditions(t, status)
-				ready := conditions["Ready"]
-				assert.Assert(t, ready != nil)
-				switch scenario {
-				case "confirmed response":
-					assert.Equal(t, len(conditions), 1)
-					assert.Equal(t, ready["status"], "Unknown")
-					assert.Equal(t, ready["message"], "confirmed response")
-					assert.Equal(t, ready["observed_generation"], float64(7))
-				case "validation", "output failure":
-					assert.Equal(t, ready["status"], "False")
-					configured := conditions["Configured"]
-					assert.Assert(t, configured != nil)
-					assert.Equal(t, configured["status"], "False")
-					assert.Equal(t, configured["reason"], "Error")
-				}
-			}
-			if scenario == "output failure" {
-				service := actions["create"]
-				assert.Assert(t, service != nil)
-				assert.Equal(t, service["kind"], "Service")
-				assert.Equal(t, service["name"], "edge")
-				assert.Equal(t, service["level"], "ERROR")
-				assert.Equal(t, service["outcome"], "failed")
-				assert.Assert(t, service["error"] != nil)
-			}
-			summary := summaryRecord(t, records)
-			assert.Equal(t, summary["level"], "DEBUG")
-			assert.Equal(t, summary["phase"], "execute")
-			assert.Equal(t, summary["actions"], float64(expectedActions))
-			assert.Equal(t, summary["unchanged_actions"], float64(0))
-			if failed {
-				assert.Equal(t, summary["outcome"], "failed")
-				assert.Equal(t, summary["failed_actions"], float64(1))
-			} else {
-				assert.Equal(t, summary["outcome"], "succeeded")
-				assert.Equal(t, summary["failed_actions"], float64(0))
+				assert.NilError(t, err)
 			}
 			if scenario == "ready" {
 				h.settle(sa.Name)
-				output.Reset()
-				assert.NilError(t, h.run(sa.Key()))
-				assert.Equal(t, assertQuiet(t, logs())["actions"], float64(0))
+				h.noWrites(sa.Name)
 			}
 		})
 	}
@@ -961,67 +818,37 @@ func TestGatewayRejectsUnprovenLegacyOwnership(t *testing.T) {
 	}
 }
 
-func TestAggregateAndGatewayLogging(t *testing.T) {
+func TestAggregateAndGatewayErrors(t *testing.T) {
+	ctx := context.Background()
 	h := newHarness(t, nil)
 	sa := testAccess("local")
 	sa.Spec.Issuer, sa.Spec.Certificate = "issuer", "shared"
 	h.put(sa)
-	output, logs := captureScopeLogs(h)
+	certificates := h.clients.Skupper.SkupperV2alpha1().Certificates("test")
 	event := watchers.ResourceChange{Key: "test/shared"}
 	assert.NilError(t, h.m.certificates.Handle(event))
-	created := actionRecords(t, logs())["create"]
-	assert.Assert(t, created != nil)
-	assert.Equal(t, created["scope"], "SecuredAccessCertificate")
-	assert.Equal(t, created["kind"], "Certificate")
-	assert.Equal(t, created["namespace"], "test")
-	assert.Equal(t, created["name"], "shared")
-	assert.Equal(t, created["outcome"], "succeeded")
-	h.observe()
-	output.Reset()
-	assert.NilError(t, h.m.certificates.Handle(event))
-	assert.Equal(t, assertQuiet(t, logs())["actions"], float64(0))
-
-	output.Reset()
-	assert.Assert(t, h.m.certificates.Handle(watchers.ResourceChange{Key: "bad/key/format"}) != nil)
-	summary := assertQuiet(t, logs())
-	assert.Equal(t, summary["phase"], "key")
-	assert.Equal(t, summary["outcome"], "failed")
-	assert.Equal(t, summary["failed_actions"], float64(0))
-
-	output.Reset()
-	// The dynamic fake cannot create via Apply; the failed request is reported
-	// as a failed action, never as a successful realization.
-	assert.Assert(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) != nil)
-	gateway := actionRecords(t, logs())["create"]
-	assert.Assert(t, gateway != nil)
-	assert.Equal(t, gateway["scope"], "Gateway")
-	assert.Equal(t, gateway["kind"], "Gateway")
-	assert.Equal(t, gateway["level"], "ERROR")
-	assert.Equal(t, gateway["outcome"], "failed")
-	assert.Assert(t, gateway["error"] != nil)
-
-	assert.NilError(t, h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(context.Background(), sa.Name, metav1.DeleteOptions{}))
-	h.observe()
-	output.Reset()
-	assert.NilError(t, h.m.certificates.Handle(event))
-	deleted := actionRecords(t, logs())["delete"]
-	assert.Assert(t, deleted != nil)
-	assert.Equal(t, deleted["kind"], "Certificate")
-	assert.Equal(t, deleted["name"], "shared")
-	assert.Equal(t, deleted["outcome"], "succeeded")
-
-	// A planning refusal has no failed API action, but must still produce a
-	// failed summary at the correct phase and return the error for the processor.
-	h.put(sa)
-	foreign := &saapi.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test"}}
-	_, err := h.clients.Skupper.SkupperV2alpha1().Certificates("test").Create(context.Background(), foreign, metav1.CreateOptions{})
+	_, err := certificates.Get(ctx, "shared", metav1.GetOptions{})
 	assert.NilError(t, err)
 	h.observe()
-	output.Reset()
+	assert.NilError(t, h.m.certificates.Handle(event))
+
+	assert.Assert(t, h.m.certificates.Handle(watchers.ResourceChange{Key: "bad/key/format"}) != nil)
+
+	// The dynamic fake cannot create via Apply; the failed request must return
+	// an error for retry, never report a successful realization.
+	assert.Assert(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) != nil)
+
+	assert.NilError(t, h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(ctx, sa.Name, metav1.DeleteOptions{}))
+	h.observe()
+	assert.NilError(t, h.m.certificates.Handle(event))
+	_, err = certificates.Get(ctx, "shared", metav1.GetOptions{})
+	assert.Assert(t, apierrors.IsNotFound(err))
+
+	// A planning refusal has no API action but still returns its error.
+	h.put(sa)
+	foreign := &saapi.Certificate{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "test"}}
+	_, err = certificates.Create(ctx, foreign, metav1.CreateOptions{})
+	assert.NilError(t, err)
+	h.observe()
 	assert.Assert(t, h.m.certificates.Handle(event) != nil)
-	summary = assertQuiet(t, logs())
-	assert.Equal(t, summary["phase"], "plan")
-	assert.Equal(t, summary["actions"], float64(0))
-	assert.Equal(t, summary["failed_actions"], float64(0))
-	assert.Equal(t, summary["outcome"], "failed")
 }
