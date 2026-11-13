@@ -54,7 +54,7 @@ func (c *accessCertificateScope) Handle(e watchers.ResourceChange) (err error) {
 	phase = "execute"
 	if action != nil {
 		start := time.Now()
-		err = c.manager.executeAction(*action)
+		_, err = c.manager.executeAction(*action)
 		results = append(results, accessResult{verb: action.verb, kind: "Certificate", namespace: s.namespace, name: s.name, duration: time.Since(start), err: err})
 	}
 	return err
@@ -202,6 +202,9 @@ func planAccessCertificate(s accessCertificateSnapshot) (*accessAction, error) {
 	}
 	sort.Strings(desired.Spec.Hosts)
 	applyPolicy(s.policy, "Certificate", desired)
+	// Metadata policy can decorate an authorized output, not revoke the
+	// authority required to reconcile it on the next observation.
+	desired.Annotations["internal.skupper.io/controlled"] = "true"
 	// This author boundary must survive both metadata policy and GC pruning of
 	// owner references; realization must never prune this scope's contributions.
 	desired.Annotations[certificates.SecuredAccessCertificateAnnotation] = "true"

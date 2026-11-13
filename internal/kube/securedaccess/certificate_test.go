@@ -8,6 +8,7 @@ import (
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	saapi "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"gotest.tools/v3/assert"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -177,5 +178,52 @@ func TestCertificatePendingHostsAndSurvivingTargetRouting(t *testing.T) {
 	h.m.watcher.EnqueueNamespace("test")
 	p.TestProcessAll()
 	_, err = certs.Get(ctx, "replacement", metav1.GetOptions{})
+	assert.Assert(t, apierrors.IsNotFound(err))
+}
+
+func TestCertificatePolicyPreservesAuthority(t *testing.T) {
+	h := newHarness(t, nil)
+	policy := h.m.context.(*testContext).policy
+	template := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "controller", Name: "certificate-authority",
+		Labels:      map[string]string{"skupper.io/label-template": "true"},
+		Annotations: map[string]string{"internal.skupper.io/controlled": "false", "internal.skupper.io/secured-access-certificate": "false", "decoration": "created"},
+	}, Data: map[string]string{"kind": "Certificate", "name": "shared"}}
+	assert.NilError(t, policy.Update("controller/certificate-authority", template))
+	sa := testAccess("local")
+	sa.Spec.Issuer, sa.Spec.Certificate = "issuer", "shared"
+	h.put(sa)
+	h.settle(sa.Name)
+	assert.Assert(t, h.status(sa.Name).IsReady())
+	certs := h.clients.Skupper.SkupperV2alpha1().Certificates("test")
+	created, err := certs.Get(context.Background(), "shared", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, created.Annotations["internal.skupper.io/controlled"], "true")
+	assert.Equal(t, created.Annotations["internal.skupper.io/secured-access-certificate"], "true")
+	assert.Equal(t, created.Annotations["decoration"], "created")
+
+	template = template.DeepCopy()
+	template.Annotations["decoration"] = "updated"
+	assert.NilError(t, policy.Update("controller/certificate-authority", template))
+	h.settle(sa.Name)
+	updated, err := certs.Get(context.Background(), "shared", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, updated.UID, created.UID)
+	assert.Equal(t, updated.Annotations["decoration"], "updated")
+	assert.Equal(t, updated.Annotations["internal.skupper.io/controlled"], "true")
+	assert.Equal(t, updated.Annotations["internal.skupper.io/secured-access-certificate"], "true")
+
+	h = newHarness(t, h.clients)
+	h.m.context.(*testContext).policy = policy
+	h.settle(sa.Name)
+	assert.Assert(t, h.status(sa.Name).IsReady())
+	assert.NilError(t, policy.Update("controller/certificate-authority", nil))
+	h.settle(sa.Name)
+	assert.Assert(t, h.status(sa.Name).IsReady())
+	h.noWrites(sa.Name)
+	assert.NilError(t, h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(context.Background(), sa.Name, metav1.DeleteOptions{}))
+	h.observe()
+	assert.NilError(t, h.runCertificates())
+	_, err = certs.Get(context.Background(), "shared", metav1.GetOptions{})
 	assert.Assert(t, apierrors.IsNotFound(err))
 }
