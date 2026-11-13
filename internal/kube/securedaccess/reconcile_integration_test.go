@@ -94,6 +94,60 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		assert.DeepEqual(t, versions(), beforeVersions)
 	}
 	h := newHarness(t, clients)
+	for _, provider := range []string{"loadbalancer", "ingress"} {
+		for _, invalid := range []string{"unknown", "disabled"} {
+			t.Run("unsupported type preserves "+provider+"/"+invalid, func(t *testing.T) {
+				blocked := newHarness(t, clients)
+				access := testAccess(provider)
+				access.Name, access.UID = "invalid-"+provider, ""
+				blocked.put(access)
+				defer func() {
+					assert.NilError(t, clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(ctx, access.Name, metav1.DeleteOptions{}))
+					blocked.observe()
+					assert.NilError(t, blocked.run(access.Key()))
+				}()
+				blocked.settle(access.Name)
+				services := clients.Kube.CoreV1().Services("test")
+				original, err := services.Get(ctx, access.Name, metav1.GetOptions{})
+				assert.NilError(t, err)
+				if provider == "loadbalancer" {
+					// Kubernetes allocates ClusterIP/NodePorts/health-check port.
+					// Synthetic provider status is only a preservation fixture.
+					original.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
+					original, err = services.Update(ctx, original, metav1.UpdateOptions{})
+					assert.NilError(t, err)
+					original.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "192.0.2.25"}}
+					original, err = services.UpdateStatus(ctx, original, metav1.UpdateOptions{})
+					assert.NilError(t, err)
+					assert.Assert(t, original.Spec.Ports[0].NodePort != 0)
+					assert.Assert(t, original.Spec.HealthCheckNodePort != 0)
+				}
+				access = blocked.status(access.Name)
+				access.Spec.AccessType = "not-an-access-type"
+				access.Spec.Ports[0].Port = 12345
+				if invalid == "disabled" {
+					access.Spec.AccessType = "local"
+					blocked.m.config.EnabledAccessTypes = []string{provider}
+				}
+				_, err = clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, access, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				blocked.observe()
+				before := writes.Load()
+				blocked.settle(access.Name)
+				assert.Equal(t, writes.Load()-before, int64(1), "only the unsupported status may be written")
+				actual, err := services.Get(ctx, access.Name, metav1.GetOptions{})
+				assert.NilError(t, err)
+				// Include UID/RV, allocations, external fields and provider status.
+				assert.DeepEqual(t, actual, original)
+				assert.Equal(t, blocked.status(access.Name).Status.Message, "unsupported access type")
+				assertUnchanged(t, blocked, 0, func() error { return blocked.run(access.Key()) })
+				config := blocked.m.config
+				blocked = newHarness(t, clients)
+				blocked.m.config = config
+				assertUnchanged(t, blocked, 0, func() error { return blocked.run(access.Key()) })
+			})
+		}
+	}
 	t.Run("legacy Gateway upgrade", func(t *testing.T) {
 		gateways := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
 		// Exact baseline Gateway template: no annotations or owner references,

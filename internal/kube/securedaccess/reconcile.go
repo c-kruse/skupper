@@ -361,13 +361,16 @@ func planAccess(s accessSnapshot) accessPlan {
 	}
 	desiredNames := map[string]bool{}
 	if sa != nil {
-		svc := &corev1.Service{ObjectMeta: exposureMetadata(sa, sa.Name), Spec: corev1.ServiceSpec{Selector: sa.Spec.Selector, Type: serviceType(s.accessType)}}
-		updatePorts(&svc.Spec, sa.Spec.Ports)
-		p.planOutput(s, "Service", s.service, svc)
-		// Endpoints requiring allocations/status wait for ordinary observations.
-		if !s.config.isEnabled(s.accessType) || (s.accessType == ACCESS_TYPE_ROUTE && !s.routeAvailable) {
+		if !s.config.isValidAccessType(s.accessType) || (s.accessType == ACCESS_TYPE_ROUTE && !s.routeAvailable) {
 			p.validationErr = errors.Join(p.validationErr, errors.New("unsupported access type"))
+			// Invalid intent authorizes neither output writes nor cleanup. Keep
+			// the working exposure until corrected; deletion still cleans below.
+			return p
 		} else {
+			svc := &corev1.Service{ObjectMeta: exposureMetadata(sa, sa.Name), Spec: corev1.ServiceSpec{Selector: sa.Spec.Selector, Type: serviceType(s.accessType)}}
+			updatePorts(&svc.Spec, sa.Spec.Ports)
+			p.planOutput(s, "Service", s.service, svc)
+			// Endpoints requiring allocations/status wait for ordinary observations.
 			switch s.accessType {
 			case ACCESS_TYPE_LOCAL:
 				for _, port := range sa.Spec.Ports {

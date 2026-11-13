@@ -383,6 +383,94 @@ func TestScopeEmptyAccessType(t *testing.T) {
 	}
 }
 
+func TestUnsupportedAccessTypePreservesOutputs(t *testing.T) {
+	for _, provider := range []string{"loadbalancer", "ingress", "route", "contour-http-proxy"} {
+		for _, invalid := range []string{"unknown", "disabled", "Route API absent", "unknown enabled"} {
+			t.Run(provider+"/"+invalid, func(t *testing.T) {
+				ctx := context.Background()
+				h := newHarness(t, nil)
+				sa := testAccess(provider)
+				h.put(sa)
+				h.settle(sa.Name)
+				// Retain complete outputs, including allocations, status, external
+				// metadata and provider objects, not just the Service type.
+				outputs := func() map[string]runtime.Object {
+					result := map[string]runtime.Object{}
+					for kind, store := range h.stores {
+						if kind == "SecuredAccess" {
+							continue
+						}
+						for _, object := range store.List() {
+							result[kind+"/"+object.(metav1.Object).GetName()] = object.(runtime.Object).DeepCopyObject()
+						}
+					}
+					return result
+				}
+				before := outputs()
+				sa = h.status(sa.Name)
+				sa.Spec.AccessType = "not-an-access-type"
+				switch invalid {
+				case "disabled":
+					sa.Spec.AccessType = "local"
+					h.m.config.EnabledAccessTypes = []string{provider}
+				case "Route API absent":
+					sa.Spec.AccessType = "route"
+					h.m.watcher.Routes = nil
+				case "unknown enabled":
+					h.m.config.EnabledAccessTypes = append(h.m.config.EnabledAccessTypes, sa.Spec.AccessType)
+				}
+				// Other edited fields must not leak through the invalid type.
+				sa.Spec.Ports[0].Port = 12345
+				sa.Spec.Selector = map[string]string{"app": "changed"}
+				_, err := h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, sa, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				h.observe()
+				h.clearActions()
+				assert.NilError(t, h.run(sa.Key()))
+				for _, action := range h.mutations() {
+					assert.Equal(t, action.GetResource().Resource, "securedaccesses")
+					assert.Equal(t, action.GetSubresource(), "status")
+				}
+				h.observe()
+				assert.DeepEqual(t, outputs(), before)
+				assert.Equal(t, h.status(sa.Name).Status.Message, "unsupported access type")
+				assert.Assert(t, !h.status(sa.Name).IsReady())
+				// Restart reconstructs the same refusal, not cleanup/adoption.
+				config := h.m.config
+				h = newHarness(t, h.clients)
+				h.m.config = config
+				if invalid == "Route API absent" {
+					h.m.watcher.Routes = nil
+				}
+				h.observe()
+				h.noWrites(sa.Name)
+				assert.DeepEqual(t, outputs(), before)
+				// Correcting the type resumes normal desired-state reconciliation.
+				h = newHarness(t, h.clients)
+				sa = h.status(sa.Name)
+				sa.Spec.AccessType = provider
+				_, err = h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, sa, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				h.settle(sa.Name)
+				service, err := h.clients.Kube.CoreV1().Services("test").Get(ctx, sa.Name, metav1.GetOptions{})
+				assert.NilError(t, err)
+				assert.Equal(t, service.Spec.Ports[0].Port, int32(12345))
+				assert.DeepEqual(t, service.Spec.Selector, sa.Spec.Selector)
+				// Deleting an invalid definition must still clean its owned outputs.
+				sa = h.status(sa.Name)
+				sa.Spec.AccessType = "not-an-access-type"
+				_, err = h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, sa, metav1.UpdateOptions{})
+				assert.NilError(t, err)
+				h.settle(sa.Name)
+				assert.NilError(t, h.clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(ctx, sa.Name, metav1.DeleteOptions{}))
+				h = newHarness(t, h.clients)
+				h.settle(sa.Name)
+				assert.Equal(t, len(outputs()), 0)
+			})
+		}
+	}
+}
+
 func TestScopeFailuresRetryAndOwnership(t *testing.T) {
 	ctx := context.Background()
 	t.Run("Route API unavailable", func(t *testing.T) {
@@ -392,6 +480,8 @@ func TestScopeFailuresRetryAndOwnership(t *testing.T) {
 		h.settle("edge")
 		assert.Assert(t, !h.status("edge").IsReady())
 		assert.Equal(t, h.status("edge").Status.Message, "unsupported access type")
+		_, err := h.clients.Kube.CoreV1().Services("test").Get(ctx, "edge", metav1.GetOptions{})
+		assert.Assert(t, apierrors.IsNotFound(err), "an initially unsupported Access must not create a Service")
 		h.noWrites("edge")
 	})
 	t.Run("execution failure survives successful status", func(t *testing.T) {
@@ -720,7 +810,11 @@ func TestAccessScopeLogging(t *testing.T) {
 				assert.Equal(t, record["key"], "test/edge")
 			}
 			actions := actionRecords(t, records)
-			assert.Equal(t, len(actions), 2)
+			expectedActions := 2
+			if scenario == "validation" {
+				expectedActions = 1
+			}
+			assert.Equal(t, len(actions), expectedActions)
 			status := actions["status"]
 			assert.Assert(t, status != nil)
 			assert.Equal(t, status["kind"], "SecuredAccess")
@@ -764,7 +858,7 @@ func TestAccessScopeLogging(t *testing.T) {
 			summary := summaryRecord(t, records)
 			assert.Equal(t, summary["level"], "DEBUG")
 			assert.Equal(t, summary["phase"], "execute")
-			assert.Equal(t, summary["actions"], float64(2))
+			assert.Equal(t, summary["actions"], float64(expectedActions))
 			assert.Equal(t, summary["unchanged_actions"], float64(0))
 			if failed {
 				assert.Equal(t, summary["outcome"], "failed")

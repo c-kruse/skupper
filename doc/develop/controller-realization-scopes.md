@@ -155,6 +155,12 @@ configurations, Gateway and metadata policy.
 **Outputs:** Exposure Service and provider resources, SecuredAccess metadata
 and status, including resolved endpoints. This scope does not author Certificates.
 
+An unknown/disabled effective access type, or Route access without the Route API,
+only produces an unsupported-type status: it authorizes no output creation,
+update or cleanup. Existing Services and provider resources remain unchanged
+until the type is corrected. Deleting the definition still permits owned-output
+cleanup, and valid provider changes still replace obsolete exposure resources.
+
 ## SecuredAccess Certificate Scope
 
 **Key:** Certificate namespace + name.

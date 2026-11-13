@@ -50,13 +50,7 @@ func NewSecuredAccessManager(clients internalclient.Clients, config *Config, ctx
 }
 
 func (m *SecuredAccessManager) IsValidAccessType(accessType string) bool {
-	switch accessType {
-	case ACCESS_TYPE_LOCAL, ACCESS_TYPE_NODEPORT, ACCESS_TYPE_LOADBALANCER, ACCESS_TYPE_ROUTE,
-		ACCESS_TYPE_INGRESS, ACCESS_TYPE_INGRESS_NGINX, ACCESS_TYPE_CONTOUR_HTTP_PROXY, ACCESS_TYPE_GATEWAY:
-		return m.config.isEnabled(accessType)
-	default:
-		return false
-	}
+	return m.config.isValidAccessType(accessType)
 }
 func (m *SecuredAccessManager) actualAccessType(sa *skupperv2alpha1.SecuredAccess) string {
 	if sa.Spec.AccessType == "" {
