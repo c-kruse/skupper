@@ -3,11 +3,13 @@ package securedaccess
 import (
 	"fmt"
 
+	"github.com/skupperproject/skupper/internal/kube/resource"
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 const gatewayOwner = "internal.skupper.io/gateway-controller"
@@ -60,12 +62,44 @@ func (g *gatewayScope) Handle(e watchers.ResourceChange) (err error) {
 	return err
 }
 
+// gatewayAuthorized accepts the durable claim or the bounded legacy transition.
+// Legacy Apply history is a compatibility fingerprint, not general adoption
+// authority. Only the Gateway scope writes the claim; Access scopes may consume
+// the same eligible object before that writer runs during startup.
+func gatewayAuthorized(gateway *unstructured.Unstructured, namespace, controller string) bool {
+	if controller == "" || gateway.GetNamespace() != namespace || gateway.GetName() != "skupper" {
+		return false
+	}
+	if owner, claimed := gateway.GetAnnotations()[gatewayOwner]; claimed {
+		return owner == controller
+	}
+	if len(gateway.GetOwnerReferences()) != 0 || gateway.GetDeletionTimestamp() != nil {
+		return false
+	}
+	fields, err := resource.AppliedFields(gateway, applyFieldManager, "gateway.networking.k8s.io/v1")
+	if err != nil {
+		return false
+	}
+	// Require ownership of every field authored by the old Gateway template,
+	// not merely the common field-manager name or a matching current spec.
+	for _, path := range []fieldpath.Path{
+		fieldpath.MakePathOrDie("spec", "gatewayClassName"),
+		fieldpath.MakePathOrDie("spec", "listeners", fieldpath.KeyByFields("name", "tls"), "port"),
+		fieldpath.MakePathOrDie("spec", "listeners", fieldpath.KeyByFields("name", "tls"), "protocol"),
+		fieldpath.MakePathOrDie("spec", "listeners", fieldpath.KeyByFields("name", "tls"), "tls", "mode"),
+		fieldpath.MakePathOrDie("spec", "listeners", fieldpath.KeyByFields("name", "tls"), "allowedRoutes", "namespaces", "from"),
+	} {
+		if !fields.Has(path) {
+			return false
+		}
+	}
+	return true
+}
+
 func planGateway(observed, desired *unstructured.Unstructured, policy *labels.LabelsAndAnnotations) ([]accessAction, error) {
 	authority := desired.GetAnnotations()[gatewayOwner]
 	if observed != nil {
-		// Old Gateways had no durable owner metadata. Matching name/spec or an
-		// SSA manager is not adoption authority: require explicit operator opt-in.
-		if observed.GetAnnotations()[gatewayOwner] != desired.GetAnnotations()[gatewayOwner] {
+		if !gatewayAuthorized(observed, desired.GetNamespace(), authority) {
 			return nil, fmt.Errorf("Gateway %q has conflicting ownership; legacy adoption requires %s=%s", observed.GetNamespace()+"/"+observed.GetName(), gatewayOwner, desired.GetAnnotations()[gatewayOwner])
 		}
 		if observed.GetDeletionTimestamp() != nil {

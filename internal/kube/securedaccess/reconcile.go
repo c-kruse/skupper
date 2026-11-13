@@ -451,7 +451,7 @@ func planAccess(s accessSnapshot) accessPlan {
 					p.validationErr = errors.Join(p.validationErr, errors.New("Gateway not yet available"))
 					break
 				}
-				if s.gatewayController == "" || s.gateway.GetAnnotations()[gatewayOwner] != s.gatewayController {
+				if !gatewayAuthorized(s.gateway, s.gatewayNamespace, s.gatewayController) {
 					p.validationErr = errors.Join(p.validationErr, errors.New("Gateway has conflicting ownership"))
 					break
 				}

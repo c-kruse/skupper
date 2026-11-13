@@ -94,6 +94,107 @@ func TestRealAPIAccessGateway(t *testing.T) {
 		assert.DeepEqual(t, versions(), beforeVersions)
 	}
 	h := newHarness(t, clients)
+	t.Run("legacy Gateway upgrade", func(t *testing.T) {
+		gateways := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
+		// Exact baseline Gateway template: no annotations or owner references,
+		// applied by resource.Template with the legacy field manager.
+		legacy := []byte(`{"apiVersion":"gateway.networking.k8s.io/v1","kind":"Gateway","metadata":{"name":"skupper"},"spec":{"gatewayClassName":"test-gateway","listeners":[{"name":"tls","protocol":"TLS","port":9443,"tls":{"mode":"Passthrough"},"allowedRoutes":{"namespaces":{"from":"All"}}}]}}`)
+		original, err := gateways.Patch(ctx, "skupper", types.ApplyPatchType, legacy, metav1.PatchOptions{FieldManager: "skupper-controller"})
+		assert.NilError(t, err)
+		defer func() { assert.NilError(t, gateways.Delete(ctx, "skupper", metav1.DeleteOptions{})) }()
+		assert.Equal(t, len(original.GetAnnotations()), 0)
+		assert.Equal(t, len(original.GetOwnerReferences()), 0)
+
+		upgrade := newHarness(t, clients)
+		access := testAccess("gateway")
+		access.Name, access.UID = "upgrade", ""
+		upgrade.put(access)
+		defer func() {
+			assert.NilError(t, clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Delete(ctx, access.Name, metav1.DeleteOptions{}))
+			upgrade.observe()
+			assert.NilError(t, upgrade.run("test/upgrade"))
+		}()
+		// Access can run before the singleton writer on startup. It may use
+		// an eligible legacy Gateway, but only the Gateway scope may claim it.
+		assert.NilError(t, upgrade.run("test/upgrade"))
+		assert.Assert(t, upgrade.status("upgrade").IsReady())
+		unclaimed, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.Equal(t, unclaimed.GetResourceVersion(), original.GetResourceVersion())
+		assert.Equal(t, len(unclaimed.GetAnnotations()), 0)
+		// A competing claim after the snapshot must invalidate the transition,
+		// even though the legacy manager still owns all the original spec fields.
+		actions, err := planGateway(unclaimed, desiredGateway("controller", "skupper-controller", testConfig()), nil)
+		assert.NilError(t, err)
+		assert.Equal(t, len(actions), 1)
+		_, err = gateways.Patch(ctx, "skupper", types.MergePatchType, []byte(`{"metadata":{"annotations":{"internal.skupper.io/gateway-controller":"other-controller"}}}`), metav1.PatchOptions{})
+		assert.NilError(t, err)
+		_, err = upgrade.m.applyOutput(actions[0])
+		assert.Assert(t, apierrors.IsConflict(err), "a stale transition must not overwrite a concurrent claim")
+		upgrade.observe()
+		assert.ErrorContains(t, upgrade.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}), "conflicting ownership")
+		foreign, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.Equal(t, foreign.GetAnnotations()[gatewayOwner], "other-controller")
+		assert.Equal(t, foreign.GetUID(), original.GetUID())
+		// Simulate the competing actor withdrawing its claim, not operator opt-in.
+		_, err = gateways.Patch(ctx, "skupper", types.MergePatchType, []byte(`{"metadata":{"annotations":{"internal.skupper.io/gateway-controller":null}}}`), metav1.PatchOptions{})
+		assert.NilError(t, err)
+		upgrade.observe()
+		assert.NilError(t, upgrade.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
+		claimed, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.Equal(t, claimed.GetUID(), original.GetUID())
+		assert.Equal(t, claimed.GetAnnotations()[gatewayOwner], "skupper-controller")
+		listeners, _, err := unstructured.NestedSlice(claimed.Object, "spec", "listeners")
+		assert.NilError(t, err)
+		assert.Equal(t, listeners[0].(map[string]interface{})["port"], int64(7443), "legacy configuration drift must not prevent transition")
+		upgrade.observe()
+		assertUnchanged(t, upgrade, 0, func() error { return upgrade.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}) })
+
+		// Ordinary restart and a port edit still converge without recreation.
+		upgrade = newHarness(t, clients)
+		upgrade.observe()
+		assert.NilError(t, upgrade.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
+		access = upgrade.status("upgrade")
+		access.Spec.Ports[0].Port = 8444
+		_, err = clients.Skupper.SkupperV2alpha1().SecuredAccesses("test").Update(ctx, access, metav1.UpdateOptions{})
+		assert.NilError(t, err)
+		upgrade.settle("upgrade")
+		service, err := clients.Kube.CoreV1().Services("test").Get(ctx, "upgrade", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.Equal(t, service.Spec.Ports[0].Port, int32(8444))
+		route, err := clients.Dynamic.Resource(resource.TlsRouteResource()).Namespace("test").Get(ctx, "upgrade-alpha", metav1.GetOptions{})
+		assert.NilError(t, err)
+		rules, _, err := unstructured.NestedSlice(route.Object, "spec", "rules")
+		assert.NilError(t, err)
+		assert.Equal(t, rules[0].(map[string]interface{})["backendRefs"].([]interface{})[0].(map[string]interface{})["port"], int64(8444))
+		assert.Assert(t, upgrade.status("upgrade").IsReady())
+		assertUnchanged(t, upgrade, 0, func() error {
+			assert.NilError(t, upgrade.run("test/upgrade"))
+			return upgrade.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"})
+		})
+	})
+	t.Run("unproven Gateway is not adopted", func(t *testing.T) {
+		gateways := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
+		foreign := desiredGateway("controller", "skupper-controller", testConfig())
+		foreign.SetAnnotations(nil)
+		// Even the same manager and identical spec cannot authorize adoption:
+		// a Create records Update ownership, not the baseline Apply fingerprint.
+		original, err := gateways.Create(ctx, foreign, metav1.CreateOptions{FieldManager: "skupper-controller"})
+		assert.NilError(t, err)
+		defer func() { assert.NilError(t, gateways.Delete(ctx, "skupper", metav1.DeleteOptions{})) }()
+		refused := newHarness(t, clients)
+		refused.observe()
+		before := writes.Load()
+		assert.ErrorContains(t, refused.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}), "conflicting ownership")
+		assert.Equal(t, writes.Load(), before)
+		observed, err := gateways.Get(ctx, "skupper", metav1.GetOptions{})
+		assert.NilError(t, err)
+		assert.Equal(t, observed.GetUID(), original.GetUID())
+		assert.Equal(t, observed.GetResourceVersion(), original.GetResourceVersion())
+		assert.Equal(t, len(observed.GetAnnotations()), 0)
+	})
 	t.Run("Gateway without metadata policy", func(t *testing.T) {
 		bare := newHarness(t, clients)
 		gateways := clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller")
@@ -604,7 +705,8 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	gw, err = gateways.Get(ctx, "skupper", metav1.GetOptions{})
 	assert.NilError(t, err)
 	annotations := gw.GetAnnotations()
-	delete(annotations, gatewayOwner)
+	// Even an empty explicit claim is not legacy absence and cannot be adopted.
+	annotations[gatewayOwner] = ""
 	gw.SetAnnotations(annotations)
 	_, err = gateways.Update(ctx, gw, metav1.UpdateOptions{})
 	assert.NilError(t, err)
@@ -624,7 +726,7 @@ func TestRealAPIAccessGateway(t *testing.T) {
 	h.observe()
 	assert.NilError(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}))
 	h.settle("gateway")
-	t.Log("shared Gateway drift repaired; unmarked legacy Gateway left untouched")
+	t.Log("shared Gateway drift repaired; explicit empty claim left untouched")
 
 	// Previously owned optional fields are removed, not merged indefinitely.
 	sa = h.status("ingress")

@@ -176,6 +176,31 @@ SecuredAccess resources share a Certificate.
 **Outputs:** The shared Gateway spec and metadata. SecuredAccess scopes consume
 its observed addresses but do not write it.
 
+An existing Gateway normally requires
+`internal.skupper.io/gateway-controller=<controller logical name>`. The sole
+Gateway writer can automatically add that claim to a legacy Gateway only when
+it is named `skupper` in the controller namespace, is not deleting, has no
+owner references and has no existing claim annotation (an empty or different
+claim is not absence). Its exact-version `gateway.networking.k8s.io/v1` Apply
+history for field manager `skupper-controller` must cover `spec.gatewayClassName`
+and the old `tls` listener's port, protocol, TLS mode and allowed namespace
+fields. Matching names/specs, Update history or metadata-only Apply history do
+not qualify. Configuration drift is reconciled normally; the current spec need
+not equal the old template. Access scopes use the same eligibility check so
+startup ordering does not temporarily reject an eligible legacy Gateway; only
+the Gateway scope writes its annotation, using the observed resourceVersion and
+non-forcing SSA. After success, the durable claim is the ongoing authority.
+
+This is an explicit compatibility exception, not proof of original creation:
+legacy code may have applied into an existing Gateway, and an SSA manager name
+is not a security identity. Ambiguous resources remain blocked and require an
+operator to inspect and explicitly authorize the specific Gateway. Do not
+replace another claim or recreate the shared Gateway to obtain ownership. The
+controller logical name must remain stable across restarts/upgrades; use an
+explicit name when deployment discovery cannot provide that stability. This
+transition does not fix partial Service/provider updates when authorization
+fails for an ineligible Gateway.
+
 ## AccessGrant
 
 **Key:** AccessGrant namespace + name.

@@ -783,6 +783,90 @@ func TestAccessScopeLogging(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsUnprovenLegacyOwnership(t *testing.T) {
+	// Independent copy of the API server's baseline Apply field set. A matching
+	// spec or manager without these paths is insufficient for legacy adoption.
+	legacyFields := `{"f:spec":{"f:gatewayClassName":{},"f:listeners":{"k:{\"name\":\"tls\"}":{".":{},"f:allowedRoutes":{"f:namespaces":{"f:from":{}}},"f:name":{},"f:port":{},"f:protocol":{},"f:tls":{"f:mode":{}}}}}}`
+	for _, tc := range []struct {
+		name   string
+		change func(*unstructured.Unstructured)
+	}{
+		{"no history", func(g *unstructured.Unstructured) { g.SetManagedFields(nil) }},
+		{"other manager", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].Manager = "other-controller"
+			g.SetManagedFields(fields)
+		}},
+		{"update is not apply", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].Operation = metav1.ManagedFieldsOperationUpdate
+			g.SetManagedFields(fields)
+		}},
+		{"other API version", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].APIVersion = "gateway.networking.k8s.io/v1beta1"
+			g.SetManagedFields(fields)
+		}},
+		{"status ownership only", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].Subresource = "status"
+			g.SetManagedFields(fields)
+		}},
+		{"class only", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].FieldsV1.Raw = []byte(`{"f:spec":{"f:gatewayClassName":{}}}`)
+			g.SetManagedFields(fields)
+		}},
+		{"listener only", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].FieldsV1.Raw = []byte(strings.Replace(legacyFields, `"f:gatewayClassName":{},`, "", 1))
+			g.SetManagedFields(fields)
+		}},
+		{"partial listener", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].FieldsV1.Raw = []byte(strings.Replace(legacyFields, `"f:protocol":{},`, "", 1))
+			g.SetManagedFields(fields)
+		}},
+		{"other listener", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].FieldsV1.Raw = []byte(strings.ReplaceAll(legacyFields, "tls", "other"))
+			g.SetManagedFields(fields)
+		}},
+		{"malformed history", func(g *unstructured.Unstructured) {
+			fields := g.GetManagedFields()
+			fields[0].FieldsV1.Raw = []byte(`{"not-a-field-path":{}}`)
+			g.SetManagedFields(fields)
+		}},
+		{"foreign claim", func(g *unstructured.Unstructured) {
+			g.SetAnnotations(map[string]string{gatewayOwner: "other-controller"})
+		}},
+		{"empty explicit claim", func(g *unstructured.Unstructured) { g.SetAnnotations(map[string]string{gatewayOwner: ""}) }},
+		{"owner reference", func(g *unstructured.Unstructured) {
+			g.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign-uid"}})
+		}},
+		{"deleting", func(g *unstructured.Unstructured) { now := metav1.Now(); g.SetDeletionTimestamp(&now) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			gateway := desiredGateway("controller", "skupper-controller", testConfig())
+			gateway.SetAnnotations(nil)
+			gateway.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "skupper-controller", Operation: metav1.ManagedFieldsOperationApply, APIVersion: "gateway.networking.k8s.io/v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(legacyFields)}}})
+			tc.change(gateway)
+			_, err := h.clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller").Create(context.Background(), gateway, metav1.CreateOptions{})
+			assert.NilError(t, err)
+			h.put(testAccess("gateway"))
+			h.clearActions()
+			assert.ErrorContains(t, h.m.gateway.Handle(watchers.ResourceChange{Key: "controller/skupper"}), "conflicting ownership")
+			assert.Equal(t, len(h.mutations()), 0)
+			assert.NilError(t, h.run("test/edge"))
+			assert.Assert(t, !h.status("edge").IsReady())
+			observed, err := h.clients.Dynamic.Resource(resource.GatewayResource()).Namespace("controller").Get(context.Background(), "skupper", metav1.GetOptions{})
+			assert.NilError(t, err)
+			assert.DeepEqual(t, observed.Object, gateway.Object)
+		})
+	}
+}
+
 func TestAggregateAndGatewayLogging(t *testing.T) {
 	h := newHarness(t, nil)
 	sa := testAccess("local")
