@@ -1,28 +1,11 @@
 package securedaccess
 
 import (
-	"strings"
-
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 )
-
-func extractEndpoint(obj *unstructured.Unstructured) skupperv2alpha1.Endpoint {
-	_, portName := getKeyAndPortNameForHttpProxy(obj)
-	return skupperv2alpha1.Endpoint{
-		Name: portName,
-		Host: extractHost(obj),
-		Port: "443",
-	}
-}
-
-func getKeyAndPortNameForHttpProxy(o *unstructured.Unstructured) (string, string) {
-	svcName := extractServiceName(o)
-	portName := strings.TrimPrefix(o.GetName(), svcName+"-")
-	return o.GetNamespace() + "/" + svcName, portName
-}
 
 func httpProxyName(svcName string, portName string) string {
 	return svcName + "-" + portName
@@ -58,17 +41,6 @@ func desiredHttpProxies(domain string, access *skupperv2alpha1.SecuredAccess) []
 		})
 	}
 	return proxies
-}
-
-func extractHost(obj *unstructured.Unstructured) string {
-	host, _, _ := unstructured.NestedString(obj.UnstructuredContent(), "spec", "virtualhost", "fqdn")
-	return host
-}
-
-func extractServiceName(obj *unstructured.Unstructured) string {
-	proxy := &HttpProxy{}
-	proxy.readFromContourProxy(obj)
-	return proxy.ServiceName
 }
 
 func (p *HttpProxy) readFromContourProxy(obj *unstructured.Unstructured) error {

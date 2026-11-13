@@ -2,7 +2,6 @@ package securedaccess
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	"github.com/skupperproject/skupper/internal/kube/watchers"
@@ -49,10 +48,11 @@ func (g *gatewayScope) Handle(e watchers.ResourceChange) (err error) {
 	}
 	phase = "execute"
 	for _, a := range actions {
-		start := time.Now()
-		var unchanged bool
-		unchanged, err = m.executeAction(a)
-		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: ns, name: name, duration: time.Since(start), err: err, unchanged: unchanged})
+		var result *accessResult
+		result, err = m.executeCachedApply(a)
+		if result != nil {
+			results = append(results, *result)
+		}
 		if err != nil {
 			break
 		}
@@ -83,7 +83,7 @@ func planGateway(observed, desired *unstructured.Unstructured, policy *labels.La
 	if observed != nil {
 		verb = "update"
 	}
-	return []accessAction{{verb: verb, kind: "Gateway", object: configuration}}, nil
+	return []accessAction{{verb: verb, kind: "Gateway", object: configuration, observed: observed}}, nil
 }
 
 func desiredGateway(namespace, controller string, c Config) *unstructured.Unstructured {

@@ -8,8 +8,8 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/skupperproject/skupper/internal/kube/certificates"
 	internalclient "github.com/skupperproject/skupper/internal/kube/client"
+	"github.com/skupperproject/skupper/internal/kube/resource"
 	"github.com/skupperproject/skupper/internal/kube/site/labels"
 	skupperv2alpha1 "github.com/skupperproject/skupper/pkg/apis/skupper/v2alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,7 +25,6 @@ type ControllerContext interface {
 	SetAnnotations(namespace, name, kind string, annotations map[string]string) bool
 	Namespace() string
 	Name() string
-	UID() string
 }
 
 type SecuredAccessManager struct {
@@ -37,14 +36,14 @@ type SecuredAccessManager struct {
 	gateway           *gatewayScope
 	certificates      *accessCertificateScope
 	logger            *slog.Logger
+	applyCache        *resource.SSASuccessCache
 }
 
-// certMgr remains an argument for source compatibility with unmigrated authors.
-// SecuredAccess Certificate scopes author aggregate Certificate intent.
-func NewSecuredAccessManager(clients internalclient.Clients, _ certificates.CertificateManager, config *Config, ctxt ControllerContext) *SecuredAccessManager {
+func NewSecuredAccessManager(clients internalclient.Clients, config *Config, ctxt ControllerContext) *SecuredAccessManager {
 	c := *config
 	c.EnabledAccessTypes = append([]string(nil), config.EnabledAccessTypes...)
 	m := &SecuredAccessManager{clients: clients, context: ctxt, config: c, defaultAccessType: c.getDefaultAccessType(clients), logger: slog.Default().With("component", "kube.securedaccess.manager")}
+	m.applyCache = resource.NewSSASuccessCache(1024)
 	m.gateway = &gatewayScope{manager: m}
 	m.certificates = &accessCertificateScope{manager: m}
 	return m

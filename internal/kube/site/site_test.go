@@ -40,7 +40,7 @@ func TestListenerAccessServiceCollision(t *testing.T) {
 			if siteFirst {
 				assert.NilError(t, s.Expose(exposed))
 			}
-			access := securedaccess.NewSecuredAccessManager(s.clients, nil, &securedaccess.Config{EnabledAccessTypes: []string{"local"}}, nil)
+			access := securedaccess.NewSecuredAccessManager(s.clients, &securedaccess.Config{EnabledAccessTypes: []string{"local"}}, nil)
 			w := securedaccess.NewSecuredAccessResourceWatcher(access)
 			w.WatchResources(s.clients, "test")
 			w.WatchSecuredAccesses(s.clients, "test", nil)
@@ -1678,7 +1678,7 @@ func newSiteMocks(namespace string, k8sObjects []runtime.Object, skupperObjects 
 		errors:        make(map[string]string),
 		linkAccess:    make(map[string]*skupperv2alpha1.RouterAccess),
 		certs:         certificates.NewCertificateManager(controller),
-		access:        securedaccess.NewSecuredAccessManager(client, nil, &securedaccess.Config{DefaultAccessType: "loadbalancer"}, nil),
+		access:        securedaccess.NewSecuredAccessManager(client, &securedaccess.Config{DefaultAccessType: "loadbalancer"}, nil),
 		accessMapping: make(securedAccessMap),
 		routerPods:    make(map[string]*corev1.Pod),
 		sizes:         sizing.NewRegistry(),

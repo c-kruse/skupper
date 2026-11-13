@@ -804,17 +804,6 @@ func (s *Site) ownsService(service *corev1.Service) bool {
 	return ref.APIVersion == "skupper.io/v2alpha1" && ref.Kind == "Site" && ref.Name == s.name && ref.UID == s.site.UID && ref.UID != ""
 }
 
-func isOwned(service *corev1.Service) bool {
-	if service.ObjectMeta.Annotations == nil {
-		return false
-	}
-	// assume that if annotation is set, irrespective of value, the service is owned by skupper
-	if _, ok := service.ObjectMeta.Annotations[types.ControlledQualifier]; !ok {
-		return false
-	}
-	return true
-}
-
 func (s *Site) ownerReferences() []metav1.OwnerReference {
 	return []metav1.OwnerReference{
 		{

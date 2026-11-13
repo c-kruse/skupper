@@ -32,7 +32,6 @@ import (
 
 type Controller struct {
 	self                            skupperv2alpha1.Controller
-	deploymentUid                   string
 	eventProcessor                  *watchers.EventProcessor
 	stopCh                          <-chan struct{}
 	siteWatcher                     *watchers.SiteWatcher
@@ -124,11 +123,8 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 				name = "skupper-controller"
 			}
 		}
-	} else {
-		controller.deploymentUid = string(owner.UID)
-		if name == "" {
-			name = owner.Name
-		}
+	} else if name == "" {
+		name = owner.Name
 	}
 	controller.namespaces = newNamespaceConfig(config.Namespace+"/"+name, config.requireExplicitControl(), newControlLogging(config.WatchingAllNamespaces(), controller.log))
 	controller.self.Name = name
@@ -157,7 +153,7 @@ func NewController(cli internalclient.Clients, config *Config, options ...watche
 	controller.certMgr.SetControllerContext(controller)
 	controller.certMgr.Watch(config.WatchNamespace)
 
-	controller.accessMgr = securedaccess.NewSecuredAccessManager(controller.eventProcessor, controller.certMgr, config.SecuredAccessConfig, controller)
+	controller.accessMgr = securedaccess.NewSecuredAccessManager(controller.eventProcessor, config.SecuredAccessConfig, controller)
 	controller.accessRecovery = securedaccess.NewSecuredAccessResourceWatcher(controller.accessMgr)
 	controller.accessRecovery.WatchResources(controller.eventProcessor, config.WatchNamespace)
 	controller.accessRecovery.WatchSecuredAccesses(controller.eventProcessor, config.WatchNamespace, controller.checkSecuredAccess)
@@ -200,10 +196,6 @@ func (c *Controller) Namespace() string {
 
 func (c *Controller) Name() string {
 	return c.self.Name
-}
-
-func (c *Controller) UID() string {
-	return c.deploymentUid
 }
 
 func (c *Controller) getDeploymentForPod(podName string, namespace string) (*appsv1.Deployment, error) {

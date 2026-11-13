@@ -54,6 +54,7 @@ type accessSnapshot struct {
 type accessAction struct {
 	verb, kind string
 	object     runtime.Object
+	observed   *unstructured.Unstructured // Copied snapshot for SSA success receipts.
 }
 type accessPlan struct {
 	actions       []accessAction
@@ -230,7 +231,7 @@ func applyConfiguration(observed, desired *unstructured.Unstructured, policy *la
 	maps.Copy(values, desired.GetAnnotations())
 	context.SetAnnotations(values)
 	authored := applyPolicy(policy, kind, context)
-	fields, err := resource.AppliedFields(context, "skupper-controller", desired.GetAPIVersion())
+	fields, err := resource.AppliedFields(context, applyFieldManager, desired.GetAPIVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +350,7 @@ func (p *accessPlan) planApply(s accessSnapshot, kind string, observed, desired 
 	if observed != nil {
 		verb = "update"
 	}
-	p.actions = append(p.actions, accessAction{verb: verb, kind: kind, object: configuration})
+	p.actions = append(p.actions, accessAction{verb: verb, kind: kind, object: configuration, observed: observed})
 }
 
 func planAccess(s accessSnapshot) accessPlan {
@@ -440,7 +441,7 @@ func planAccess(s accessSnapshot) accessPlan {
 					_ = proxy.writeToContourProxy(d)
 					p.planOutput(s, "HTTPProxy", s.proxies[proxy.Name], d)
 					desiredNames["HTTPProxy/"+proxy.Name] = true
-					p.endpoints = append(p.endpoints, extractEndpoint(d))
+					p.endpoints = append(p.endpoints, skupperv2alpha1.Endpoint{Name: strings.TrimPrefix(proxy.Name, sa.Name+"-"), Host: proxy.Host, Port: "443"})
 				}
 			case ACCESS_TYPE_GATEWAY:
 				for _, port := range sa.Spec.Ports {
@@ -526,10 +527,20 @@ func (m *SecuredAccessManager) executeAccess(p accessPlan) ([]accessResult, erro
 	var results []accessResult
 	executionErr := p.retryErr
 	for _, a := range p.actions {
-		start := time.Now()
-		unchanged, err := m.executeAction(a)
-		om, _ := meta.Accessor(a.object)
-		results = append(results, accessResult{verb: a.verb, kind: a.kind, namespace: om.GetNamespace(), name: om.GetName(), duration: time.Since(start), err: err, unchanged: unchanged})
+		var result *accessResult
+		var err error
+		if a.kind == "TLSRoute" && a.verb != "delete" {
+			result, err = m.executeCachedApply(a)
+		} else {
+			start := time.Now()
+			unchanged, actionErr := m.executeAction(a)
+			err = actionErr
+			om, _ := meta.Accessor(a.object)
+			result = &accessResult{verb: a.verb, kind: a.kind, namespace: om.GetNamespace(), name: om.GetName(), duration: time.Since(start), err: err, unchanged: unchanged}
+		}
+		if result != nil {
+			results = append(results, *result)
+		}
 		executionErr = errors.Join(executionErr, err)
 		if err != nil {
 			break
@@ -560,8 +571,7 @@ func (m *SecuredAccessManager) executeAccess(p accessPlan) ([]accessResult, erro
 	return results, executionErr
 }
 
-// unchanged reports a successful request with no stored mutation, not a skipped
-// request. SSA updates are classified against their resourceVersion precondition.
+// unchanged reports deletion of an already absent output.
 func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, err error) {
 	ctx := context.Background()
 	om, _ := meta.Accessor(a.object)
@@ -620,9 +630,6 @@ func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, er
 		if a.kind == "HTTPProxy" {
 			gvr = httpProxyResource
 		}
-		if a.kind == "Gateway" {
-			gvr = resource.GatewayResource()
-		}
 		c := m.clients.GetDynamicClient().Resource(gvr).Namespace(ns)
 		if a.verb == "delete" {
 			err = c.Delete(ctx, name, del)
@@ -633,28 +640,7 @@ func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, er
 				_, err = c.Update(ctx, o, metav1.UpdateOptions{})
 			}
 		} else {
-			// Apply only a complete owned projection. Retain resourceVersion as a
-			// precondition, and never force ownership conflicts. For Gateway and
-			// TLSRoute CRDs, version 0 permits creation but update validation rejects
-			// it, protecting absent snapshots from adoption races. This is not a
-			// generic SSA create-only guard for native resources.
-			if a.verb == "create" {
-				rv = "0"
-			}
-			d := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": o.GetAPIVersion(), "kind": o.GetKind(), "spec": runtime.DeepCopyJSONValue(o.Object["spec"])}}
-			d.SetName(name)
-			d.SetNamespace(ns)
-			d.SetResourceVersion(rv)
-			d.SetLabels(o.GetLabels())
-			d.SetAnnotations(o.GetAnnotations())
-			d.SetOwnerReferences(o.GetOwnerReferences())
-			data, e := json.Marshal(d)
-			if e != nil {
-				return false, e
-			}
-			var written *unstructured.Unstructured
-			written, err = c.Patch(ctx, name, types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: "skupper-controller"})
-			unchanged = err == nil && a.verb == "update" && rv != "" && written.GetResourceVersion() == rv
+			return false, fmt.Errorf("unsupported access action %s for %s", a.verb, a.kind)
 		}
 	default:
 		return false, fmt.Errorf("unknown access action object %T", a.object)
@@ -663,6 +649,56 @@ func (m *SecuredAccessManager) executeAction(a accessAction) (unchanged bool, er
 		return true, nil
 	}
 	return unchanged, err
+}
+
+const applyFieldManager = "skupper-controller"
+
+// executeCachedApply returns no action result for a receipt hit: no API request
+// was attempted. Only successful real responses can establish another receipt.
+func (m *SecuredAccessManager) executeCachedApply(a accessAction) (*accessResult, error) {
+	intent := a.object.(*unstructured.Unstructured).DeepCopy()
+	intent.SetResourceVersion("") // Execution guard, not authored intent.
+	include, err := m.applyCache.Include(a.observed, intent, applyFieldManager)
+	if err != nil || !include {
+		return nil, err
+	}
+	start := time.Now()
+	written, err := m.applyOutput(a)
+	unchanged := err == nil && a.verb == "update" && a.observed.GetResourceVersion() == written.GetResourceVersion()
+	if err == nil {
+		err = m.applyCache.Record(written, intent, applyFieldManager)
+	}
+	result := &accessResult{verb: a.verb, kind: a.kind, namespace: intent.GetNamespace(), name: intent.GetName(), duration: time.Since(start), err: err, unchanged: unchanged}
+	return result, err
+}
+
+// applyOutput returns the real SSA response so callers can record its revision.
+// Authorization and the authored projection are established during planning.
+func (m *SecuredAccessManager) applyOutput(a accessAction) (*unstructured.Unstructured, error) {
+	o := a.object.(*unstructured.Unstructured)
+	gvr := resource.TlsRouteResource()
+	if a.kind == "Gateway" {
+		gvr = resource.GatewayResource()
+	}
+	// Retain resourceVersion as a precondition, never force ownership conflicts.
+	// For Gateway and TLSRoute CRDs, version 0 permits creation but update
+	// validation rejects it. This is not a generic native SSA create-only guard.
+	rv := o.GetResourceVersion()
+	if a.verb == "create" {
+		rv = "0"
+	}
+	d := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": o.GetAPIVersion(), "kind": o.GetKind(), "spec": runtime.DeepCopyJSONValue(o.Object["spec"])}}
+	d.SetName(o.GetName())
+	d.SetNamespace(o.GetNamespace())
+	d.SetResourceVersion(rv)
+	d.SetLabels(o.GetLabels())
+	d.SetAnnotations(o.GetAnnotations())
+	d.SetOwnerReferences(o.GetOwnerReferences())
+	data, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	return m.clients.GetDynamicClient().Resource(gvr).Namespace(o.GetNamespace()).Patch(context.Background(), o.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{FieldManager: applyFieldManager})
 }
 
 func (m *SecuredAccessManager) logResults(scope, key, phase string, results []accessResult, err error) {

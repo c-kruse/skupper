@@ -65,7 +65,6 @@ func TestControllerAuthorityAcrossPodNames(t *testing.T) {
 					expected = "skupper-controller"
 				}
 				assert.Equal(t, controller.Name(), expected)
-				assert.Equal(t, controller.UID(), "controller-uid")
 			})
 		}
 	}
@@ -79,7 +78,6 @@ func TestControllerAuthorityAcrossPodNames(t *testing.T) {
 		controller, err := NewController(clients, config)
 		assert.NilError(t, err)
 		assert.Equal(t, controller.Name(), "operator-selected")
-		assert.Equal(t, controller.UID(), "")
 	})
 }
 

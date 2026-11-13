@@ -51,26 +51,25 @@ Build a desired apply configuration containing only what this scope authors,
 not a copy of the observed object. Authorize the resource independently of SSA
 field ownership. Gateway and TLSRoute scopes always plan an apply of that
 configuration, delegating merge, defaulting and ownership conflict detection to
-the API server instead of predicting them locally. There is no runtime OpenAPI
-schema discovery or client-side drift comparator. Other outputs retain their
+the API server instead of predicting them locally. Other outputs retain their
 minimal-update plans.
 
-For these SSA outputs, settled means zero **stored mutations**, not zero PATCH
-requests. Retain the observed resourceVersion as an update precondition and use
-resourceVersion `0` for an absent/create plan. A successful update whose returned
-resourceVersion equals that precondition is unchanged: log it at DEBUG and count
-the attempted action in the summary. A different returned version is a stored
-change, possibly ownership metadata or persisted defaults rather than a spec
-repair; log the apply at INFO. Never classify a failure/timeout as unchanged, or
-remove preconditions/force ownership to hide a conflict. Errors still reach the
-retrying event processor even when status reporting succeeds.
+Successful applies are recorded against the observed object's UID and
+resourceVersion, authored intent and field manager. A matching receipt skips the
+request, so settled resyncs issue no PATCHes while those receipts remain cached.
+Restart or eviction requires a fresh server evaluation; a changed observation or
+intent also requires another apply. Receipts do not predict what admission would
+do if rerun, and have no automatic admission-policy invalidation.
 
-Unchanged requests still incur API, SSA and applicable admission/validation work.
-No stored mutation means no new API watch update, but periodic informer resyncs
-still cause finite batches of applies. Admission that changes an object on every
-update can cause a successful-write feedback loop; serial processing and stable
-handler/key deduplication do not prevent such a sequential loop. DEBUG suppression
-is a logging policy, not a loop-prevention mechanism.
+For requests that are sent, retain the observed resourceVersion as an update
+precondition and use resourceVersion `0` for an absent/create plan. A successful
+update whose returned resourceVersion equals that precondition is unchanged:
+log it at DEBUG and count the attempted action in the summary. A different
+returned version is a stored change, possibly ownership metadata or persisted
+defaults rather than a spec repair; log the apply at INFO. Never classify a
+failure/timeout as unchanged, or remove preconditions/force ownership to hide a
+conflict. Errors still reach the retrying event processor even when status
+reporting succeeds.
 
 Metadata policy evaluation reads full observed labels so selectors and lexical
 template chaining work. Its outputs, built-ins, and previously applied metadata
@@ -82,13 +81,6 @@ Apply ownership for metadata retention, not resource authorization or drift
 comparison. Previously captured
 foreign keys cannot be distinguished retrospectively from authored keys using
 managedFields alone; this is not an automatic cleanup of already polluted ownership.
-
-Real-API tests must distinguish request counts from stable stored revisions at
-settled state and after restart, and cover ownership-only changes, independent
-fields, no-policy/empty metadata, policy chaining/retention, obsolete-owned-field
-removal, stale-version/create races, conflicts and live schema evolution. Exercise
-real informer/EventProcessor convergence between periodic resyncs, not only
-manually refreshed handlers.
 
 ## Site Scope
 

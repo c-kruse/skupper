@@ -39,7 +39,6 @@ type testContext struct {
 func (c *testContext) IsControlled(ns string) bool { return ns != c.excluded }
 func (c *testContext) Namespace() string           { return "controller" }
 func (c *testContext) Name() string                { return "skupper-controller" }
-func (c *testContext) UID() string                 { return "controller-uid" }
 func (c *testContext) SnapshotMetadata(ns string) *labels.LabelsAndAnnotations {
 	return c.policy.Snapshot(ns)
 }
@@ -84,7 +83,7 @@ func newHarness(t *testing.T, clients *internalclient.KubeClient) *scopeHarness 
 		clients, err = fakeclient.NewFakeClient("test", nil, nil, "")
 		assert.NilError(t, err)
 	}
-	m := NewSecuredAccessManager(clients, nil, ptrConfig(testConfig()), &testContext{policy: labels.NewLabelsAndAnnotations("controller")})
+	m := NewSecuredAccessManager(clients, ptrConfig(testConfig()), &testContext{policy: labels.NewLabelsAndAnnotations("controller")})
 	w := NewSecuredAccessResourceWatcher(m)
 	h := &scopeHarness{t: t, m: m, clients: clients, stores: map[string]cache.Store{}}
 	w.serviceWatcher = testWatcher[*corev1.Service]("Service", h.stores)
@@ -620,7 +619,7 @@ func captureScopeLogs(h *scopeHarness) (*bytes.Buffer, func() []map[string]any) 
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	h.t.Cleanup(func() { slog.SetDefault(previous) })
-	h.m.logger = NewSecuredAccessManager(h.clients, nil, ptrConfig(h.m.config), h.m.context).logger
+	h.m.logger = NewSecuredAccessManager(h.clients, ptrConfig(h.m.config), h.m.context).logger
 	return &output, func() []map[string]any {
 		h.t.Helper()
 		var records []map[string]any
